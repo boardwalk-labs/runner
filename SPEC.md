@@ -2,7 +2,7 @@
 
 > The self-hosted runner client: **your hardware executes runs for Boardwalk Cloud's control plane.** Apache-2.0. Public in **Phase 3** (when Cloud self-hosted runners ship).
 >
-> Governing context: root [`MASTER_SPEC.md`](../MASTER_SPEC.md) §1, §9. Do not confuse with the flagship engine: the flagship is the *entire control plane on your hardware, no Boardwalk involvement*; this runner is *Cloud-scheduled work executing on your machines*. Different users, different trust model.
+> Governing context: root [`MASTER_SPEC.md`](../MASTER_SPEC.md) §1, §9. Do not confuse with the flagship engine: the flagship is the _entire control plane on your hardware, no Boardwalk involvement_; this runner is _Cloud-scheduled work executing on your machines_. Different users, different trust model.
 
 ## 1. Purpose
 
@@ -22,7 +22,7 @@ Organizations that want Boardwalk Cloud's scheduling, console, and governance bu
 - Per-run workspace creation, isolation, and cleanup.
 - Artifact upload + run-event/log streaming clients (the same wire format as everywhere, MASTER_SPEC §2.5).
 - OIDC request-token flow for runs that need identity tokens.
-- **The runner contract itself** — registration/assignment/claim/heartbeat/status payload types — published from this repo as the canonical types.
+- **The runner contract itself** — registration/assignment/claim/heartbeat/status payload types — published from this repo as the canonical types. **Status: v0 DRAFT landed** (`src/contract.ts` Zod schemas + `CONTRACT.md` flows/lease state machine/security invariants), built ahead of the client so the Cloud control plane and the runner implement one definition; breaking changes allowed until the first tagged release.
 - **WorkspaceStore protocol** (`hydrate` / `persist` / `capabilities`) + a `local` reference implementation; custom store implementations are a self-hosted-only capability.
 
 ## 4. Out of scope
