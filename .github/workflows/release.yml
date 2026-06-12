@@ -1,0 +1,44 @@
+# Publish to npm with provenance on a version tag (v0.1.0 -> @boardwalk-labs/runner@0.1.0).
+# Auth: npm Trusted Publishing via GitHub OIDC (no stored token). Configure the trusted publisher
+# for @boardwalk-labs/runner on npmjs.com: org boardwalk-labs, repo boardwalk-labs/runner,
+# workflow .github/workflows/release.yml. The tag must match package.json's version (guard below).
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm --provenance (Trusted Publishing)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+      - name: Tag must match package.json version
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "tag $GITHUB_REF_NAME != package.json $PKG_VERSION" >&2
+            exit 1
+          fi
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      # Trusted Publishing needs a recent npm (>= 11.5.1); node 24's bundled npm may be older.
+      - run: npm install -g npm@latest
+      - run: npm publish --provenance --access public
