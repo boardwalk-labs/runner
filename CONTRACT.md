@@ -6,7 +6,7 @@ typed half lives in [`src/contract.ts`](./src/contract.ts) (Zod schemas, publish
 and the security invariants.
 
 > **Status: DRAFT.** Breaking changes are allowed until the first tagged release, which happens
-> when the Cloud implementation lands and Cloud self-hosted runners ship (Phase 3). The contract
+> when the platform implementation lands and Boardwalk self-hosted runners ship (Phase 3). The contract
 > is designed now so the control plane and the runner client are built against one definition
 > instead of inventing it twice.
 

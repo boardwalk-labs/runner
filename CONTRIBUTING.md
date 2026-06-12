@@ -1,7 +1,7 @@
 # Contributing to @boardwalk/runner
 
 Right now this repo is the **runner contract** (see [CONTRACT.md](./CONTRACT.md)); the client
-implementation lands with Cloud self-hosted runners. Contributions are welcome on both, with
+implementation lands with Boardwalk self-hosted runners. Contributions are welcome on both, with
 the security model as the hard boundary.
 
 ## Ground rules
@@ -16,7 +16,7 @@ the security model as the hard boundary.
   errors, types derive from schemas, union members most-specific-first, round-trip tests assert
   with `toEqual`.
 - **The runner consumes documented public endpoints only.** If a capability needs a private
-  Cloud API, the public API grows first.
+  platform API, the public API grows first.
 
 ## Workflow
 

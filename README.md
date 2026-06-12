@@ -1,12 +1,12 @@
 # @boardwalk/runner
 
 The [Boardwalk](https://boardwalk.sh) **self-hosted runner**: your machines execute runs that
-Boardwalk Cloud schedules — for data residency, special hardware, or internal-network access.
+hosted Boardwalk schedules — for data residency, special hardware, or internal-network access.
 The mental model is a CI self-hosted runner; the contract is Boardwalk-native.
 
 > Not to be confused with the [flagship engine](https://github.com/boardwalk-dev/boardwalk):
 > the engine is the _entire control plane on your hardware, no Boardwalk involvement_. This
-> runner is _Cloud-scheduled work executing on your machines_.
+> runner is _Boardwalk-scheduled work executing on your machines_.
 
 ## Status
 
@@ -20,7 +20,7 @@ import { runnerAssignmentSchema, parseContract } from "@boardwalk/runner/contrac
 [`CONTRACT.md`](./CONTRACT.md) is the prose half: flows, the lease state machine, and the
 security invariants. The contract is defined ahead of the client so the control plane and the
 runner are built against one definition. The client itself (register → poll → claim → execute →
-stream → report) ships when Cloud self-hosted runners do.
+stream → report) ships when Boardwalk self-hosted runners do.
 
 ## Security model (the part that's already final)
 

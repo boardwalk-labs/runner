@@ -3,7 +3,7 @@
 // heartbeat, and terminal status. Published from this repo (CONTRACT.md is the prose half);
 // the control plane implements the same schemas.
 //
-// DRAFT until the first tagged release: breaking changes are allowed while the Cloud
+// DRAFT until the first tagged release: breaking changes are allowed while the platform
 // implementation lands. After that, this file versions with the package, semver-strictly.
 //
 // Security invariants encoded here (see CONTRACT.md §security):
