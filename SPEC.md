@@ -1,8 +1,10 @@
-# SPEC — `boardwalk-runner`
+# SPEC — `runner`
 
 > The self-hosted runner client: **your hardware executes runs for Boardwalk's hosted control plane.** Apache-2.0. Public in **Phase 3** (when Boardwalk self-hosted runners ship).
 >
 > Governing context: root [`MASTER_SPEC.md`](../MASTER_SPEC.md) §1, §9. Do not confuse with the flagship engine: the flagship is the _entire control plane on your hardware, no Boardwalk involvement_; this runner is _Boardwalk-scheduled work executing on your machines_. Different users, different trust model.
+
+> **Naming:** repo `runner` · package `@boardwalk-labs/runner` · binary **`boardwalk-runner`**. The command is brand-prefixed (a bare `runner` on a user's PATH collides with other tools; cf. `gitlab-runner`) — the same split the `cli` repo uses to ship the `boardwalk` binary. The npm `bin` is wired to `boardwalk-runner` when the binary lands (Phase 3).
 
 ## 1. Purpose
 
