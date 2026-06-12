@@ -4,9 +4,9 @@ The [Boardwalk](https://boardwalk.sh) **self-hosted runner**: your machines exec
 hosted Boardwalk schedules — for data residency, special hardware, or internal-network access.
 The mental model is a CI self-hosted runner; the contract is Boardwalk-native.
 
-> Not to be confused with the [flagship engine](https://github.com/boardwalk-labs/boardwalk):
-> the engine is the _entire control plane on your hardware, no Boardwalk involvement_. This
-> runner is _Boardwalk-scheduled work executing on your machines_.
+> Not to be confused with the [Boardwalk engine](https://github.com/boardwalk-labs/boardwalk):
+> the engine runs the entire control plane on your hardware, with no hosted Boardwalk
+> involvement. This runner executes hosted-Boardwalk-scheduled work on your machines.
 
 ## Status
 
@@ -22,7 +22,9 @@ security invariants. The contract is defined ahead of the client so the control 
 runner are built against one definition. The client itself (register → poll → claim → execute →
 stream → report) ships when Boardwalk self-hosted runners do.
 
-## Security model (the part that's already final)
+## Security model
+
+This part of the contract is settled, even though the client isn't built yet:
 
 - The runner **never receives broad credentials**: a single-purpose registration token to join,
   a standing runner token that can only poll/claim/heartbeat, and a short-lived **run-scoped**
@@ -35,7 +37,7 @@ stream → report) ships when Boardwalk self-hosted runners do.
 - All control signals (cancel, drain) arrive in heartbeat _responses_ — there are no inbound
   connections to your machines.
 - Per-run isolation of workspace, credentials, artifacts, and logs; cross-run leakage is
-  treated as a P0.
+  treated as a critical (P0) bug.
 
 ## Develop
 
