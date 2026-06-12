@@ -1,4 +1,4 @@
-// @boardwalk/runner — the self-hosted runner client (Phase 3).
+// @boardwalk-labs/runner — the self-hosted runner client (Phase 3).
 //
 // What exists today is the CONTRACT: the canonical registration / assignment / claim /
 // heartbeat / status payload schemas the runner and the Boardwalk control plane agree on.

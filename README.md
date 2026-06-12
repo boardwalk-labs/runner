@@ -1,10 +1,10 @@
-# @boardwalk/runner
+# @boardwalk-labs/runner
 
 The [Boardwalk](https://boardwalk.sh) **self-hosted runner**: your machines execute runs that
 hosted Boardwalk schedules — for data residency, special hardware, or internal-network access.
 The mental model is a CI self-hosted runner; the contract is Boardwalk-native.
 
-> Not to be confused with the [flagship engine](https://github.com/boardwalk-dev/boardwalk):
+> Not to be confused with the [flagship engine](https://github.com/boardwalk-labs/boardwalk):
 > the engine is the _entire control plane on your hardware, no Boardwalk involvement_. This
 > runner is _Boardwalk-scheduled work executing on your machines_.
 
@@ -14,7 +14,7 @@ The mental model is a CI self-hosted runner; the contract is Boardwalk-native.
 assignment / claim / heartbeat / status payload types, as Zod schemas with derived TS types:
 
 ```ts
-import { runnerAssignmentSchema, parseContract } from "@boardwalk/runner/contract";
+import { runnerAssignmentSchema, parseContract } from "@boardwalk-labs/runner/contract";
 ```
 
 [`CONTRACT.md`](./CONTRACT.md) is the prose half: flows, the lease state machine, and the

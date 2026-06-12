@@ -21,7 +21,7 @@ body:
     id: version
     attributes:
       label: Versions
-      placeholder: "@boardwalk/cli 0.1.0, @boardwalk/workflow 0.1.0, node 24.x, macOS 15"
+      placeholder: "@boardwalk-labs/cli 0.1.0, @boardwalk-labs/workflow 0.1.0, node 24.x, macOS 15"
     validations:
       required: true
   - type: markdown

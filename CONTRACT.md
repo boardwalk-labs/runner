@@ -2,7 +2,7 @@
 
 How a runner — self-hosted or Boardwalk-hosted — talks to the Boardwalk control plane. The
 typed half lives in [`src/contract.ts`](./src/contract.ts) (Zod schemas, published as
-`@boardwalk/runner/contract`); this document is the prose half: flows, the lease state machine,
+`@boardwalk-labs/runner/contract`); this document is the prose half: flows, the lease state machine,
 and the security invariants.
 
 > **Status: DRAFT.** Breaking changes are allowed until the first tagged release, which happens
@@ -30,7 +30,7 @@ register ──▶ poll ──▶ claim ──▶ execute (heartbeating) ──�
    runner never claims goes back to the queue.
 4. **Execute.** In order: hydrate the workspace (per `workspace`), fetch the program artifact
    via the control plane and **verify `program.digest` before extraction**, validate the
-   manifest with `@boardwalk/workflow`'s schema, import `program.entry` (importing IS running),
+   manifest with `@boardwalk-labs/workflow`'s schema, import `program.entry` (importing IS running),
    stream run events in the SDK wire format, write artifacts/secrets/child-run calls through
    the control plane API with the run token.
 5. **Heartbeat** (`HeartbeatRequest` → `HeartbeatResponse`). Extends the lease AND is the
@@ -77,5 +77,5 @@ offered ──claim──▶ leased ──heartbeat──▶ leased            (
 ## What the contract deliberately does not cover
 
 Scheduling decisions, run creation, billing, and the manifest/wire-format shapes (owned by
-`@boardwalk/workflow` and carried opaquely here). The runner consumes documented public
+`@boardwalk-labs/workflow` and carried opaquely here). The runner consumes documented public
 endpoints only — if a capability isn't in the public API, the API grows first.

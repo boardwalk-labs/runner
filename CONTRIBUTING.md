@@ -1,4 +1,4 @@
-# Contributing to @boardwalk/runner
+# Contributing to @boardwalk-labs/runner
 
 Right now this repo is the **runner contract** (see [CONTRACT.md](./CONTRACT.md)); the client
 implementation lands with Boardwalk self-hosted runners. Contributions are welcome on both, with
@@ -12,7 +12,7 @@ the security model as the hard boundary.
 - **Contract changes are spec changes.** `src/contract.ts` and `CONTRACT.md` move together in
   the same PR. While the contract is DRAFT, breaking changes are fine; after the first tagged
   release they follow semver strictly.
-- **Schema discipline** (same as `@boardwalk/workflow`): strict objects, unknown fields are
+- **Schema discipline** (same as `@boardwalk-labs/workflow`): strict objects, unknown fields are
   errors, types derive from schemas, union members most-specific-first, round-trip tests assert
   with `toEqual`.
 - **The runner consumes documented public endpoints only.** If a capability needs a private

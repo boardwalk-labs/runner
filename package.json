@@ -1,5 +1,5 @@
 {
-  "name": "@boardwalk/runner",
+  "name": "@boardwalk-labs/runner",
   "version": "0.0.0",
   "description": "Boardwalk self-hosted runner: execute Cloud-scheduled runs on your own machines. Currently: the canonical runner contract types.",
   "license": "Apache-2.0",

@@ -14,7 +14,7 @@
 //   - Program bytes are NOT inlined. The runner fetches the content-addressed artifact via the
 //     control plane and MUST verify `program.digest` before extraction.
 //
-// Schema rules (same discipline as @boardwalk/workflow): strict objects — unknown fields are
+// Schema rules (same discipline as @boardwalk-labs/workflow): strict objects — unknown fields are
 // validation errors; union members most-specific-first; types derive from schemas, never
 // hand-written.
 
@@ -95,7 +95,7 @@ export const runnerAssignmentSchema = z.strictObject({
   workflow_id: id,
   workflow_version_id: id,
   /**
-   * The workflow manifest snapshot for this version. Shape is owned by @boardwalk/workflow's
+   * The workflow manifest snapshot for this version. Shape is owned by @boardwalk-labs/workflow's
    * `workflowManifestSchema`; carried opaquely here so the contract package doesn't pin the
    * SDK. Runners validate it with the SDK schema before honoring any grant in it.
    */
@@ -111,7 +111,7 @@ export const runnerAssignmentSchema = z.strictObject({
     digest: sha256Hex,
     /** Module to import after extraction, e.g. `index.mjs`. Importing it IS running it. */
     entry: z.string().min(1).max(256),
-    /** The @boardwalk/workflow version range the artifact was built against (layer compat). */
+    /** The @boardwalk-labs/workflow version range the artifact was built against (layer compat). */
     sdk_version: z.string().min(1).max(64),
   }),
   runs_on: assignmentRunsOnSchema,
@@ -141,7 +141,7 @@ export const runnerAssignmentSchema = z.strictObject({
     memory_mb: z.number().int().positive(),
     cpu_units: z.number().int().positive().optional(),
   }),
-  /** Run-permission grants; shape owned by @boardwalk/workflow (carried opaquely, like manifest). */
+  /** Run-permission grants; shape owned by @boardwalk-labs/workflow (carried opaquely, like manifest). */
   permissions: z.record(z.string(), z.unknown()).optional(),
   /** Present iff the manifest grants an identity token. */
   oidc: z
@@ -154,7 +154,7 @@ export const runnerAssignmentSchema = z.strictObject({
   artifacts: z.strictObject({
     prefix: z.string().min(1).max(512),
   }),
-  /** Run-event stream coordinates (wire format owned by @boardwalk/workflow). */
+  /** Run-event stream coordinates (wire format owned by @boardwalk-labs/workflow). */
   log_stream: z.strictObject({
     channel: z.string().min(1).max(256),
     cursor_start: z.number().int().nonnegative(),
