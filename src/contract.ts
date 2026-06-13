@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The Boardwalk runner contract — the canonical payload types between a runner (hosted or
 // self-hosted) and the Boardwalk control plane: registration, assignment, claim/lease,
 // heartbeat, and terminal status. Published from this repo (CONTRACT.md is the prose half);

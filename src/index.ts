@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // @boardwalk-labs/runner — the self-hosted runner client (Phase 3).
 //
 // What exists today is the CONTRACT: the canonical registration / assignment / claim /
