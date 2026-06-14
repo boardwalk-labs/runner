@@ -65,7 +65,7 @@ offered ──claim──▶ leased ──heartbeat──▶ leased            (
    call against that run's manifest. The contract has no field for anything broader, on
    purpose.
 2. **Secrets are never in the assignment.** They resolve per run, through the control plane,
-   with the run token, fail-closed against `meta.secrets`. Nothing org-wide is ever stored on
+   with the run token, fail-closed against `permissions.secrets`. Nothing org-wide is ever stored on
    the runner machine.
 3. **Programs are content-addressed.** No raw source, no runtime transpile, no dependency
    install. The digest is verified before extraction; a mismatch aborts the run.
