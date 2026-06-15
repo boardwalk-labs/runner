@@ -21,7 +21,7 @@ const ASSIGNMENT = {
   org_id: "org_1",
   workflow_id: "wf_1",
   workflow_version_id: "wfv_1",
-  manifest: { name: "nightly", triggers: [{ kind: "cron", expr: "0 9 * * *" }] },
+  manifest: { slug: "nightly", triggers: [{ kind: "cron", expr: "0 9 * * *" }] },
   input: { day: "monday" },
   program: {
     digest: "a".repeat(64),
