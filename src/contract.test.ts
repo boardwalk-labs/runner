@@ -188,7 +188,9 @@ describe("parseContract", () => {
       caught = err;
     }
     expect(caught).toBeInstanceOf(ContractValidationError);
-    expect((caught as Error).message).toContain("claim request");
-    expect((caught as Error).message).toContain("assignment_id");
+    // Narrow via instanceof instead of an `as Error` cast (matches the SDK's no-cast-in-tests rule).
+    const message = caught instanceof Error ? caught.message : String(caught);
+    expect(message).toContain("claim request");
+    expect(message).toContain("assignment_id");
   });
 });
