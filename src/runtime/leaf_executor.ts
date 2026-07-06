@@ -42,6 +42,11 @@ import type { BudgetMeter, UsageDelta } from "./agent/budget.js";
 import type { SecretRedactor } from "./agent/secret_redactor.js";
 import type { AgentIdentity, RunEventBody, TokenUsage, TurnEventSink } from "./agent/events.js";
 import type { InferenceProxyTransport } from "./inference_transport.js";
+import {
+  directProviderFor,
+  streamDirectTurn,
+  type DirectInferenceDeps,
+} from "./direct_inference.js";
 import type { LeafExecutor } from "./workflow_host.js";
 import { throwIfAborted } from "./run_abort.js";
 
@@ -62,6 +67,11 @@ export interface MeterUsageInput {
 export interface EngineLeafExecutorDeps {
   /** Streams one model turn through the broker (RunnerControlClient satisfies it). */
   inference: InferenceProxyTransport;
+  /** Runner-direct BYO inference (docs/SELF_HOSTED_RUNNERS.md D7): when a per-`agent()` provider
+   *  matches this registry (key-based HTTP sources only), the turn goes STRAIGHT to the org's
+   *  endpoint with the engine adapters — the managed lane and bedrock stay brokered. Omitted ⇒
+   *  everything brokered (legacy dispatch without a registry). */
+  byo?: DirectInferenceDeps;
   /** RUN-level meter, shared across every leaf so caps + token totals span the whole run. The engine
    *  reports usage after EVERY model call via `reportUsage`; we feed it here and throw on a cap
    *  breach so the loop terminates mid-flight (the budget authority). */
@@ -310,6 +320,31 @@ export class EngineLeafExecutor implements LeafExecutor {
     signal: AbortSignal | undefined,
     onCost?: (costMicros: number) => void,
   ): Promise<ModelTurnResult> {
+    // Runner-direct BYO (D7): the org's own endpoint + key, called with the same engine adapters
+    // the broker uses. No platform cost (BYO is never metered) — onCost stays untouched.
+    // A direct turn needs an explicit model (an omitted model means the managed auto lane,
+    // which is always brokered).
+    const directModel = req.model;
+    const direct =
+      this.deps.byo === undefined || directModel === undefined
+        ? null
+        : directProviderFor(this.deps.byo.registry, req.provider);
+    if (direct !== null && this.deps.byo !== undefined && directModel !== undefined) {
+      throwIfAborted(signal);
+      const out = await streamDirectTurn(
+        this.deps.byo,
+        direct,
+        {
+          model: directModel,
+          messages: req.messages,
+          tools: req.tools,
+          ...(req.reasoning !== undefined ? { reasoning: req.reasoning } : {}),
+        },
+        providerIo.onDelta,
+      );
+      throwIfAborted(signal);
+      return { turn: out.turn, modelRef: out.modelRef };
+    }
     let result: ModelTurnResult | null = null;
     for await (const frame of this.deps.inference.streamInference({
       model: req.model,

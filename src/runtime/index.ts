@@ -38,6 +38,8 @@ import type { Run } from "./wire/run.js";
 import type { WorkflowManifest } from "./wire/manifest.js";
 import { RecordingSecretResolver } from "./recording_secret_resolver.js";
 import { EngineLeafExecutor } from "./leaf_executor.js";
+import { parseByoProviders } from "./direct_inference.js";
+import type { ByoInferenceProvider } from "../contract.js";
 import { WorkerWorkflowHost, type RuntimeContext } from "./workflow_host.js";
 import {
   runProgramWorker,
@@ -73,6 +75,9 @@ export interface WorkerRuntime {
   workspaceRoot: string;
   /** The run this worker task is executing (RUN_ID) — binds the Runner Control API client. */
   runId: string;
+  /** The org's BYO inference providers (claim-delivered, BOARDWALK_BYO_PROVIDERS) for the
+   *  runner-direct model path (D7). Empty/omitted ⇒ every model call goes through the broker. */
+  byoProviders?: readonly ByoInferenceProvider[];
   /** Broker control-plane handle (run token + base URL), injected by the dispatcher as
    *  BOARDWALK_CONTROL_PLANE_URL + BOARDWALK_RUN_TOKEN. The runner's ONLY broker credential.
    *  `apiToken` is the run's separate public-API bearer (was BOARDWALK_API_KEY) — served to the
@@ -211,6 +216,16 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     const lspService = new LspService({ workspaceDir: runtime.workspaceRoot });
     const leaf = new EngineLeafExecutor({
       inference: broker,
+      // Direct BYO (D7): the claim's registry + the run's RECORDING resolver, so a provider key
+      // registers with the redactor the moment it resolves.
+      ...(runtime.byoProviders !== undefined && runtime.byoProviders.length > 0
+        ? {
+            byo: {
+              registry: runtime.byoProviders,
+              resolveSecret: (name: string) => secretResolver.resolve({ name }),
+            },
+          }
+        : {}),
       budget,
       redactor,
       toolHost,
@@ -549,12 +564,16 @@ export async function main(): Promise<void> {
   const platform = capturePlatformContext(process.env);
   const runId = platform.runId;
 
+  const byoProviders = parseByoProviders(process.env.BOARDWALK_BYO_PROVIDERS);
+  Reflect.deleteProperty(process.env, "BOARDWALK_BYO_PROVIDERS");
+
   const deps = assembleWorkerDeps({
     workerId: process.env.WORKER_ID ?? `worker-${runId}`,
     workspaceRoot: process.env.WORKSPACE_ROOT ?? "/workspace",
     runId,
     controlPlane: platform.controlPlane,
     vcpus: platform.vcpus,
+    ...(byoProviders.length > 0 ? { byoProviders } : {}),
   });
 
   // The only thing to drain is the batched telemetry buffer — the runner opens no DB/Redis/SQS.
