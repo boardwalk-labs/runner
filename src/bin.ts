@@ -197,7 +197,7 @@ const RUNNER_VERSION: string = (() => {
       readFileSync(new URL("../package.json", import.meta.url), "utf8"),
     );
     if (typeof pkg === "object" && pkg !== null && "version" in pkg) {
-      const v = (pkg as { version: unknown }).version;
+      const v: unknown = pkg.version;
       if (typeof v === "string") return v;
     }
   } catch {
