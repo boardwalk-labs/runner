@@ -1,0 +1,197 @@
+// WorkflowProgramRunner — executes a workflow program (the JS-body model, docs/WORKFLOW_RUNTIME.md).
+//
+// A run is the execution of a built program ARTIFACT (§3.9): the worker is handed the VERIFIED tarball
+// (its sha256 already checked against the pinned digest by the orchestrator) plus the entry module
+// name. This module is the mechanism: it installs the host adapter + trigger payload onto the
+// `@boardwalk-labs/workflow` singleton, extracts the artifact into a unique temp dir under a
+// node_modules-reachable root, and dynamic-imports the entry so the program's body runs. The
+// program's `import { agent, sleep, … } from "@boardwalk-labs/workflow"` resolves to the SAME package
+// instance the host was installed on (one instance per process), so the hooks reach our adapter.
+//
+// The artifact is already BUILT JS (the CLI esbuild-bundles packages; the api-server type-strips
+// single files) — so the worker NEVER transpiles and NEVER installs. It only extracts + imports.
+// `@boardwalk-labs/workflow` is left external in the bundle, so the imported program resolves it to the SDK
+// package present in the worker image (giving up its own copy would break the dual-adapter).
+//
+// Why a temp dir under a node_modules-reachable root (not os.tmpdir): the program imports the bare
+// specifier `@boardwalk-labs/workflow`, which Node resolves by walking up from the module's location to
+// `node_modules`. The extracted tree must therefore live inside the app tree (/app/.bw-runs/*).
+//
+// Durability: the body runs once, in-process. `sleep`/`workflows.call` hold in-process via the host
+// (no checkpoint, no exit). A crash mid-run restarts the run from the top (handled by the
+// worker/scheduler-sweep, not here). Output capture is deferred (v0 returns null).
+
+import { mkdir, writeFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { randomUUID } from "node:crypto";
+import {
+  installHost,
+  installInput,
+  installConfig,
+  takeDeclaredOutput,
+  resetRuntime,
+} from "@boardwalk-labs/workflow/runtime";
+import type { WorkflowHost, JsonValue } from "@boardwalk-labs/workflow/runtime";
+import { createLogger } from "./support/index.js";
+import { SuspendError, type SuspendSignal } from "./suspension.js";
+
+const log = createLogger("ProgramRunner");
+
+/** Subdirectory (under the work root) that holds transient extracted program trees. */
+const RUN_DIR = ".bw-runs";
+/** Scratch filename for the in-flight artifact tarball inside a run's dir. */
+const ARTIFACT_FILE = "__program.tgz";
+
+export interface RunProgramArgs {
+  /** Run id — used for the temp dir path + correlation. */
+  runId: string;
+  /** The VERIFIED program artifact tarball (sha256 already checked against the pinned digest). */
+  tarball: Uint8Array;
+  /** Entry module to import after extraction (a safe relative POSIX path, e.g. `index.mjs`). */
+  entry: string;
+  /** Trigger payload exposed to the program as `import { input } from "@boardwalk-labs/workflow"`. */
+  input: unknown;
+  /** Experiment config exposed as `import { config } from "@boardwalk-labs/workflow"` ({} for non-eval).
+   *  Arbitrary JSON from the run row; narrowed to the SDK's JsonValue at the installConfig boundary. */
+  config: Record<string, unknown>;
+}
+
+export interface ProgramRunnerDeps {
+  /** The host adapter the program's hooks delegate to (agent leaf, sleep hold, child calls, secrets). */
+  host: WorkflowHost;
+  /**
+   * Extract a gzipped tar file into a directory (created already). System `tar` in production
+   * (matches WorkspaceArchiver); injected in tests. The artifact's relative layout is preserved so
+   * on-disk assets (markdown skills, templates) sit where the program expects them.
+   */
+  extract: (tgzPath: string, destDir: string) => Promise<void>;
+  /**
+   * Called once with the extracted program directory, right after the artifact is unpacked (before the
+   * program body runs). The worker uses it to point the `agent()` leaf at the run's bundled files
+   * (`<dir>/skills/<name>.md`). Optional — the local/test path may omit it.
+   */
+  onExtracted?: (programDir: string) => void;
+  /**
+   * Root whose tree can resolve `@boardwalk-labs/workflow` (has `node_modules` reachable). The extracted
+   * program lives under here so its bare SDK import resolves to the same package instance the host
+   * was installed on. Defaults to `process.cwd()`.
+   */
+  workRoot?: string;
+  /**
+   * Scrubs known secret values out of a string (the run's `SecretRedactor.redactText`). Applied to a
+   * top-level throw's message before it is logged AND before it is returned to the worker — a program
+   * that resolves a secret and then throws it in an error message must NOT land that secret raw in the
+   * logs or the finalized run output (MASTER_SPEC §12, review #5). Defaults to identity (tests/local).
+   */
+  redactText?: (text: string) => string;
+  /**
+   * Called once with the program's declared output IFF the program called `output(value)` (so an
+   * explicit `output(null)` still fires, but a program that never declared one does NOT). The worker
+   * wires this to emit an `output` activity entry into the run's event log. Best-effort: it must not
+   * throw (a telemetry hiccup can't change the run's result). Absent ⇒ no output entry.
+   */
+  onOutput?: (value: unknown) => void;
+  /**
+   * Resolves when a host seam SUSPENDS the run (docs/SUSPENSION.md) — the worker wires it to the
+   * host's `onSuspend` so a suspend is surfaced OUT OF BAND, racing the program body. The program's
+   * own `try/catch` can't swallow a suspend this way (the suspending seam never resolves; this signal
+   * short-circuits at the runner). Absent ⇒ no suspension wired (a seam that suspends throws
+   * {@link SuspendError} instead, which is caught here just the same).
+   */
+  suspendSignal?: Promise<SuspendSignal>;
+}
+
+/** Terminal (or suspended) result of running a workflow program. `output` is what the program
+ *  declared via `output(value)` (null when it never did); for a failure it's null and `error` is set;
+ *  for a suspension the `signal` carries the wake condition (the worker persists it, no finalize). */
+export type ProgramResult =
+  | { kind: "completed"; output: unknown }
+  | { kind: "failed"; output: null; error: { code: string; message: string } }
+  | { kind: "suspended"; signal: SuspendSignal };
+
+/**
+ * Run a workflow program to completion. Installs the host + input, extracts the VERIFIED artifact +
+ * dynamic-imports its entry (which runs the body), and returns the terminal result. Always tears the
+ * runtime state down and removes the temp tree afterward.
+ */
+export async function runWorkflowProgram(
+  args: RunProgramArgs,
+  deps: ProgramRunnerDeps,
+): Promise<ProgramResult> {
+  const workRoot = deps.workRoot ?? process.cwd();
+  const dir = join(workRoot, RUN_DIR, `${args.runId}-${randomUUID()}`);
+
+  installHost(deps.host);
+  installInput(args.input);
+  // The run row's config is arbitrary JSON (jsonb); it IS valid JSON, so narrow to the SDK's JsonValue.
+  installConfig(args.config as Record<string, JsonValue>);
+  try {
+    await mkdir(dir, { recursive: true });
+    const tgzPath = join(dir, ARTIFACT_FILE);
+    await writeFile(tgzPath, args.tarball);
+    // Extract the built tree (entry + sourcemap + assets) preserving relative layout, then drop the
+    // tarball so it isn't visible to the program.
+    await deps.extract(tgzPath, dir);
+    await rm(tgzPath, { force: true });
+    // The bundled tree is now on disk — let the worker point the agent() leaf at `<dir>/skills/*.md`.
+    deps.onExtracted?.(dir);
+
+    const entryPath = join(dir, ...args.entry.split("/"));
+    // Run the program body. A SUSPEND is surfaced two ways and both land here as a `suspended`
+    // result: (a) out of band via `suspendSignal` — racing the body, immune to a program's own
+    // try/catch (the suspending seam never resolves); (b) a thrown {@link SuspendError} on the
+    // no-`onSuspend` path. Everything else is the program's natural completion / failure.
+    const body = runProgramBody(entryPath, deps);
+    const result =
+      deps.suspendSignal === undefined
+        ? await body
+        : await Promise.race([
+            body,
+            deps.suspendSignal.then((signal): ProgramResult => ({ kind: "suspended", signal })),
+          ]);
+    // If the suspend won the race, the body promise is abandoned (its suspending seam never settles);
+    // swallow any late settle so it can't surface as an unhandled rejection before the process exits.
+    void body.catch(() => undefined);
+    return result;
+  } catch (err) {
+    if (err instanceof SuspendError) return { kind: "suspended", signal: err.signal };
+    const redactText = deps.redactText ?? ((s: string): string => s);
+    // Redact BEFORE both sinks: the message can carry a secret the program resolved then threw.
+    const message = redactText(err instanceof Error ? err.message : String(err));
+    log.error("program_failed", { runId: args.runId, error: message });
+    return {
+      kind: "failed",
+      output: null,
+      error: {
+        // `code` is the error class name (e.g. "Error", "AppError"), not user content — left as-is.
+        code: err instanceof Error ? err.name : "PROGRAM_ERROR",
+        message,
+      },
+    };
+  } finally {
+    resetRuntime();
+    await rm(dir, { recursive: true, force: true }).catch((rmErr: unknown) => {
+      log.warn("program_cleanup_failed", {
+        runId: args.runId,
+        error: rmErr instanceof Error ? rmErr.message : String(rmErr),
+      });
+    });
+  }
+}
+
+/**
+ * Import (= run) the program entry and capture its declared output. Resolves to a `completed`
+ * result; a program failure (or a {@link SuspendError} on the no-`onSuspend` path) THROWS and is
+ * handled by the caller. A unique dir per run gives a fresh URL so the module cache never returns an
+ * already-run program; `@vite-ignore` keeps vitest/vite from statically analyzing the runtime URL.
+ */
+async function runProgramBody(entryPath: string, deps: ProgramRunnerDeps): Promise<ProgramResult> {
+  await import(/* @vite-ignore */ pathToFileURL(entryPath).href);
+  // The program declares its result via `output(value)` (top-level code can't `return`); null when it
+  // never called it. This becomes the run's persisted output + a `workflows.call` parent's value, and
+  // (when actually declared) an `output` entry in the run's activity log.
+  const declared = takeDeclaredOutput();
+  if (declared !== null) deps.onOutput?.(declared.value);
+  return { kind: "completed", output: declared !== null ? declared.value : null };
+}
