@@ -67,6 +67,7 @@ describe("registration", () => {
   it("round-trips a response", () => {
     const value = {
       runner_id: "01H_runner",
+      pool: "default",
       runner_token: "bwkr_raw",
       poll: { url: "https://api.boardwalk.sh/runner/v1/pool/poll", interval_seconds: 5 },
     };

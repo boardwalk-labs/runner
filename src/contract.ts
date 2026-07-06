@@ -66,6 +66,8 @@ export type RunnerRegistrationRequest = z.infer<typeof runnerRegistrationRequest
 
 export const runnerRegistrationResponseSchema = z.strictObject({
   runner_id: id,
+  /** The pool the (pool-bound) registration token enrolled this runner into. */
+  pool: z.string().min(1).max(120),
   /**
    * The runner's standing identity credential: it can poll for assignments, claim, heartbeat,
    * and deregister — and nothing else. Per-run capability comes only from a claim's run token.

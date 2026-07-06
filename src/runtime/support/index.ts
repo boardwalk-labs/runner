@@ -94,7 +94,19 @@ export interface Logger {
   error(message: string, fields?: LogFields): void;
 }
 
+const LEVEL_ORDER: Record<string, number> = { DEBUG: 10, INFO: 20, WARN: 30, ERROR: 40 };
+
+/** Active log level: BOARDWALK_RUNNER_LOG_LEVEL (debug|info|warn|error), default info.
+ *  BOARDWALK_RUNNER_DEBUG=1 is a legacy alias for debug. Read per call so a CLI flag that
+ *  sets the env (e.g. `--verbose` / `--debug`) applies without logger re-creation. */
+function activeLevel(): number {
+  if (process.env.BOARDWALK_RUNNER_DEBUG === "1") return LEVEL_ORDER.DEBUG ?? 10;
+  const name = process.env.BOARDWALK_RUNNER_LOG_LEVEL?.toUpperCase() ?? "INFO";
+  return LEVEL_ORDER[name] ?? 20;
+}
+
 function emit(level: string, module: string, message: string, fields?: LogFields): void {
+  if ((LEVEL_ORDER[level] ?? 20) < activeLevel()) return;
   const line = JSON.stringify({
     level,
     message,
@@ -109,7 +121,7 @@ function emit(level: string, module: string, message: string, fields?: LogFields
 export function createLogger(module: string): Logger {
   return {
     debug: (m, f) => {
-      if (process.env.BOARDWALK_RUNNER_DEBUG === "1") emit("DEBUG", module, m, f);
+      emit("DEBUG", module, m, f);
     },
     info: (m, f) => {
       emit("INFO", module, m, f);
