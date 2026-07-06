@@ -17,6 +17,7 @@
 // daemon) and the spawned run processes both honor it.
 
 import { spawn as nodeSpawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -188,7 +189,22 @@ async function cmdDeregister(): Promise<void> {
   process.stdout.write(`Deregistered runner ${identity.runner_id}.\n`);
 }
 
-const RUNNER_VERSION = "0.1.1";
+// The client's own version (contract `runner_version`), read from package.json so a release
+// bump is one file. Resolved relative to the compiled dist/bin.js.
+const RUNNER_VERSION: string = (() => {
+  try {
+    const pkg: unknown = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    );
+    if (typeof pkg === "object" && pkg !== null && "version" in pkg) {
+      const v = (pkg as { version: unknown }).version;
+      if (typeof v === "string") return v;
+    }
+  } catch {
+    // fall through
+  }
+  return "0.0.0";
+})();
 
 const USAGE = `boardwalk-runner <register|start|deregister> [flags]
 
