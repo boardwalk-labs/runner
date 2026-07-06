@@ -10,17 +10,33 @@ The mental model is a CI self-hosted runner; the contract is Boardwalk-native.
 
 ## Status
 
-**Pre-release.** What exists today is the **runner contract** — the canonical registration /
-assignment / claim / heartbeat / status payload types, as Zod schemas with derived TS types:
+**Pre-release, functional.** The package now carries all three layers:
 
-```ts
-import { runnerAssignmentSchema, parseContract } from "@boardwalk-labs/runner/contract";
+- **`@boardwalk-labs/runner/contract`** — the canonical registration / offer / claim /
+  heartbeat payload types (Zod schemas, derived TS types). [`CONTRACT.md`](./CONTRACT.md) is
+  the prose half: flows, the lease state machine, and the security invariants.
+- **`@boardwalk-labs/runner/runtime`** — the Boardwalk worker runtime itself: the same code a
+  Boardwalk-hosted Fargate worker boots executes each claimed run here (one worker, two homes).
+- **`boardwalk-runner`** (the bin) + **`@boardwalk-labs/runner/daemon`** — the machine daemon:
+  register once, then poll → claim → run → heartbeat → clean.
+
+## Quickstart
+
+An org admin mints a one-time registration token (Boardwalk Settings > Runners), then on the
+machine:
+
+```sh
+boardwalk-runner register --url https://api.boardwalk.sh --token bwkreg_...
+boardwalk-runner start --url https://api.boardwalk.sh --pool default
 ```
 
-[`CONTRACT.md`](./CONTRACT.md) is the prose half: flows, the lease state machine, and the
-security invariants. The contract is defined ahead of the client so the control plane and the
-runner are built against one definition. The client itself (register → poll → claim → execute →
-stream → report) ships when Boardwalk self-hosted runners do.
+`start` polls for runs targeting `runs_on: { kind: "self-hosted" }` and executes one at a
+time; run more daemons (or machines) for concurrency. `Ctrl-C` drains: the current run
+finishes, nothing new is claimed. Useful flags: `--once` (execute one run, then exit),
+`--verbose` (debug-level daemon logs), `--debug` (also debug-logs inside each run process),
+`--work-dir`, `--identity-dir`. Behind a corporate proxy, launch with `NODE_USE_ENV_PROXY=1`
+and `HTTPS_PROXY` set; the daemon and the run processes both honor it. Runs inherit this
+machine's network — a model or service reachable from the box is reachable from the run.
 
 ## Security model
 
