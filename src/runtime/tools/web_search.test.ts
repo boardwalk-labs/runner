@@ -47,7 +47,7 @@ beforeEach(() => {
 describe("web_search tool", () => {
   it("posts to the Tavily endpoint with the resolved api key + clamped max_results", async () => {
     const tool = makeWebSearchTool({
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      fetchImpl: fetchImpl,
       resolveApiKey: () => Promise.resolve("tvly-test"),
     });
     await tool.invoke({ query: "boardwalk", max_results: 50 }, ctx);
@@ -68,7 +68,7 @@ describe("web_search tool", () => {
 
   it("projects results onto the wire shape and surfaces the answer when present", async () => {
     const tool = makeWebSearchTool({
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      fetchImpl: fetchImpl,
       resolveApiKey: () => Promise.resolve("k"),
     });
     const out = output(await tool.invoke({ query: "boardwalk" }, ctx));
@@ -86,7 +86,7 @@ describe("web_search tool", () => {
 
   it("omits content fields when include_content=false", async () => {
     const tool = makeWebSearchTool({
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      fetchImpl: fetchImpl,
       resolveApiKey: () => Promise.resolve("k"),
     });
     const out = output(await tool.invoke({ query: "boardwalk" }, ctx));
@@ -95,7 +95,7 @@ describe("web_search tool", () => {
 
   it("includes raw_content as content when include_content=true", async () => {
     const tool = makeWebSearchTool({
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      fetchImpl: fetchImpl,
       resolveApiKey: () => Promise.resolve("k"),
     });
     const out = output(await tool.invoke({ query: "boardwalk", include_content: true }, ctx));
@@ -104,7 +104,7 @@ describe("web_search tool", () => {
 
   it("propagates search_depth=advanced and trims chunks_per_source to 1", async () => {
     const tool = makeWebSearchTool({
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      fetchImpl: fetchImpl,
       resolveApiKey: () => Promise.resolve("k"),
     });
     await tool.invoke({ query: "boardwalk", search_depth: "advanced" }, ctx);
@@ -117,7 +117,7 @@ describe("web_search tool", () => {
 
   it("does NOT send chunks_per_source in basic mode (only valid for advanced)", async () => {
     const tool = makeWebSearchTool({
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      fetchImpl: fetchImpl,
       resolveApiKey: () => Promise.resolve("k"),
     });
     await tool.invoke({ query: "boardwalk" }, ctx);
@@ -191,7 +191,7 @@ describe("web_search tool", () => {
 
   it("clamps max_results=0 up to 1", async () => {
     const tool = makeWebSearchTool({
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      fetchImpl: fetchImpl,
       resolveApiKey: () => Promise.resolve("k"),
     });
     // Schema requires positive int, so manually feed an invalid value via parse to

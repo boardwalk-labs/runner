@@ -90,14 +90,14 @@ describe("artifacts — write", () => {
     expect(h.writes).toEqual([
       { name: "report.json", contentType: "application/json", body: '{"ok":true}' },
     ]);
+    if (out.data.op !== "write") throw new Error("expected write");
     expect(out.data).toMatchObject({
       op: "write",
       id: "01H_newart",
       name: "report.json",
       sizeBytes: 42,
-      signedUrl: expect.stringContaining("cdn.boardwalk.sh"),
     });
-    if (out.data.op !== "write") throw new Error("expected write");
+    expect(out.data.signedUrl).toContain("cdn.boardwalk.sh");
     expect(out.data.expiresAt).toBe(NOW + 3600 * 1000);
   });
 
