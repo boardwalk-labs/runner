@@ -2,195 +2,185 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  assignmentOfferSchema,
   assignmentPollResponseSchema,
-  claimRequestSchema,
+  byoInferenceProviderSchema,
   claimResponseSchema,
   ContractValidationError,
   heartbeatRequestSchema,
   heartbeatResponseSchema,
   parseContract,
-  runnerAssignmentSchema,
   runnerRegistrationRequestSchema,
   runnerRegistrationResponseSchema,
-  statusReportSchema,
 } from "./contract.js";
 
-const ASSIGNMENT = {
-  assignment_id: "asg_1",
-  run_id: "run_1",
-  org_id: "org_1",
-  workflow_id: "wf_1",
-  workflow_version_id: "wfv_1",
-  manifest: { slug: "nightly", triggers: [{ kind: "cron", expr: "0 9 * * *" }] },
-  input: { day: "monday" },
-  program: {
-    digest: "a".repeat(64),
-    entry: "index.mjs",
-    sdk_version: "^0.1.0",
+const OFFER = {
+  assignment_id: "01H_assignment",
+  run_id: "01H_run",
+  org_id: "01H_org",
+  runs_on: { kind: "self-hosted", pool: "default", labels: ["gpu"] },
+  queued_at: 1_700_000_000_000,
+};
+
+const CLAIM = {
+  lease_id: "01H_assignment",
+  run_id: "01H_run",
+  lease_expires_at: 1_700_000_300_000,
+  control_plane: {
+    base_url: "https://api.boardwalk.sh",
+    run_token: "run-token",
+    api_token: "api-token",
   },
-  runs_on: { kind: "self-hosted", pool: "gpu-pool", labels: ["cuda"] },
-  control_plane: { base_url: "https://api.example.com/runner/v1", run_token: "rt_short_lived" },
-  workspace: {
-    path: "/workspace",
-    tmp_path: "/tmp",
-    cleanup: "always",
-    persist: true,
-    store: { kind: "managed" },
-  },
-  limits: { timeout_seconds: 3600, memory_mb: 4096, cpu_units: 2048 },
-  permissions: { artifacts: "write" },
-  oidc: { request_url: "https://api.example.com/runner/v1/oidc", request_token: "ot_1" },
-  artifacts: { prefix: "orgs/org_1/runs/run_1" },
-  log_stream: { channel: "runs/run_1/events", cursor_start: 0 },
-} as const;
-
-describe("runnerAssignmentSchema", () => {
-  it("round-trips a full assignment (toEqual, not toBeDefined)", () => {
-    expect(runnerAssignmentSchema.parse(ASSIGNMENT)).toEqual(ASSIGNMENT);
-  });
-
-  it("accepts a hosted-label runs_on and minimal optionals", () => {
-    const hosted: Record<string, unknown> = { ...ASSIGNMENT, runs_on: "boardwalk/linux" };
-    delete hosted.permissions;
-    delete hosted.oidc;
-    expect(runnerAssignmentSchema.parse(hosted)).toEqual(hosted);
-  });
-
-  it("rejects unknown fields (no silent credential smuggling)", () => {
-    expect(() =>
-      runnerAssignmentSchema.parse({ ...ASSIGNMENT, platform_credentials: { key: "x" } }),
-    ).toThrow();
-  });
-
-  it("rejects a malformed program digest", () => {
-    expect(() =>
-      runnerAssignmentSchema.parse({
-        ...ASSIGNMENT,
-        program: { ...ASSIGNMENT.program, digest: "not-a-digest" },
-      }),
-    ).toThrow(/sha256/);
-  });
-
-  it("rejects a workspace cleanup other than 'always'", () => {
-    expect(() =>
-      runnerAssignmentSchema.parse({
-        ...ASSIGNMENT,
-        workspace: { ...ASSIGNMENT.workspace, cleanup: "never" },
-      }),
-    ).toThrow();
-  });
-
-  it("poll response carries one assignment or null", () => {
-    expect(assignmentPollResponseSchema.parse({ assignment: null })).toEqual({
-      assignment: null,
-    });
-    expect(assignmentPollResponseSchema.parse({ assignment: ASSIGNMENT })).toEqual({
-      assignment: ASSIGNMENT,
-    });
-  });
-});
+  env: { REGION: "us-east-1" },
+  byo_providers: [
+    {
+      name: "my-vllm",
+      source: "openai_compatible",
+      base_url: "http://10.0.0.5:8000",
+      auth_secret_name: "VLLM_KEY",
+    },
+  ],
+};
 
 describe("registration", () => {
-  it("round-trips a request and applies the labels default", () => {
-    const req = {
-      registration_token: "reg_1",
-      pool: "default",
-      name: "build-box-3",
-      os: "linux",
+  it("round-trips a request and applies the labels default (no pool — the token binds it)", () => {
+    const parsed = runnerRegistrationRequestSchema.parse({
+      registration_token: "bwkreg_raw",
+      name: "mac-mini-1",
+      os: "macos",
       arch: "arm64",
       runner_version: "0.1.0",
-    };
-    expect(runnerRegistrationRequestSchema.parse(req)).toEqual({ ...req, labels: [] });
+    });
+    expect(parsed.labels).toEqual([]);
+    expect(parsed.name).toBe("mac-mini-1");
+  });
+
+  it("rejects a pool field (bound at token mint, not at registration)", () => {
+    const res = runnerRegistrationRequestSchema.safeParse({
+      registration_token: "t",
+      name: "m",
+      pool: "default",
+    });
+    expect(res.success).toBe(false);
   });
 
   it("round-trips a response", () => {
-    const res = {
-      runner_id: "rnr_1",
-      runner_token: "rt_standing",
-      poll: { url: "https://api.example.com/runner/v1/assignments", interval_seconds: 15 },
+    const value = {
+      runner_id: "01H_runner",
+      runner_token: "bwkr_raw",
+      poll: { url: "https://api.boardwalk.sh/runner/v1/pool/poll", interval_seconds: 5 },
     };
-    expect(runnerRegistrationResponseSchema.parse(res)).toEqual(res);
+    expect(runnerRegistrationResponseSchema.parse(value)).toEqual(value);
   });
 
   it("rejects an unknown os", () => {
-    expect(() =>
-      runnerRegistrationRequestSchema.parse({
-        registration_token: "r",
-        pool: "p",
-        name: "n",
-        os: "freebsd",
-        arch: "x64",
-        runner_version: "0.1.0",
-      }),
-    ).toThrow();
+    const res = runnerRegistrationRequestSchema.safeParse({
+      registration_token: "t",
+      name: "m",
+      os: "beos",
+    });
+    expect(res.success).toBe(false);
   });
 });
 
-describe("claim / heartbeat / status", () => {
-  it("claim round-trips", () => {
-    const req = { runner_id: "rnr_1", assignment_id: "asg_1" };
-    expect(claimRequestSchema.parse(req)).toEqual(req);
-    const res = { lease_id: "lease_1", run_id: "run_1", lease_expires_at: 1_750_000_000_000 };
-    expect(claimResponseSchema.parse(res)).toEqual(res);
+describe("assignment offer + poll", () => {
+  it("round-trips a credential-free offer (toEqual, not toBeDefined)", () => {
+    expect(assignmentOfferSchema.parse(OFFER)).toEqual(OFFER);
   });
 
-  it("heartbeat carries the control signal back", () => {
-    const req = { runner_id: "rnr_1", lease_id: "lease_1", run_id: "run_1", phase: "running" };
-    expect(heartbeatRequestSchema.parse(req)).toEqual(req);
+  it("rejects credential-shaped fields on the offer (no smuggling)", () => {
+    const res = assignmentOfferSchema.safeParse({
+      ...OFFER,
+      control_plane: { base_url: "https://x", run_token: "t" },
+    });
+    expect(res.success).toBe(false);
+  });
+
+  it("accepts a hosted-label runs_on (the hosted worker speaks the same contract)", () => {
+    const parsed = assignmentOfferSchema.parse({ ...OFFER, runs_on: "boardwalk/linux" });
+    expect(parsed.runs_on).toBe("boardwalk/linux");
+  });
+
+  it("poll carries one offer, or null, or null + drain", () => {
+    expect(assignmentPollResponseSchema.parse({ assignment: OFFER }).assignment).toEqual(OFFER);
+    expect(assignmentPollResponseSchema.parse({ assignment: null })).toEqual({ assignment: null });
+    expect(assignmentPollResponseSchema.parse({ assignment: null, action: "drain" }).action).toBe(
+      "drain",
+    );
+  });
+});
+
+describe("claim", () => {
+  it("round-trips — the ONLY payload carrying per-run credentials", () => {
+    expect(claimResponseSchema.parse(CLAIM)).toEqual(CLAIM);
+  });
+
+  it("requires all three control-plane credentials", () => {
+    const res = claimResponseSchema.safeParse({
+      ...CLAIM,
+      control_plane: { base_url: "https://x", run_token: "t" },
+    });
+    expect(res.success).toBe(false);
+  });
+
+  it("byo provider entries name the auth secret, never a value", () => {
+    const res = byoInferenceProviderSchema.safeParse({
+      name: "x",
+      source: "anthropic",
+      base_url: null,
+      auth_secret_name: "KEY",
+      api_key: "sk-smuggled",
+    });
+    expect(res.success).toBe(false);
+  });
+});
+
+describe("heartbeat", () => {
+  it("request names the lease; the bearer names the runner", () => {
+    const value = { lease_id: "01H_assignment", run_id: "01H_run", phase: "running" };
+    expect(heartbeatRequestSchema.parse(value)).toEqual(value);
+  });
+
+  it("rejects a runner_id field (identity is the bearer)", () => {
+    const res = heartbeatRequestSchema.safeParse({
+      runner_id: "01H_runner",
+      lease_id: "01H_assignment",
+      run_id: "01H_run",
+      phase: "running",
+    });
+    expect(res.success).toBe(false);
+  });
+
+  it("response carries the control signal back", () => {
     for (const action of ["continue", "cancel", "drain"] as const) {
-      const res = { lease_expires_at: 1, action };
-      expect(heartbeatResponseSchema.parse(res)).toEqual(res);
+      expect(heartbeatResponseSchema.parse({ lease_expires_at: 1, action }).action).toBe(action);
     }
   });
 
-  it("status report round-trips with and without error/usage", () => {
-    const minimal = {
-      runner_id: "rnr_1",
-      lease_id: "lease_1",
-      run_id: "run_1",
-      status: "completed",
-    };
-    expect(statusReportSchema.parse(minimal)).toEqual(minimal);
-
-    const failed = {
-      ...minimal,
-      status: "failed",
-      error: { code: "PROGRAM_ERROR", message: "boom" },
-      usage: { runtime_seconds: 42 },
-    };
-    expect(statusReportSchema.parse(failed)).toEqual(failed);
-  });
-
-  it("rejects a status outside the terminal set", () => {
-    expect(() =>
-      statusReportSchema.parse({
-        runner_id: "r",
-        lease_id: "l",
-        run_id: "x",
-        status: "running",
-      }),
-    ).toThrow();
+  it("rejects an unknown phase", () => {
+    const res = heartbeatRequestSchema.safeParse({
+      lease_id: "a",
+      run_id: "r",
+      phase: "meditating",
+    });
+    expect(res.success).toBe(false);
   });
 });
 
 describe("parseContract", () => {
   it("returns the parsed value on success", () => {
-    expect(
-      parseContract(claimRequestSchema, { runner_id: "r", assignment_id: "a" }, "claim"),
-    ).toEqual({ runner_id: "r", assignment_id: "a" });
+    expect(parseContract(assignmentOfferSchema, OFFER, "offer")).toEqual(OFFER);
   });
 
   it("throws ContractValidationError with per-field issues", () => {
-    let caught: unknown;
+    expect(() => parseContract(assignmentOfferSchema, { assignment_id: 3 }, "offer")).toThrow(
+      ContractValidationError,
+    );
     try {
-      parseContract(claimRequestSchema, { runner_id: "" }, "claim request");
+      parseContract(assignmentOfferSchema, { assignment_id: 3 }, "offer");
     } catch (err) {
-      caught = err;
+      expect((err as Error).message).toContain("Invalid offer");
+      expect((err as Error).message).toContain("assignment_id");
     }
-    expect(caught).toBeInstanceOf(ContractValidationError);
-    // Narrow via instanceof instead of an `as Error` cast (matches the SDK's no-cast-in-tests rule).
-    const message = caught instanceof Error ? caught.message : String(caught);
-    expect(message).toContain("claim request");
-    expect(message).toContain("assignment_id");
   });
 });

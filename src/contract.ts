@@ -1,20 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// The Boardwalk runner contract — the canonical payload types between a runner (hosted or
-// self-hosted) and the Boardwalk control plane: registration, assignment, claim/lease,
-// heartbeat, and terminal status. Published from this repo (CONTRACT.md is the prose half);
-// the control plane implements the same schemas.
+// The Boardwalk runner contract — the canonical payload types between a self-hosted runner
+// machine and the Boardwalk control plane: registration, the assignment offer, claim/lease,
+// and heartbeat. Published from this repo (CONTRACT.md is the prose half); the control plane
+// implements the same schemas.
 //
 // DRAFT until the first tagged release: breaking changes are allowed while the platform
 // implementation lands. After that, this file versions with the package, semver-strictly.
 //
+// Shape of the protocol (revised 2026-07 — credentials moved to CLAIM):
+//   - The POLLED OFFER is credential-free: identity + selector only. A queued assignment
+//     never carries a token that could age out or leak before any runner commits.
+//   - The CLAIM RESPONSE is the only place per-run credentials exist: the run token, the run
+//     API token, the resolved non-secret env, and the org's BYO inference provider registry.
+//   - Everything else about the run (manifest, program artifact + digest, workspace, artifact
+//     prefixes, event stream) is fetched AFTER claim through the run-token'd Runner Control
+//     API — the same broker surface a Boardwalk-hosted worker uses. One contract, hosted and
+//     self-hosted.
+//
 // Security invariants encoded here (see CONTRACT.md §security):
-//   - An assignment's ONLY credential is `control_plane.run_token` — short-lived and bound to
-//     this run + lease. There is no field for org-wide or platform credentials, by design.
-//   - Secrets are NOT in the assignment. The runner resolves them per run through the control
-//     plane API with the run token, fail-closed against the manifest.
-//   - Program bytes are NOT inlined. The runner fetches the content-addressed artifact via the
-//     control plane and MUST verify `program.digest` before extraction.
+//   - The registration token registers, nothing else; the standing runner token can only
+//     poll/claim/heartbeat/deregister; org reach exists only in a claim's run token.
+//   - Secrets are NOT in any payload here. They resolve per run through the control plane
+//     with the run token, fail-closed. A BYO provider entry names its auth secret; it never
+//     carries the value.
 //
 // Schema rules (same discipline as @boardwalk-labs/workflow): strict objects — unknown fields are
 // validation errors; union members most-specific-first; types derive from schemas, never
@@ -27,7 +36,6 @@ import { z } from "zod";
 // ============================================================================
 
 const id = z.string().min(1).max(128);
-const sha256Hex = z.string().regex(/^[a-f0-9]{64}$/, "must be a lowercase sha256 hex digest");
 /** Epoch milliseconds. */
 const epochMs = z.number().int().nonnegative();
 
@@ -39,21 +47,20 @@ export const runnerArchSchema = z.enum(["x64", "arm64"]);
 // ============================================================================
 
 /**
- * POST /runners/register, authenticated by a short-lived registration token minted in the
- * dashboard. The registration token is single-purpose: it can register, nothing else.
+ * POST /runner/v1/register, authenticated by the short-lived registration token in the body —
+ * the token IS the credential (single-purpose: it can register, nothing else) and it is BOUND
+ * to a pool at mint, so the request names no pool.
  */
 export const runnerRegistrationRequestSchema = z.strictObject({
   registration_token: z.string().min(1),
-  /** The pool this machine serves; `runs_on: { kind: "self-hosted", pool }` matches against it. */
-  pool: z.string().min(1).max(120),
   /** Human-readable machine name (shown in the dashboard). */
   name: z.string().min(1).max(120),
   /** Extra labels advertised for `runs_on.labels` matching. */
   labels: z.array(z.string().min(1).max(120)).max(32).default([]),
-  os: runnerOsSchema,
-  arch: runnerArchSchema,
+  os: runnerOsSchema.optional(),
+  arch: runnerArchSchema.optional(),
   /** The runner client's own version (for deprecation + compatibility messaging). */
-  runner_version: z.string().min(1).max(64),
+  runner_version: z.string().min(1).max(64).optional(),
 });
 export type RunnerRegistrationRequest = z.infer<typeof runnerRegistrationRequestSchema>;
 
@@ -61,20 +68,19 @@ export const runnerRegistrationResponseSchema = z.strictObject({
   runner_id: id,
   /**
    * The runner's standing identity credential: it can poll for assignments, claim, heartbeat,
-   * and deregister — and nothing else. Per-run capability comes only from an assignment's
-   * run token.
+   * and deregister — and nothing else. Per-run capability comes only from a claim's run token.
    */
   runner_token: z.string().min(1),
   poll: z.strictObject({
     url: z.string().url(),
-    /** Suggested poll cadence when no long-poll/socket is held. */
+    /** Suggested poll cadence when no long-poll is held. */
     interval_seconds: z.number().int().positive().max(300),
   }),
 });
 export type RunnerRegistrationResponse = z.infer<typeof runnerRegistrationResponseSchema>;
 
 // ============================================================================
-// Assignment — one run, offered to a runner
+// Assignment offer — one run, offered to the pool
 // ============================================================================
 
 /** The matched `runs_on` selector, echoed so the runner can re-verify it should run this. */
@@ -88,103 +94,74 @@ export const assignmentRunsOnSchema = z.union([
   z.string().min(1).max(120),
 ]);
 
-export const workspaceStoreKindSchema = z.enum(["managed", "local", "custom"]);
-
-export const runnerAssignmentSchema = z.strictObject({
+/**
+ * A polled offer is CREDENTIAL-FREE by design: identity + selector only. Committing to it
+ * (claim) is what mints credentials; the run's full context (manifest, program, workspace)
+ * is fetched after claim through the run-token'd Runner Control API.
+ */
+export const assignmentOfferSchema = z.strictObject({
   assignment_id: id,
   run_id: id,
   org_id: id,
-  workflow_id: id,
-  workflow_version_id: id,
-  /**
-   * The workflow manifest snapshot for this version. Shape is owned by @boardwalk-labs/workflow's
-   * `workflowManifestSchema`; carried opaquely here so the contract package doesn't pin the
-   * SDK. Runners validate it with the SDK schema before honoring any grant in it.
-   */
-  manifest: z.record(z.string(), z.unknown()),
-  /** The trigger payload (becomes the program's `input`). */
-  input: z.unknown(),
-  /**
-   * The workflow PROGRAM — always a built JS artifact, never raw source. Bytes are fetched
-   * via the control plane (content-addressed); `digest` MUST be verified before extraction.
-   * The runner never transpiles and never installs dependencies.
-   */
-  program: z.strictObject({
-    digest: sha256Hex,
-    /** Module to import after extraction, e.g. `index.mjs`. Importing it IS running it. */
-    entry: z.string().min(1).max(256),
-    /** The @boardwalk-labs/workflow version range the artifact was built against (layer compat). */
-    sdk_version: z.string().min(1).max(64),
-  }),
   runs_on: assignmentRunsOnSchema,
-  /**
-   * The runner's ONLY Boardwalk credential: everything privileged (program fetch, secret
-   * resolution, event/log streaming, artifact upload, child-run calls, status + usage
-   * submission) is a call to this API with this token, authorized per call against the bound
-   * run + manifest.
-   */
-  control_plane: z.strictObject({
-    base_url: z.string().url(),
-    run_token: z.string().min(1),
-  }),
-  workspace: z.strictObject({
-    /** The run's working directory (also HOME + cwd), e.g. `/workspace`. */
-    path: z.string().min(1).max(256),
-    /** Ephemeral scratch, cleared per run. */
-    tmp_path: z.string().min(1).max(256),
-    /** Local teardown always happens; persistence survives via the store. */
-    cleanup: z.literal("always"),
-    /** Whether declared persistent paths are hydrated/persisted for this run. */
-    persist: z.boolean(),
-    store: z.strictObject({ kind: workspaceStoreKindSchema }),
-  }),
-  limits: z.strictObject({
-    timeout_seconds: z.number().int().positive(),
-    memory_mb: z.number().int().positive(),
-    cpu_units: z.number().int().positive().optional(),
-  }),
-  /** Run-permission grants; shape owned by @boardwalk-labs/workflow (carried opaquely, like manifest). */
-  permissions: z.record(z.string(), z.unknown()).optional(),
-  /** Present iff the manifest grants an identity token. */
-  oidc: z
-    .strictObject({
-      request_url: z.string().url(),
-      request_token: z.string().min(1),
-    })
-    .optional(),
-  /** Where this run's artifacts land (uploads themselves go through the control plane). */
-  artifacts: z.strictObject({
-    prefix: z.string().min(1).max(512),
-  }),
-  /** Run-event stream coordinates (wire format owned by @boardwalk-labs/workflow). */
-  log_stream: z.strictObject({
-    channel: z.string().min(1).max(256),
-    cursor_start: z.number().int().nonnegative(),
-  }),
+  queued_at: epochMs,
 });
-export type RunnerAssignment = z.infer<typeof runnerAssignmentSchema>;
+export type AssignmentOffer = z.infer<typeof assignmentOfferSchema>;
 
-/** GET/long-poll for work: at most one assignment per response. */
+/**
+ * Long-poll response: at most one offer. `action: "drain"` tells an idle runner to stop
+ * claiming (deregistration/update flow) — control signals are always brokered polls, never
+ * inbound connections to the runner.
+ */
 export const assignmentPollResponseSchema = z.strictObject({
-  assignment: runnerAssignmentSchema.nullable(),
+  assignment: assignmentOfferSchema.nullable(),
+  action: z.literal("drain").optional(),
 });
 export type AssignmentPollResponse = z.infer<typeof assignmentPollResponseSchema>;
 
 // ============================================================================
-// Claim — lease before work
+// Claim — lease before work; credentials arrive HERE
 // ============================================================================
 
-export const claimRequestSchema = z.strictObject({
-  runner_id: id,
-  assignment_id: id,
+/**
+ * One BYO inference provider, as data: the runtime calls the endpoint directly (managed-lane
+ * inference stays brokered; managed providers are never listed). The auth secret resolves by
+ * NAME through the control plane with the run token — the value never rides this payload.
+ */
+export const byoInferenceProviderSchema = z.strictObject({
+  name: z.string().min(1).max(120),
+  /** Adapter kind, e.g. `openai_compatible`, `anthropic`, `bedrock`, `google`. */
+  source: z.string().min(1).max(64),
+  base_url: z.string().nullable(),
+  auth_secret_name: z.string().nullable(),
 });
-export type ClaimRequest = z.infer<typeof claimRequestSchema>;
+export type ByoInferenceProvider = z.infer<typeof byoInferenceProviderSchema>;
 
+/**
+ * POST .../assignments/{assignment_id}/claim (runner-token authed; the bearer identifies the
+ * runner, the URL the assignment — no body). First claim wins; a loser gets a conflict and
+ * polls again. The response is the ONLY payload carrying per-run credentials.
+ */
 export const claimResponseSchema = z.strictObject({
   lease_id: id,
   run_id: id,
   /** Heartbeat before this or the lease expires and the run is recovered elsewhere. */
   lease_expires_at: epochMs,
+  /**
+   * The runner's ONLY org-reaching credentials, minted at claim and bound to this run:
+   * `run_token` authenticates every Runner Control API call; `api_token` is the run's
+   * auto-injected BOARDWALK_API_KEY (public-API machine principal, manifest-derived scopes).
+   */
+  control_plane: z.strictObject({
+    base_url: z.string().url(),
+    run_token: z.string().min(1),
+    api_token: z.string().min(1),
+  }),
+  /** The run's resolved NON-secret env (manifest literals overlaid by org/environment
+   *  variables). Secrets never ride here — they resolve through the control plane. */
+  env: z.record(z.string(), z.string()),
+  /** The org's BYO inference providers, for runner-direct model calls. */
+  byo_providers: z.array(byoInferenceProviderSchema),
 });
 export type ClaimResponse = z.infer<typeof claimResponseSchema>;
 
@@ -194,8 +171,8 @@ export type ClaimResponse = z.infer<typeof claimResponseSchema>;
 
 export const heartbeatPhaseSchema = z.enum(["preparing", "running", "finalizing"]);
 
+/** The bearer identifies the runner; the body names the held lease. */
 export const heartbeatRequestSchema = z.strictObject({
-  runner_id: id,
   lease_id: id,
   run_id: id,
   phase: heartbeatPhaseSchema,
@@ -209,36 +186,19 @@ export type HeartbeatRequest = z.infer<typeof heartbeatRequestSchema>;
 export const heartbeatResponseSchema = z.strictObject({
   lease_expires_at: epochMs,
   /**
-   * `continue` — keep going. `cancel` — stop the run now; report `cancelled`.
-   * `drain` — finish the current run, then claim nothing further (deregistration/update flow).
+   * `continue` — keep going. `cancel` — stop the run now (the broker records the terminal
+   * state). `drain` — finish the current run, then claim nothing further.
    */
   action: z.enum(["continue", "cancel", "drain"]),
 });
 export type HeartbeatResponse = z.infer<typeof heartbeatResponseSchema>;
 
 // ============================================================================
-// Terminal status — the runner's last word on a run
+// Terminal status
 // ============================================================================
-
-export const statusReportSchema = z.strictObject({
-  runner_id: id,
-  lease_id: id,
-  run_id: id,
-  status: z.enum(["completed", "failed", "cancelled"]),
-  /** Present on `failed`. Never contains secret material — runners redact before reporting. */
-  error: z
-    .strictObject({
-      code: z.string().min(1).max(120),
-      message: z.string().max(10_000),
-    })
-    .optional(),
-  usage: z
-    .strictObject({
-      runtime_seconds: z.number().int().nonnegative(),
-    })
-    .optional(),
-});
-export type StatusReport = z.infer<typeof statusReportSchema>;
+// There is deliberately NO pool-level status report: the runner's last word on a run is the
+// run-token'd `finalize` call on the Runner Control API — the same call a hosted worker makes.
+// The control plane closes out the assignment (terminal status, runner back to idle) there.
 
 // ============================================================================
 // Validation helper
