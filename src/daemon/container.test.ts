@@ -55,6 +55,14 @@ describe("buildContainerArgs — isolation guarantees", () => {
     const mounts = a.filter((_, i) => a[i - 1] === "-v");
     expect(mounts).toEqual([`${CWD}:/workspace`, "/data/nas:/data:ro"]);
   });
+
+  it("runs as the invoking user when set (Linux bind-mount ownership); omits --user otherwise", () => {
+    expect(args).not.toContain("--user"); // CFG has no user
+    const a = buildContainerArgs({ ...CFG, user: "501:20" }, { env: ENV, cwd: CWD });
+    const i = a.indexOf("--user");
+    expect(i).toBeGreaterThan(-1);
+    expect(a[i + 1]).toBe("501:20");
+  });
 });
 
 describe("containerEnv", () => {

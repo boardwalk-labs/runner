@@ -42,6 +42,10 @@ export interface ContainerSpawnConfig {
   network?: string;
   /** Extra host bind mounts (`hostPath:containerPath[:ro]`) the user opted into for this fleet. */
   mounts?: readonly string[];
+  /** Run the container as this `uid:gid` — the invoking host user — so writes to the bind-mounted
+   *  workspace match host ownership instead of the image's `node` (uid 1000). Set on Linux; omit on
+   *  Docker Desktop (macOS/Windows), which maps ownership through its file sharing. */
+  user?: string;
   /** Test seam. */
   spawn?: typeof nodeSpawn;
 }
@@ -104,6 +108,11 @@ export function buildContainerArgs(
     "-w",
     "/workspace",
   ];
+  // Run as the invoking host user (Linux) so the bind-mounted workspace is writable — the image's
+  // `node` (uid 1000) otherwise can't write a host dir it doesn't own.
+  if (cfg.user !== undefined) {
+    args.push("--user", cfg.user);
+  }
   // Explicit, user-opted-in host mounts (fleet config) — the honest way to say "I grant this path".
   for (const m of cfg.mounts ?? []) {
     args.push("-v", m);

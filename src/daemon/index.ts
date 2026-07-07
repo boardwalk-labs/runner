@@ -4,3 +4,4 @@ export * from "./pool_client.js";
 export * from "./identity.js";
 export * from "./daemon.js";
 export * from "./container.js";
+export * from "./start.js";
