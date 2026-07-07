@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 import { stat, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { extract as tarExtract } from "tar";
 import { createLogger } from "./support/index.js";
 
 const log = createLogger("WorkspaceStore");
@@ -150,7 +151,13 @@ export class TarWorkspaceArchiver implements WorkspaceArchiver {
 
   async extract(srcPath: string, dir: string): Promise<void> {
     await mkdir(dir, { recursive: true });
-    await exec("tar", ["xzf", srcPath, "-C", dir]);
+    // Extract via node-tar, NOT `tar xzf`: extraction reads UNTRUSTED input (a program artifact
+    // from an arbitrary control plane on a self-hosted runner, or a prior run's workspace snapshot),
+    // and node-tar is hardened + portable — with default `preservePaths: false` it strips absolute
+    // paths and `..` members, and refuses to write THROUGH a symlink (unlinking it first), closing
+    // the traversal/symlink-escape gaps that differ between GNU tar and bsdtar. Same behavior on
+    // macOS and Linux, no dependency on which `tar` the OS ships.
+    await tarExtract({ file: srcPath, cwd: dir });
   }
 }
 

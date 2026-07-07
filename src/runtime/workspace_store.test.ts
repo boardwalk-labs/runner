@@ -1,8 +1,13 @@
 import { describe, it, expect } from "vitest";
 import * as os from "node:os";
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import * as path from "node:path";
+import { create as tarCreate } from "tar";
 import {
   WorkspaceStore,
   WORKSPACE_SNAPSHOT_MAX_BYTES,
+  TarWorkspaceArchiver,
   type WorkspaceArchiver,
   type WorkspaceBrokerTransport,
   type WorkspaceFs,
@@ -186,5 +191,47 @@ describe("WorkspaceStore default scratch path", () => {
     // Lands inside os.tmpdir() (honors TMPDIR on a self-hosted runner), NOT the old shared constant.
     expect(dest.startsWith(os.tmpdir())).toBe(true);
     expect(dest).not.toBe("/tmp/workspace-snapshot.tgz");
+  });
+});
+
+describe("TarWorkspaceArchiver (real tar) — extraction hardening", () => {
+  it("round-trips a nested tree", async () => {
+    const src = await mkdtemp(path.join(os.tmpdir(), "bw-arc-src-"));
+    await mkdir(path.join(src, "sub"), { recursive: true });
+    await writeFile(path.join(src, "sub", "a.txt"), "hello");
+    const archiver = new TarWorkspaceArchiver();
+    const tgz = path.join(os.tmpdir(), `bw-arc-${path.basename(src)}.tgz`);
+    await archiver.archive(src, tgz);
+    const out = await mkdtemp(path.join(os.tmpdir(), "bw-arc-out-"));
+    await archiver.extract(tgz, out);
+    expect(await readFile(path.join(out, "sub", "a.txt"), "utf8")).toBe("hello");
+    await rm(src, { recursive: true, force: true });
+    await rm(out, { recursive: true, force: true });
+    await rm(tgz, { force: true });
+  });
+
+  it("does NOT let a `..` member escape the extraction dir", async () => {
+    // Forge a malicious tarball whose member path is literally `../escape.txt`: stage a file in the
+    // PARENT of `inner`, then create the archive from cwd=inner naming `../escape.txt`, with
+    // preservePaths:true so node-tar's create keeps the traversal in the recorded entry name.
+    const stage = await mkdtemp(path.join(os.tmpdir(), "bw-arc-mal-"));
+    const inner = path.join(stage, "inner");
+    await mkdir(inner, { recursive: true });
+    await writeFile(path.join(stage, "escape.txt"), "pwned");
+    const tgz = path.join(os.tmpdir(), `bw-arc-mal-${path.basename(stage)}.tgz`);
+    await tarCreate({ file: tgz, cwd: inner, gzip: true, preservePaths: true }, ["../escape.txt"]);
+
+    // Extract into a nested target with the archiver under test.
+    const parent = await mkdtemp(path.join(os.tmpdir(), "bw-arc-parent-"));
+    const target = path.join(parent, "run", "workspace");
+    await new TarWorkspaceArchiver().extract(tgz, target);
+
+    // node-tar (preservePaths:false on extract) strips the `..`, so nothing lands in target's parent.
+    expect(existsSync(path.join(parent, "escape.txt"))).toBe(false);
+    expect(existsSync(path.join(parent, "run", "escape.txt"))).toBe(false);
+
+    await rm(stage, { recursive: true, force: true });
+    await rm(parent, { recursive: true, force: true });
+    await rm(tgz, { force: true });
   });
 });
