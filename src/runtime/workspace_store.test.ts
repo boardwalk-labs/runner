@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import * as os from "node:os";
 import {
   WorkspaceStore,
   WORKSPACE_SNAPSHOT_MAX_BYTES,
@@ -167,5 +168,23 @@ describe("WorkspaceStore.persist", () => {
     });
     expect(await s.persist()).toBe(0);
     expect(r.uploads).toEqual([]);
+  });
+});
+
+describe("WorkspaceStore default scratch path", () => {
+  it("defaults the tarball under os.tmpdir() (per-run TMPDIR), not machine-global /tmp", async () => {
+    const r = recorder();
+    const s = new WorkspaceStore({
+      broker: r.broker,
+      archiver: r.archiver,
+      fs: r.fs,
+      workspaceRoot: "/workspace",
+      // no tmpPath → default
+    });
+    await s.persist();
+    const dest = r.archives[0]?.dest ?? "";
+    // Lands inside os.tmpdir() (honors TMPDIR on a self-hosted runner), NOT the old shared constant.
+    expect(dest.startsWith(os.tmpdir())).toBe(true);
+    expect(dest).not.toBe("/tmp/workspace-snapshot.tgz");
   });
 });

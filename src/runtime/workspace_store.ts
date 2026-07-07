@@ -14,6 +14,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { stat, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { createLogger } from "./support/index.js";
 
 const log = createLogger("WorkspaceStore");
@@ -69,7 +71,12 @@ export class WorkspaceStore {
   private readonly tmpPath: string;
   private readonly maxSnapshotBytes: number;
   constructor(private readonly deps: WorkspaceStoreDeps) {
-    this.tmpPath = deps.tmpPath ?? "/tmp/workspace-snapshot.tgz";
+    // Scratch tarball path. Default to os.tmpdir() (which honors TMPDIR) rather than a machine-global
+    // `/tmp/workspace-snapshot.tgz`: on a self-hosted runner the daemon points TMPDIR at the PER-RUN
+    // dir, so the snapshot can't collide between concurrent daemons and doesn't sit in world-shared
+    // `/tmp` where the crashed-window archive of a whole workspace would be readable. On the hosted
+    // single-tenant worker it's the container's own `/tmp` (one run per container).
+    this.tmpPath = deps.tmpPath ?? join(tmpdir(), "bw-workspace-snapshot.tgz");
     this.maxSnapshotBytes = deps.maxSnapshotBytes ?? WORKSPACE_SNAPSHOT_MAX_BYTES;
   }
 
@@ -81,6 +88,7 @@ export class WorkspaceStore {
       if (url === null) return; // not eligible (not opted-in / self-hosted)
       const bytes = await this.deps.broker.downloadBytes(url);
       if (bytes === null) return; // 404 — no snapshot yet (the workflow's first run)
+      await mkdir(dirname(this.tmpPath), { recursive: true }); // per-run TMPDIR may not exist yet
       await this.deps.fs.writeFile(this.tmpPath, bytes);
       await this.deps.archiver.extract(this.tmpPath, this.deps.workspaceRoot);
       await this.deps.fs.rm(this.tmpPath);
@@ -100,6 +108,7 @@ export class WorkspaceStore {
    *  only redundant archive is a self-hosted+persist run, where the broker returns a null URL. */
   async persist(): Promise<number> {
     try {
+      await mkdir(dirname(this.tmpPath), { recursive: true }); // per-run TMPDIR may not exist yet
       const size = await this.deps.archiver.archive(this.deps.workspaceRoot, this.tmpPath);
       // Guardrail: an oversized snapshot is dropped (logged), never read into memory or uploaded — the
       // workflow re-does filesystem work next run, as it would without persistence. Checked on the

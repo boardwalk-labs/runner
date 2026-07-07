@@ -15,6 +15,7 @@ import { agent as sdkAgent } from "@boardwalk-labs/workflow";
 import type { WorkflowHost } from "@boardwalk-labs/workflow/runtime";
 import { extract as tarExtract } from "tar";
 import {
+  resolveEntryPath,
   ensureSdkLink,
   runWorkflowProgram,
   type ProgramResult,
@@ -346,5 +347,23 @@ describe("ensureSdkLink", () => {
     });
     await expect(ensureSdkLink(dir)).rejects.toThrow(/bundles its own/);
     await fs.rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("resolveEntryPath", () => {
+  const dir = "/work/.bw-runs/run-abc";
+  it("resolves a normal relative entry inside the dir", () => {
+    expect(resolveEntryPath(dir, "index.mjs")).toBe(path.join(dir, "index.mjs"));
+    expect(resolveEntryPath(dir, "dist/index.js")).toBe(path.join(dir, "dist", "index.js"));
+  });
+  it("rejects a `..` escape", () => {
+    expect(() => resolveEntryPath(dir, "../../../etc/passwd")).toThrow(/escapes/);
+    expect(() => resolveEntryPath(dir, "a/../../b")).toThrow(/escapes/);
+  });
+  it("rejects an absolute path", () => {
+    expect(() => resolveEntryPath(dir, "/etc/passwd")).toThrow(/escapes/);
+  });
+  it("rejects an entry that resolves to the dir itself", () => {
+    expect(() => resolveEntryPath(dir, "")).toThrow(/escapes/);
   });
 });

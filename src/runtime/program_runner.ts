@@ -22,7 +22,7 @@
 // worker/scheduler-sweep, not here). Output capture is deferred (v0 returns null).
 
 import { mkdir, writeFile, rm, symlink, lstat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, isAbsolute, relative, sep } from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -85,6 +85,22 @@ export async function ensureSdkLink(execDir: string): Promise<void> {
     }
   }
 }
+/** Resolve the program's entry module inside the extraction dir, refusing any path that escapes it.
+ *  The control plane validates `entry` at deploy, but a self-hosted runner may be pointed at an
+ *  arbitrary control plane, so this is defense-in-depth: an absolute path or a `..` that resolves
+ *  outside `dir` throws rather than importing code from elsewhere on the machine. */
+export function resolveEntryPath(dir: string, entry: string): string {
+  const resolved = join(dir, ...entry.split("/"));
+  const rel = relative(dir, resolved);
+  if (isAbsolute(entry) || rel === "" || rel.startsWith("..") || rel.startsWith(`..${sep}`)) {
+    throw new AppError(
+      ErrorCode.VALIDATION_FAILED,
+      `Program entry "${entry}" escapes the program directory.`,
+    );
+  }
+  return resolved;
+}
+
 /** Scratch filename for the in-flight artifact tarball inside a run's dir. */
 const ARTIFACT_FILE = "__program.tgz";
 
@@ -185,7 +201,10 @@ export async function runWorkflowProgram(
     // provide it via an ancestor node_modules, but a self-hosted daemon's workspace has none.
     await ensureSdkLink(dir);
 
-    const entryPath = join(dir, ...args.entry.split("/"));
+    // Re-validate the entry here even though the control plane checked it at deploy: a self-hosted
+    // runner may point at an arbitrary control plane, so refuse an entry that could escape the
+    // extraction dir (absolute path or `..` segment) before importing it.
+    const entryPath = resolveEntryPath(dir, args.entry);
     // Run the program body. A SUSPEND is surfaced two ways and both land here as a `suspended`
     // result: (a) out of band via `suspendSignal` — racing the body, immune to a program's own
     // try/catch (the suspending seam never resolves); (b) a thrown {@link SuspendError} on the
