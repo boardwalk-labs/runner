@@ -1,4 +1,4 @@
-// WorkflowProgramRunner — executes a workflow program (the JS-body model, docs/WORKFLOW_RUNTIME.md).
+// WorkflowProgramRunner — executes a workflow program (the JS-body model, the workflow runtime design).
 //
 // A run is the execution of a built program ARTIFACT (§3.9): the worker is handed the VERIFIED tarball
 // (its sha256 already checked against the pinned digest by the orchestrator) plus the entry module
@@ -82,7 +82,7 @@ export interface ProgramRunnerDeps {
    * Scrubs known secret values out of a string (the run's `SecretRedactor.redactText`). Applied to a
    * top-level throw's message before it is logged AND before it is returned to the worker — a program
    * that resolves a secret and then throws it in an error message must NOT land that secret raw in the
-   * logs or the finalized run output (MASTER_SPEC §12, review #5). Defaults to identity (tests/local).
+   * logs or the finalized run output (the platform spec,). Defaults to identity (tests/local).
    */
   redactText?: (text: string) => string;
   /**
@@ -93,7 +93,7 @@ export interface ProgramRunnerDeps {
    */
   onOutput?: (value: unknown) => void;
   /**
-   * Resolves when a host seam SUSPENDS the run (docs/SUSPENSION.md) — the worker wires it to the
+   * Resolves when a host seam SUSPENDS the run (the durable-suspension design) — the worker wires it to the
    * host's `onSuspend` so a suspend is surfaced OUT OF BAND, racing the program body. The program's
    * own `try/catch` can't swallow a suspend this way (the suspending seam never resolves; this signal
    * short-circuits at the runner). Absent ⇒ no suspension wired (a seam that suspends throws

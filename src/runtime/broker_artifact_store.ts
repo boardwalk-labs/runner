@@ -1,10 +1,10 @@
 // BrokerArtifactStore — the ArtifactStore the `artifacts` tool uses under the Runner Credential
-// Broker (docs/RUNNER_BROKER.md §4 — Artifacts). It forwards every op to the Runner Control API:
-// the broker computes the S3 key, neutralizes the served content type (review #32), PUTs with its
+// Broker (the Runner Credential Broker model — Artifacts). It forwards every op to the Runner Control API:
+// the broker computes the S3 key, neutralizes the served content type, PUTs with its
 // own creds, and records the catalog row — so the untrusted runner holds no S3 credential and can't
 // bypass those server-side rules. A thin adapter over the run-bound RunnerControlClient.
 //
-// Writes route by size (docs/RUNNER_BROKER.md §7 step 4): a SMALL body is proxied inline through the
+// Writes route by size (the Runner Credential Broker model): a SMALL body is proxied inline through the
 // broker (`POST .../artifacts`); a LARGE one takes the presigned-PUT path — the broker signs an S3
 // PUT (still owning the key + content-type neutralization + catalog row) and the runner streams the
 // bytes straight to S3, so they never pass through the control plane (no body cap).

@@ -1,5 +1,5 @@
 // RuntimeFlusher — meters a run's held-task runtime as periodic DELTAS, instead of one charge at
-// terminal (MASTER_SPEC §15; docs/RUNNER_BROKER.md). The heartbeat counterpart to the credit / cancel
+// terminal (the platform spec; the Runner Credential Broker model). The heartbeat counterpart to the credit / cancel
 // / lease watchers.
 //
 // Why: runtime used to be booked once, at terminal (`now - sessionStart`). That left two holes — a run

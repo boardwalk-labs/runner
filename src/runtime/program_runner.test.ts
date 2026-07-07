@@ -232,7 +232,7 @@ describe("runWorkflowProgram — failures", () => {
     expect(res.kind).toBe("failed");
   });
 
-  it("applies redactText to a thrown error message (review #5)", async () => {
+  it("applies redactText to a thrown error message", async () => {
     const rec = recordingHost();
     const source = `throw new Error("boom token-abc123xyz789 here");`;
     const res = await runSource("run_10", source, null, {

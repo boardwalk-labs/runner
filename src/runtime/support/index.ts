@@ -7,8 +7,7 @@
 
 import { randomUUID } from "node:crypto";
 
-// ---- errors (ported from boardwalk-backend src/common/errors.ts; keep in sync until the
-// backend consumes this package and the copy there is deleted) ----
+// ---- errors (ported from the Boardwalk platform's error taxonomy) ----
 
 export enum ErrorCode {
   VALIDATION_FAILED = "VALIDATION_FAILED",

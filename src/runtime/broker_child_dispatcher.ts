@@ -1,4 +1,4 @@
-// BrokerChildDispatcher — the broker-backed `workflows.call` (docs/RUNNER_BROKER.md). The host's
+// BrokerChildDispatcher — the broker-backed `workflows.call` (the Runner Credential Broker model). The host's
 // ChildDispatcher under the broker model: instead of touching the DB/SQS directly (the
 // WorkerChildDispatcher path), it asks the Runner Control API to create the child (resolve + the
 // `callable_by` gate + idempotent re-attach happen server-side) and then HOLDS the parent task,

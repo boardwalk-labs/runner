@@ -1,5 +1,5 @@
-// CreditWatcher — stops a run when its org runs out of prepaid credit mid-flight (MASTER_SPEC §15 +
-// docs/CODING_AGENT.md §6/§10).
+// CreditWatcher — stops a run when its org runs out of prepaid credit mid-flight (the platform spec +
+// the coding-agent design §6/§10).
 //
 // One per run session. On a timer it asks — through the broker (`GET /credit`, since the runner holds
 // no Stripe credential) — whether the org is still funded; the FIRST time it isn't, it fires

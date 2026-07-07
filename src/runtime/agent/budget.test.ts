@@ -179,7 +179,7 @@ describe("BudgetMeter.assertWithinCaps", () => {
   });
 });
 
-describe("BudgetMeter — cumulative usage across resume sessions (review #2)", () => {
+describe("BudgetMeter — cumulative usage across resume sessions", () => {
   const priorUsage = {
     inputTokens: 80,
     outputTokens: 0,

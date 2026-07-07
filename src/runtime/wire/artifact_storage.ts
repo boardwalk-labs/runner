@@ -1,6 +1,6 @@
 // Artifact storage policy — the server-side rules for turning an agent's artifact-write request into
-// a stored S3 object (MASTER_SPEC §13.6, review #32). These used to live in the `artifacts` TOOL,
-// which runs on the UNTRUSTED runner; under the Runner Credential Broker (docs/RUNNER_BROKER.md) the
+// a stored S3 object (the platform spec,). These used to live in the `artifacts` TOOL,
+// which runs on the UNTRUSTED runner; under the Runner Credential Broker (the Runner Credential Broker model) the
 // broker owns them so a malicious runner can't bypass content-type neutralization or escape its
 // run's key prefix. Pure functions — unit-tested exhaustively.
 
@@ -75,7 +75,7 @@ const NEUTRAL_CONTENT_TYPE = "text/plain; charset=utf-8";
 /**
  * Map an agent-supplied content type to one safe to serve inline from a Boardwalk origin. Active
  * types are forced to text/plain so the browser renders them as inert text instead of executing
- * embedded script (review #32). The base type (before any `;` params) is what's matched. The body is
+ * embedded script. The base type (before any `;` params) is what's matched. The body is
  * never altered — only the type the object is SERVED as.
  *
  * MUST run server-side (in the broker), never on the untrusted runner: the served content type is
@@ -90,7 +90,7 @@ export function neutralizeActiveContentType(contentType: string): string {
 //
 // The proxy path (`POST .../artifacts`) buffers the base64 body through the Runner Control body
 // limit (5 MiB wire), so it's bounded WELL under that. Anything larger takes the presigned-PUT path
-// (`POST .../artifacts/presign`, docs/RUNNER_BROKER.md §7 step 4): the broker signs an S3 PUT and the
+// (`POST .../artifacts/presign`, the Runner Credential Broker model): the broker signs an S3 PUT and the
 // runner streams the bytes straight to S3, so the body never passes through the control plane.
 
 /** Largest raw artifact body the broker will accept INLINE (proxied). Comfortably under the 5 MiB

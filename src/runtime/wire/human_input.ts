@@ -1,4 +1,4 @@
-// Human-input form spec + response validation (docs/SUSPENSION.md §4.3).
+// Human-input form spec + response validation (the durable-suspension design).
 //
 // The `HumanInputSpec` is the single source of truth for BOTH the UI form and server-side
 // validation, so a `humanInput()` gate needs no JSON Schema. A responder's raw submission (from
@@ -93,7 +93,7 @@ export function humanInputResultToJson(result: HumanInputResult): JsonValue {
   return { value: result.value };
 }
 
-/** What to do when a gate's `timeout` elapses with no answer (docs/SUSPENSION.md §4.3). Mirrors the
+/** What to do when a gate's `timeout` elapses with no answer (the durable-suspension design). Mirrors the
  *  SDK's `HumanInputOptions.onTimeout`: fail the run, or resolve the gate with a default value. */
 export type OnTimeoutPolicy = { kind: "fail" } | { kind: "value"; value: HumanInputResult };
 

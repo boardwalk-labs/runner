@@ -1,4 +1,4 @@
-// RecordingSecretResolver — the redaction feeder (MASTER_SPEC §12, plan #9).
+// RecordingSecretResolver — the redaction feeder (the platform spec, plan #9).
 //
 // Decorates any SecretResolver so EVERY value a run resolves — whether the workflow program asked
 // via `secrets.get(name)` or a tool asked via `ctx.secrets.resolve(ref)` — is recorded into the

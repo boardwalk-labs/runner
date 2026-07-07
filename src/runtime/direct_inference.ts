@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Runner-direct BYO inference (docs/SELF_HOSTED_RUNNERS.md D7): the managed lane stays
+// Runner-direct BYO inference (the self-hosted runner design): the managed lane stays
 // brokered (the platform key never leaves the platform), but a BYO provider is the ORG'S OWN
 // endpoint + key — class-3 material the runner may hold — so the runtime calls it directly
 // with the SAME engine adapters the broker uses. This is what makes a LAN-only model work on

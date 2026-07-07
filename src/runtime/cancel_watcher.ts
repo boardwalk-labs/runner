@@ -1,4 +1,4 @@
-// CancelWatcher — stops a run when the user cancels it mid-flight (MASTER_SPEC §6 + docs/RUNNER_BROKER.md).
+// CancelWatcher — stops a run when the user cancels it mid-flight (the platform spec + the Runner Credential Broker model).
 //
 // The user-cancel counterpart to CreditWatcher. One per run session. On a timer it asks — through the
 // broker (`GET /cancel`, since the runner holds no DB/Redis credential) — whether the run has been

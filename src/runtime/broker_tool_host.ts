@@ -1,9 +1,9 @@
 // BrokerToolHost — the engine's `ToolHost` (the infrastructure seam for the host-backed built-in
 // coding tools `webfetch` / `http` / `web_search` / `artifacts`) wired over the Runner Credential Broker
-// (docs/RUNNER_BROKER.md). `@boardwalk-labs/engine` registers those three tools ONLY when the leaf's
+// (the Runner Credential Broker model). `@boardwalk-labs/engine` registers those three tools ONLY when the leaf's
 // `ToolSetContext.host` provides the backing hook; we supply one here so they light up on hosted
 // runs. Each hook delegates the privileged capability to whoever holds the credential/network/storage
-// — exactly as the broker model requires (security review #1): the untrusted worker holds no Tavily
+// — exactly as the broker model requires (security): the untrusted worker holds no Tavily
 // key, no S3 credential, and only reaches the public network through the egress proxy.
 //
 //   web_search → broker /tools/web_search (the broker holds the Tavily key; the worker just forwards

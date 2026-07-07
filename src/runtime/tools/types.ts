@@ -9,7 +9,7 @@
 //     they bubble a signal up to the engine. Our adapter (lands with the worker
 //     in Phase 10.5) translates between this interface and the Strands surface.
 //
-// Per MASTER_SPEC §12: tools NEVER see secret values. Secrets resolve to
+// Per the platform spec: tools NEVER see secret values. Secrets resolve to
 // short-lived bearer tokens, ARNs, etc. via the injected `SecretResolver`.
 
 import type { z } from "zod";
@@ -58,7 +58,7 @@ export interface BoardwalkTool<TInput = unknown, TOutput = unknown> {
   /**
    * Zod schema for the tool's SUCCESS output (the `TOutput` shape — never the
    * control-signal branch). The adapter validates the tool's return value
-   * against this before it lands in the LLM conversation, per CODE_QUALITY
+   * against this before it lands in the LLM conversation, per the code standards
    * §2.1/§8.3 (LLM-facing output is treated like untrusted external input).
    */
   readonly outputSchema: z.ZodType<TOutput>;

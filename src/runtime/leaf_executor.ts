@@ -67,7 +67,7 @@ export interface MeterUsageInput {
 export interface EngineLeafExecutorDeps {
   /** Streams one model turn through the broker (RunnerControlClient satisfies it). */
   inference: InferenceProxyTransport;
-  /** Runner-direct BYO inference (docs/SELF_HOSTED_RUNNERS.md D7): when a per-`agent()` provider
+  /** Runner-direct BYO inference (the self-hosted runner design): when a per-`agent()` provider
    *  matches this registry (key-based HTTP sources only), the turn goes STRAIGHT to the org's
    *  endpoint with the engine adapters — the managed lane and bedrock stay brokered. Omitted ⇒
    *  everything brokered (legacy dispatch without a registry). */
@@ -78,7 +78,7 @@ export interface EngineLeafExecutorDeps {
   budget: BudgetMeter;
   /** RUN-level redactor (shared with the secret resolver): every resolved secret value is recorded
    *  here. We seed a fresh engine `Redactor` from it per leaf so the loop scrubs known values out of
-   *  the prompt, tool args/results, and transcript before they reach the model (MASTER_SPEC §12). */
+   *  the prompt, tool args/results, and transcript before they reach the model (the platform spec). */
   redactor: SecretRedactor;
   /** Builds this leaf's event sink; `leafIndex` (1-based) is only a metering identifier — the sink
    *  owns the run-global cursor. `identity` names the leaf on its turn frames. */

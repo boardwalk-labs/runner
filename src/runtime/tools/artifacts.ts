@@ -1,4 +1,4 @@
-// artifacts — persist + reference run outputs (MASTER_SPEC §9.1 + §13.6). Available to any agent
+// artifacts — persist + reference run outputs (the platform spec + §13.6). Available to any agent
 // (no sandbox required). Three operations:
 //   * write(name, content_type, body)   → store a file under the run's prefix; returns id + a signed URL.
 //   * list()                            → artifacts produced in THIS run.
@@ -6,8 +6,8 @@
 //
 // This tool is a THIN agent-facing surface: it validates input + formats output and delegates the
 // actual storage to an injected `ArtifactStore`. Under the Runner Credential Broker
-// (docs/RUNNER_BROKER.md) the store is broker-backed — the broker computes the S3 key, neutralizes
-// the content type (review #32), PUTs with its own creds, and records the catalog row, so the
+// (the Runner Credential Broker model) the store is broker-backed — the broker computes the S3 key, neutralizes
+// the content type, PUTs with its own creds, and records the catalog row, so the
 // untrusted runner holds no S3 credential and can't bypass those server-side rules.
 
 import { z } from "zod";
@@ -15,7 +15,7 @@ import { ARTIFACT_MAX_BYTES } from "../wire/artifact_storage.js";
 import type { BoardwalkTool, ToolContext } from "./types.js";
 
 // Body cap: a small write travels through the broker's buffered Runner Control endpoint (≤5 MiB
-// wire); a large one takes the presigned-PUT path (docs/RUNNER_BROKER.md §7 step 4) that streams the
+// wire); a large one takes the presigned-PUT path (the Runner Credential Broker model) that streams the
 // body straight to S3. Either way the artifact is bounded by ARTIFACT_MAX_BYTES — the cap here is on
 // the body STRING, sized for a full-size binary artifact carried as base64 (~4/3 inflation). The
 // broker re-validates the true byte size server-side (the authoritative check).

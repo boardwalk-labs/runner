@@ -1,4 +1,4 @@
-// Inference proxy protocol (docs/RUNNER_BROKER.md §4 — "Inference (class 2)").
+// Inference proxy protocol (the Runner Credential Broker model — "Inference (class 2)").
 //
 // The runner never invokes a model directly: under the Runner Credential Broker it holds no
 // managed-inference creds and no BYO provider key. Instead the `agent()` leaf's model turn (the
@@ -13,7 +13,7 @@
 //
 // Transport: the response is **newline-delimited JSON** (one frame per line). A model turn streams
 // many text deltas; NDJSON lets the runner consume them incrementally over the raw socket (the
-// buffered REST path can't stream — MASTER_SPEC §4.2). Each frame is one of:
+// buffered REST path can't stream — the platform spec). Each frame is one of:
 //   { "t": "delta",  "text": <string> }                  — a streamed assistant-text chunk
 //   { "t": "result", "turn": <ChatTurn>, "modelRef": <string>, "costMicros": <number> }  — terminal turn
 //   { "t": "error",  "error": { code, message } }         — a terminal model/broker error

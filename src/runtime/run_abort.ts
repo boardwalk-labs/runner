@@ -1,4 +1,4 @@
-// run_abort — the provider-agnostic cooperative-cancellation substrate for a run (docs/RUNNER_BROKER.md
+// run_abort — the provider-agnostic cooperative-cancellation substrate for a run (the Runner Credential Broker model
 // §15 credit watching; the foundation user-initiated cancel will reuse).
 //
 // The cancellation primitive is a Web-standard `AbortSignal` — NOT a Strands/model concept. The worker

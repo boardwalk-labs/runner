@@ -1,4 +1,4 @@
-// WorkspaceStore — per-workflow persistent /workspace, broker-mediated (docs/RUNNER_BROKER.md §5).
+// WorkspaceStore — per-workflow persistent /workspace, broker-mediated (the Runner Credential Broker model).
 //
 // Hosted runs that opt in (manifest `workspace.persist`) get a `/workspace` that survives ACROSS runs
 // of the workflow + across a crash-restart. It is NOT a mounted shared filesystem — that would be

@@ -1,6 +1,6 @@
 // web_search — wraps the Tavily API (https://docs.tavily.com/docs/api-reference).
 //
-// Per MASTER_SPEC §13.5: Tavily is Boardwalk's default web-search provider. API
+// Per the platform spec: Tavily is Boardwalk's default web-search provider. API
 // key fetched from Secrets Manager (`boardwalk/<stage>/tavily/api-key`) and
 // cached at the module level per container, NEVER appearing in the agent's
 // conversation.
@@ -145,7 +145,7 @@ export function makeWebSearchTool(
 }
 
 /**
- * Broker-backed web_search for the runner (docs/RUNNER_BROKER.md): identical name/schemas/behavior
+ * Broker-backed web_search for the runner (the Runner Credential Broker model): identical name/schemas/behavior
  * to {@link makeWebSearchTool}, but the Tavily call runs in the broker (which holds the platform key)
  * — the runner just forwards the query, so it needs NO Tavily secret (`secretsRequired: []`). Wired on
  * the worker when the control plane is on; the direct tool above is the pre-broker/local path.
