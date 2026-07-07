@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.github
+coverage
+*.test.ts
+**/*.test.ts
+.dockerignore
+Dockerfile
+README.md
+CONTRACT.md
+SPEC.md
