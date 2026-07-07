@@ -1,6 +1,6 @@
 {
   "name": "@boardwalk-labs/runner",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Boardwalk self-hosted runner: execute cloud-scheduled runs on your own machines. Currently: the canonical runner contract types.",
   "license": "Apache-2.0",
   "repository": {

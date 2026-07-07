@@ -32,7 +32,15 @@ type ConsoleMethod = (...args: unknown[]) => void;
  * Patch the global console so each call is forwarded to the original AND handed (formatted) to
  * `sink`. Returns a restore function — ALWAYS call it (the worker runs `restore()` in a finally).
  */
-export function captureConsole(sink: (stream: LogStream, text: string) => void): () => void {
+export function captureConsole(
+  sink: (stream: LogStream, text: string) => void,
+  /** Scrub known secret values from each formatted line before it reaches EITHER sink. A program
+   *  that `console.log`s a resolved secret must not leak it — to the run's `program_output` events
+   *  OR to container stdout (CloudWatch). We format+redact once and print the SAME redacted string
+   *  to the original console (equivalent output; `util.format` is what console does internally).
+   *  Defaults to identity (tests/local). */
+  redact: (text: string) => string = (t) => t,
+): () => void {
   const console_ = globalThis.console as unknown as Record<string, ConsoleMethod>;
   const originals: Record<string, ConsoleMethod> = {};
 
@@ -41,9 +49,10 @@ export function captureConsole(sink: (stream: LogStream, text: string) => void):
     if (typeof original !== "function") continue;
     originals[method] = original;
     console_[method] = (...args: unknown[]): void => {
-      original.apply(console_, args); // still print to the container stdout (CloudWatch)
+      const text = redact(format(...args));
+      original.call(console_, text); // print the REDACTED line to container stdout (CloudWatch)
       try {
-        sink(stream, format(...args));
+        sink(stream, text);
       } catch {
         // best-effort — a telemetry hiccup must never break the program's own logging
       }

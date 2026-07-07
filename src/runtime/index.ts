@@ -365,7 +365,13 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // throws) so no language-server process leaks past the run.
       lsp: lspService,
       // The orchestrator emits the program's declared output onto the wire (`output` kind).
-      activity: { output: (value: unknown) => void runEvents.emit({ kind: "output", value }) },
+      // Redact the declared-output EVENT (observability): a secret the program put in output()
+      // must not surface in the run's event stream. The FUNCTIONAL output program_runner returns
+      // for `workflows.call` is a separate path and stays raw, so cross-workflow data flow is intact.
+      activity: {
+        output: (value: unknown) =>
+          void runEvents.emit({ kind: "output", value: redactor.redactValue(value) }),
+      },
       // Filled by the runner once the artifact extracts; the leaf's `skillsDir` thunk reads it.
       setProgramDir: (dir: string) => {
         programDir = dir;

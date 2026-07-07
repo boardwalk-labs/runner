@@ -356,7 +356,9 @@ export async function runProgramWorker(
   const runtimeFlush = deps.startRuntimeFlush?.({ run: claimed, startedAtMs: sessionStartMs });
   // Capture the program's console.* as `log` run-events for the duration of the body (best-effort).
   const restoreConsole =
-    deps.onProgramLog !== undefined ? captureConsole(deps.onProgramLog) : (): void => undefined;
+    deps.onProgramLog !== undefined
+      ? captureConsole(deps.onProgramLog, (text) => redactor.redactText(text))
+      : (): void => undefined;
   let result: ProgramResult;
   try {
     result = await runWorkflowProgram(

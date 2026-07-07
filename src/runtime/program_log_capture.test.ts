@@ -13,12 +13,29 @@ describe("captureConsole", () => {
     console.error("boom", 42);
     restore();
 
-    // Assert BEFORE mockRestore (which clears the spies' recorded calls).
-    expect(logSpy).toHaveBeenCalledWith("hello %s", "world"); // forwarded to original (→ CloudWatch)
+    // Assert BEFORE mockRestore (which clears the spies' recorded calls). The original console now
+    // receives the SAME formatted string the sink does (so redaction covers CloudWatch too).
+    expect(logSpy).toHaveBeenCalledWith("hello world"); // formatted, forwarded to original
     expect(sink).toHaveBeenNthCalledWith(1, "stdout", "hello world"); // util.format applied
     expect(sink).toHaveBeenNthCalledWith(2, "stderr", "boom 42"); // error → stderr stream
     logSpy.mockRestore();
     errSpy.mockRestore();
+  });
+
+  it("redacts a secret value from BOTH the sink event and the container stdout", () => {
+    const sink = vi.fn();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const secret = "sk-super-secret-value";
+    const redact = (t: string): string => t.split(secret).join("[REDACTED]");
+
+    const restore = captureConsole(sink, redact);
+    console.log("token is %s now", secret);
+    restore();
+
+    expect(sink).toHaveBeenCalledWith("stdout", "token is [REDACTED] now"); // event scrubbed
+    expect(logSpy).toHaveBeenCalledWith("token is [REDACTED] now"); // CloudWatch scrubbed too
+    expect((logSpy.mock.calls[0]?.[0] as string).includes(secret)).toBe(false);
+    logSpy.mockRestore();
   });
 
   it("a throwing sink never breaks the program's own logging", () => {
