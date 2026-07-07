@@ -1,4 +1,4 @@
-// WorkflowProgramRunner — executes a workflow program (the JS-body model, docs/WORKFLOW_RUNTIME.md).
+// WorkflowProgramRunner — executes a workflow program (the JS-body model, the workflow runtime design).
 //
 // A run is the execution of a built program ARTIFACT (§3.9): the worker is handed the VERIFIED tarball
 // (its sha256 already checked against the pinned digest by the orchestrator) plus the entry module
@@ -21,7 +21,7 @@
 // (no checkpoint, no exit). A crash mid-run restarts the run from the top (handled by the
 // worker/scheduler-sweep, not here). Output capture is deferred (v0 returns null).
 
-import { mkdir, writeFile, rm, symlink } from "node:fs/promises";
+import { mkdir, writeFile, rm, symlink, lstat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -34,7 +34,7 @@ import {
   resetRuntime,
 } from "@boardwalk-labs/workflow/runtime";
 import type { WorkflowHost, JsonValue } from "@boardwalk-labs/workflow/runtime";
-import { createLogger } from "./support/index.js";
+import { AppError, ErrorCode, createLogger } from "./support/index.js";
 import { SuspendError, type SuspendSignal } from "./suspension.js";
 
 const log = createLogger("ProgramRunner");
@@ -52,6 +52,19 @@ const RUN_DIR = ".bw-runs";
  * still exist.
  */
 export async function ensureSdkLink(execDir: string): Promise<void> {
+  // A program tarball that ships its own `node_modules/@boardwalk-labs/workflow` would shadow the
+  // runtime's copy — the host adapter is installed on OUR instance, so the program's hooks would
+  // silently throw "no host installed". Fail loudly instead of link-then-EEXIST-swallow. Only a
+  // REAL entry is a vendored copy; a symlink is our own link (idempotent re-invocation), left be.
+  const linkPath = join(execDir, "node_modules", "@boardwalk-labs", "workflow");
+  const existing = await lstat(linkPath).catch(() => null);
+  if (existing !== null) {
+    if (existing.isSymbolicLink()) return;
+    throw new AppError(
+      ErrorCode.VALIDATION_FAILED,
+      "Program bundles its own @boardwalk-labs/workflow; the runtime provides it (do not vendor it).",
+    );
+  }
   try {
     // Resolve via the MAIN entry (the SDK's export map exposes no "./package.json") and cut the
     // path back to the package root.
@@ -114,7 +127,7 @@ export interface ProgramRunnerDeps {
    * Scrubs known secret values out of a string (the run's `SecretRedactor.redactText`). Applied to a
    * top-level throw's message before it is logged AND before it is returned to the worker — a program
    * that resolves a secret and then throws it in an error message must NOT land that secret raw in the
-   * logs or the finalized run output (MASTER_SPEC §12, review #5). Defaults to identity (tests/local).
+   * logs or the finalized run output (the platform spec). Defaults to identity (tests/local).
    */
   redactText?: (text: string) => string;
   /**
@@ -125,7 +138,7 @@ export interface ProgramRunnerDeps {
    */
   onOutput?: (value: unknown) => void;
   /**
-   * Resolves when a host seam SUSPENDS the run (docs/SUSPENSION.md) — the worker wires it to the
+   * Resolves when a host seam SUSPENDS the run (the durable-suspension design) — the worker wires it to the
    * host's `onSuspend` so a suspend is surfaced OUT OF BAND, racing the program body. The program's
    * own `try/catch` can't swallow a suspend this way (the suspending seam never resolves; this signal
    * short-circuits at the runner). Absent ⇒ no suspension wired (a seam that suspends throws

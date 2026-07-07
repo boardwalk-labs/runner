@@ -1,5 +1,5 @@
 // The broker inference transport the engine-backed leaf streams a model turn through
-// (docs/RUNNER_BROKER.md §4 — "Inference (class 2)").
+// (the Runner Credential Broker model)").
 //
 // Under the Runner Credential Broker the runner invokes NO model directly: it holds neither the
 // managed-inference key nor any BYO provider key. So the `agent()` leaf's `LeafIo.streamModel`

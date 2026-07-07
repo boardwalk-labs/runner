@@ -1,5 +1,5 @@
 // LeaseRenewer — keeps a long run's lease fresh so the recovery sweep doesn't reclaim a STILL-ALIVE
-// worker (docs/RUNNER_BROKER.md; MASTER_SPEC §6).
+// worker (the Runner Credential Broker model).
 //
 // A run is claimed with a fixed lease (DEFAULT_LEASE_MS, 5 min). The worker never used to renew it,
 // so any run longer than the lease (an Opus agentic loop is routinely 7+ min) had its lease expire

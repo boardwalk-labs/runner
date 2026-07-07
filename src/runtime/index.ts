@@ -1,9 +1,9 @@
-// Worker composition root (docs/WORKFLOW_RUNTIME.md + docs/RUNNER_BROKER.md). The Boardwalk-hosted
+// Worker composition root (the workflow runtime design). The Boardwalk-hosted
 // worker container runs `node dist/fargate/worker/index.js`; the dispatcher launches it per run with
 // RUN_ID + the per-run control-plane handle. This file assembles real implementations behind every
 // seam `runProgramWorker(runId, deps)` injects, then runs the one workflow program to terminal.
 //
-// BROKERED-ONLY (security review #1): the runner is UNTRUSTED and holds NO platform credential — only
+// BROKERED-ONLY (security): the runner is UNTRUSTED and holds NO platform credential — only
 // its short-lived run token. EVERY privileged seam goes through the Runner Control API (the broker):
 //   - agent()         → EngineLeafExecutor: the OSS engine's loop (runAgentLeaf) over a broker-backed
 //                       LeafIo — the model turn streams through /inference (invoked server-side).
@@ -67,7 +67,7 @@ const log = createLogger("worker_entrypoint");
 
 /** Constructed primitives the pure assembly consumes (real ones in main(), fakes in tests). The
  *  runner holds NO platform credential — only the per-run control-plane handle (run token + broker
- *  URL); everything else is reached through the Runner Control API (docs/RUNNER_BROKER.md). */
+ *  URL); everything else is reached through the Runner Control API (the Runner Credential Broker model). */
 export interface WorkerRuntime {
   /** Stable worker identity stamped onto the lease (ECS task arn / hostname / run-derived). */
   workerId: string;
@@ -134,7 +134,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
   });
   log.info("runner_control_enabled", { runId: runtime.runId });
 
-  // The replay frontier (the highest journaled seq at claim) drives SILENT REPLAY (docs/SUSPENSION.md):
+  // The replay frontier (the highest journaled seq at claim) drives SILENT REPLAY (the durable-suspension design):
   // a resumed run suppresses observability for seams it already ran. Captured at claim, read by
   // buildHost (which runs right after claim) when constructing the per-run host.
   let replayFrontier = 0;
@@ -154,7 +154,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
   // bootstrap captured + scrubbed it (capturePlatformContext) so the agent's bash / subprocesses
   // can't read it. The program reaches it ONLY via `runtime.apiToken()` (built below); we still
   // record it in each run's redactor so a value the program threads into a tool can't echo back out
-  // of a tool result. Absent in the dev no-signing-key path. (docs/RUN_ENV_AND_CREDS.md)
+  // of a tool result. Absent in the dev no-signing-key path. (the run env/credential rules)
   const runApiKey = runtime.controlPlane.apiToken;
   // The broker (Runner Control API) is hosted on the api-server, so the public API shares its
   // origin; `runtime.apiUrl` exposes it and the program appends `/v1` or `/mcp/v1`.
@@ -189,7 +189,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     const nextMeterIdentifier = tokenMeterIdentifiers(run.id, meteringSessionId);
     // Per-run secret boundary: every value resolved (program `secrets.get` OR a tool's
     // ctx.secrets.resolve) is recorded into one shared redactor; the leaf seeds a fresh engine
-    // Redactor from it so the loop scrubs those values out of all model-bound content. MASTER_SPEC §12.
+    // Redactor from it so the loop scrubs those values out of all model-bound content. the platform spec
     const redactor = new SecretRedactor();
     // Record the run's own API key so a prompt-injected agent can't echo it back to the model.
     if (runApiKey !== undefined && runApiKey !== "") redactor.record(runApiKey);
@@ -287,7 +287,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
             workspaceRoot: runtime.workspaceRoot,
           })
         : undefined;
-    // Durable suspension (docs/SUSPENSION.md): the host raises a suspend OUT OF BAND (onSuspend +
+    // Durable suspension (the durable-suspension design): the host raises a suspend OUT OF BAND (onSuspend +
     // a never-resolving seam), so a program's own try/catch can't swallow it; the program runner
     // races `suspendSignal` against the body. One deferred per run — the first seam to suspend wins.
     let resolveSuspend: (signal: SuspendSignal) => void = () => undefined;
@@ -355,7 +355,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
         : {}),
       phases: phaseTracker,
     });
-    // Hand the redactor back too: the worker scrubs a terminal error's message with it (review #5);
+    // Hand the redactor back too: the worker scrubs a terminal error's message with it;
     // workspace (when opted in) hydrates at start + persists at terminal.
     return Promise.resolve({
       host,
@@ -417,7 +417,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     finalizer: {
       finalize: (_id, status, output) => broker.finalize(status, output, runtime.workerId),
     },
-    // Durable suspension (docs/SUSPENSION.md): persist the wake condition through the broker (journal
+    // Durable suspension (the durable-suspension design): persist the wake condition through the broker (journal
     // entry + a HITL request row, or the wake time for a long sleep) and release the lease — no
     // finalize. A wake (an answer or a timer) re-dispatches the run.
     suspender: {
@@ -495,7 +495,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
  * The per-run platform values the dispatcher injects as container env (ecs_run_task_client.ts). They
  * are captured into private worker state at bootstrap and DELETED from `process.env` before any user
  * program / agent leaf / subprocess can run — the run token + API token are credentials, and nothing
- * untrusted run code touches should inherit them (docs/RUN_ENV_AND_CREDS.md). The user owns the rest
+ * untrusted run code touches should inherit them (the run env/credential rules). The user owns the rest
  * of `process.env` outright.
  */
 export const PLATFORM_ENV_KEYS = [
@@ -537,7 +537,7 @@ export function capturePlatformContext(env: NodeJS.ProcessEnv): PlatformContext 
     }
     return value.trim();
   };
-  // The dispatcher always injects the control-plane handle (docs/RUNNER_BROKER.md). The runner is
+  // The dispatcher always injects the control-plane handle (the Runner Credential Broker model). The runner is
   // brokered-only — there is no DB/Redis/Stripe fallback — so a missing handle is a hard config error.
   const runId = read("RUN_ID");
   const apiToken = env.BOARDWALK_API_KEY?.trim();
@@ -560,7 +560,7 @@ export function capturePlatformContext(env: NodeJS.ProcessEnv): PlatformContext 
 export async function main(): Promise<void> {
   // Capture the platform context into private state and remove it from process.env BEFORE anything
   // else — so no user program / agent tool / subprocess we later spawn can read the run token or
-  // API token (docs/RUN_ENV_AND_CREDS.md). WORKER_ID / WORKSPACE_ROOT are non-secret infra knobs.
+  // API token (the run env/credential rules). WORKER_ID / WORKSPACE_ROOT are non-secret infra knobs.
   const platform = capturePlatformContext(process.env);
   const runId = platform.runId;
 

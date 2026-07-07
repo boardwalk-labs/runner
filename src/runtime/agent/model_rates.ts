@@ -6,7 +6,7 @@
 // no upstream cost: a BYO-provider turn (the org pays its own key), or a managed turn whose cost the
 // broker couldn't read. It bounds runaway loops; it is NOT the bill. Actual billing is per-request
 // COST PASS-THROUGH (OpenRouter's reported cost × margin) via Stripe meters (domain/billing +
-// run_usage_service). MASTER_SPEC §15.2.
+// run_usage_service). the platform spec
 //
 // Deliberately NOT a per-model table with a silent fallback: a lookup that returns a Sonnet-class
 // default for any unknown id only created the ILLUSION of precision. The real per-request cost (above)

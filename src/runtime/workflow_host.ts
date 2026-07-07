@@ -1,5 +1,5 @@
 // WorkerWorkflowHost — the real WorkflowHost the worker installs onto @boardwalk-labs/workflow
-// before running a program (docs/WORKFLOW_RUNTIME.md §3.8). The program's hooks delegate here:
+// before running a program (the workflow runtime design). The program's hooks delegate here:
 //
 //   agent(prompt, opts)        → an ephemeral Strands agent leaf (the demoted agent loop)
 //   sleep(arg)                 → an IN-PROCESS hold (hold-and-pay; no checkpoint, no exit)
@@ -169,7 +169,7 @@ function abortError(signal: AbortSignal): Error {
  * `import { runtime } from "@boardwalk-labs/workflow"`. MIRRORS the SDK's `RuntimeContext` — defined
  * locally so the host compiles BEFORE the @boardwalk-labs/workflow bump that adds the optional
  * `runtime` member to `WorkflowHost`; once that lands, the host's `runtime` satisfies it
- * structurally. Platform credentials are NEVER placed in `process.env` (docs/RUN_ENV_AND_CREDS.md):
+ * structurally. Platform credentials are NEVER placed in `process.env` (the run env/credential rules):
  * trusted program code reaches the public-API bearer ONLY through `apiToken()`, which is redacted
  * from all LLM context.
  */
@@ -216,7 +216,7 @@ export interface WorkerWorkflowHostDeps {
   /** Override the 7-day hold ceiling (tests). */
   maxSleepMs?: number;
   /**
-   * Durable-suspension journal (docs/SUSPENSION.md): the host memoizes each `agent`/`step`/`sleep`/
+   * Durable-suspension journal (the durable-suspension design): the host memoizes each `agent`/`step`/`sleep`/
    * `humanInput` seam here, so a resumed run replays journaled seams instantly instead of re-running
    * them. Backed by the broker over the run token on hosted runs. Absent ⇒ no memoization (the
    * local/test path): seams run live every time and a suspend can't be resumed.
@@ -241,7 +241,7 @@ export class WorkerWorkflowHost implements WorkflowHost {
   private readonly sleeper: SleepController;
   private readonly now: () => number;
   private readonly maxSleepMs: number;
-  /** Synchronous durable-seam counter + silent-replay live flag (docs/SUSPENSION.md). */
+  /** Synchronous durable-seam counter + silent-replay live flag (the durable-suspension design). */
   private readonly seq: SeamSequencer;
   /** Run context + on-demand public-API bearer the SDK `runtime` accessor reads off the host. */
   readonly runtime: RuntimeContext;
@@ -419,7 +419,7 @@ export class WorkerWorkflowHost implements WorkflowHost {
     return this.guarded(() => this.callWorkflowSeam(slug, input, opts));
   }
 
-  /** The `workflows.call` durable seam (docs/SUSPENSION.md): start the child once + memoize its
+  /** The `workflows.call` durable seam (the durable-suspension design): start the child once + memoize its
    *  output; a non-terminal child SUSPENDS the parent (`waiting_for_child`, the child's id journaled)
    *  — the parent releases its task and is woken when the child finalizes. On resume the seam polls
    *  the journaled child and returns its output (or throws on a failed child). Without a journal (the

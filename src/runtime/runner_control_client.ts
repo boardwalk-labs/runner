@@ -1,4 +1,4 @@
-// RunnerControlClient — the worker's HTTP client for the Runner Control API (docs/RUNNER_BROKER.md).
+// RunnerControlClient — the worker's HTTP client for the Runner Control API (the Runner Credential Broker model).
 //
 // Under the broker model the worker reaches run lifecycle through the api-server, not the DB directly:
 // it presents its per-run token (BOARDWALK_RUN_TOKEN) as a bearer credential and calls the broker for
@@ -110,7 +110,7 @@ export class RunnerControlClient {
     return {
       run: body.run,
       lastEventCursor: body.lastEventCursor ?? 0,
-      // The replay frontier for silent replay (docs/SUSPENSION.md): the highest journaled seq, so a
+      // The replay frontier for silent replay (the durable-suspension design): the highest journaled seq, so a
       // resumed run knows which seams already ran (suppress their re-emitted observability).
       lastJournalSeq: body.lastJournalSeq ?? 0,
     };
@@ -143,7 +143,7 @@ export class RunnerControlClient {
     if (res.status !== 204) throw await brokerError(res, "finalize");
   }
 
-  /** Look up a durable-seam journal entry by its seq (docs/SUSPENSION.md), or null on a replay miss
+  /** Look up a durable-seam journal entry by its seq (the durable-suspension design), or null on a replay miss
    *  (404). The broker joins a parked agent leaf's answers into the result server-side. */
   async journalGet(seq: number): Promise<JournalLookup | null> {
     const res = await this.fetchImpl(this.url(`journal/${encodeURIComponent(String(seq))}`), {
@@ -330,7 +330,7 @@ export class RunnerControlClient {
     return (await res.json()) as ArtifactWriteResult;
   }
 
-  /** Phase 1 of the LARGE-artifact path (docs/RUNNER_BROKER.md §7 step 4): presign an S3 PUT. The
+  /** Phase 1 of the LARGE-artifact path (the Runner Credential Broker model): presign an S3 PUT. The
    *  broker derives the S3 key + neutralizes/pins the served content type; it returns the upload URL +
    *  required headers + the `s3Key` to echo back at commit. No catalog row exists yet. */
   async presignArtifact(input: ArtifactPresignInput): Promise<ArtifactPresignResult> {
@@ -472,7 +472,7 @@ export class RunnerControlClient {
   }
 
   /**
-   * Proxy one model turn through the broker (docs/RUNNER_BROKER.md §4 — Inference). POSTs the
+   * Proxy one model turn through the broker (the Runner Credential Broker model). POSTs the
    * neutral conversation; the broker resolves the REAL model server-side (the runner holds no model
    * creds), invokes the matching engine adapter, and relays the model's stream back as NDJSON
    * `InferenceFrame`s (delta / result / error). Yields each frame; the engine-backed leaf surfaces

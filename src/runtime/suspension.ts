@@ -1,4 +1,4 @@
-// Durable-suspension primitives for the JS-body worker (docs/SUSPENSION.md).
+// Durable-suspension primitives for the JS-body worker (the durable-suspension design).
 //
 // A run SUSPENDS at a durable seam — a long `sleep`, a `humanInput()` gate, or the in-leaf
 // `human_input` tool — by releasing its Fargate task and re-acquiring one on wake. The mechanism is

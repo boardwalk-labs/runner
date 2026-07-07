@@ -77,7 +77,7 @@ describe("assembleWorkerDeps", () => {
     expect(typeof deps.buildHost).toBe("function");
     // The runner is brokered-only: it needs NO platform primitive (db / redis / billing / sqs /
     // Tavily), so the task role grants nothing and the metadata-endpoint escape has nothing to steal
-    // (security review #1). The telemetry buffer is drainable on exit (live-tail via /telemetry).
+    // (security). The telemetry buffer is drainable on exit (live-tail via /telemetry).
     expect(typeof deps.flushTelemetry).toBe("function");
   });
 
@@ -120,7 +120,7 @@ describe("assembleWorkerDeps", () => {
   });
 });
 
-describe("assembleWorkerDeps — Runner Control API (docs/RUNNER_BROKER.md)", () => {
+describe("assembleWorkerDeps — Runner Control API (the Runner Credential Broker model)", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -246,7 +246,7 @@ describe("assembleWorkerDeps — Runner Control API (docs/RUNNER_BROKER.md)", ()
   });
 });
 
-describe("capturePlatformContext (docs/RUN_ENV_AND_CREDS.md — the no-token-in-env invariant)", () => {
+describe("capturePlatformContext (the run env/credential rules)", () => {
   function platformEnv(): NodeJS.ProcessEnv {
     return {
       RUN_ID: "run-test",

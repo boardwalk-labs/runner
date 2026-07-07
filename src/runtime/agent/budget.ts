@@ -10,7 +10,7 @@
 // not a hand-rolled token estimate. Only a BYO turn (no upstream price) or a managed turn whose cost
 // the broker couldn't read falls back to a single flat representative rate
 // (`model_rates.ts::BUDGET_GUARDRAIL_RATE`), since a per-`agent()`-model run has no one model. Actual
-// billing remains per-request cost pass-through via Stripe meters (MASTER_SPEC §15.2). The meter takes
+// billing remains per-request cost pass-through via Stripe meters (the platform spec). The meter takes
 // the fallback rate as a constructor arg so tests inject a fixed rate.
 
 import { AppError, ErrorCode } from "../support/index.js";
@@ -39,7 +39,7 @@ export interface UsageDelta {
  * Cumulative usage carried forward from PRIOR worker sessions of the same run. Seeded from the
  * checkpoint on resume so budget caps bound the WHOLE run, not just the current session — a run
  * that sleeps / waits on a child / recovers from a crash must not get a fresh budget each time
- * (review #2). Zero for a fresh run.
+ *. Zero for a fresh run.
  */
 export interface PriorUsage {
   inputTokens: number;
@@ -150,7 +150,7 @@ export class BudgetMeter {
    * RUN-CUMULATIVE snapshot: this session's usage PLUS the prior sessions' usage seeded at
    * construction. Cap enforcement ({@link assertWithinCaps}) and checkpoint persistence use
    * this so a run that resumes after a sleep/wait/crash is bounded by its declared caps across
-   * the whole run — not once per session (review #2). `snapshot()` stays session-local because
+   * the whole run — not once per session. `snapshot()` stays session-local because
    * per-session token metering reports token deltas; seeding it would double-report to Stripe.
    */
   cumulative(): BudgetSnapshot {
@@ -174,11 +174,11 @@ export class BudgetMeter {
    */
   assertWithinCaps(): void {
     if (this.budget === undefined) return;
-    // Cumulative across resume sessions — caps bound the whole run, not each session (review #2).
+    // Cumulative across resume sessions — caps bound the whole run, not each session.
     const snap = this.cumulative();
     // `max_tokens` deliberately bounds CONVERSATION tokens (input + output) only; cache-read /
     // cache-write tokens are tracked + fully billed via costFor() and are bounded by `max_usd`,
-    // not by this cap (review #19). totalTokens (snapshot/cumulative) reflects that choice.
+    // not by this cap. totalTokens (snapshot/cumulative) reflects that choice.
     if (this.budget.max_tokens !== undefined && snap.totalTokens > this.budget.max_tokens) {
       throw new AppError(
         ErrorCode.BUDGET_EXCEEDED,

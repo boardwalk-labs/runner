@@ -237,7 +237,7 @@ describe("runWorkflowProgram — failures", () => {
     expect(res.kind).toBe("failed");
   });
 
-  it("applies redactText to a thrown error message (review #5)", async () => {
+  it("applies redactText to a thrown error message", async () => {
     const rec = recordingHost();
     const source = `throw new Error("boom token-abc123xyz789 here");`;
     const res = await runSource("run_10", source, null, {
@@ -336,6 +336,15 @@ describe("ensureSdkLink", () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bw-sdklink-"));
     await ensureSdkLink(dir);
     await ensureSdkLink(dir);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("rejects a program that vendored its own real SDK dir (shadowing)", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bw-sdklink-"));
+    await fs.mkdir(path.join(dir, "node_modules", "@boardwalk-labs", "workflow"), {
+      recursive: true,
+    });
+    await expect(ensureSdkLink(dir)).rejects.toThrow(/bundles its own/);
     await fs.rm(dir, { recursive: true, force: true });
   });
 });

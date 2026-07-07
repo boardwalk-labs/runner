@@ -1,4 +1,4 @@
-// program_worker — the JS-body worker orchestration (docs/WORKFLOW_RUNTIME.md).
+// program_worker — the JS-body worker orchestration (the workflow runtime design).
 //
 // Replaces the checkpoint-and-resume run_worker. One run, claim to terminal:
 //   1. Race-safe claim (pending → running). Lose the race → exit.
@@ -82,7 +82,7 @@ export interface RunFinalizer {
   finalize(runId: string, status: "completed" | "failed", output: unknown): Promise<void>;
 }
 
-/** Persists a durable SUSPENSION (docs/SUSPENSION.md): the broker records the wake condition (a
+/** Persists a durable SUSPENSION (the durable-suspension design): the broker records the wake condition (a
  *  pending/suspended journal entry + a human-input request row for HITL, or the wake time for a long
  *  sleep), flips the run to its suspended status, and releases the lease — all transactionally. The
  *  run is NOT finalized; a wake (an answer, a child finalize, or a timer) re-dispatches it. */
@@ -117,7 +117,7 @@ export interface RunOutputHandle {
 /** Builds the per-run host (leaf + sleep + children + secrets) for a claimed run. Receives the run's
  *  cooperative-cancellation `signal` so every host hook honors it (credit exhaustion / cancel).
  *  Returns the run's `SecretRedactor` alongside the host so the orchestrator can scrub a terminal
- *  error with the SAME instance every resolved secret was recorded into (review #5); `readUsage` — a
+ *  error with the SAME instance every resolved secret was recorded into; `readUsage` — a
  *  sampler over the run-level BudgetMeter the token flusher meters from; and an optional `workspace`
  *  handle (when the workflow opted into persistence) the orchestrator hydrates at start + persists at
  *  terminal (the host's `sleep` also persists, wired inside buildHost). */
@@ -141,7 +141,7 @@ export type ProgramHostBuilder = (
    *  it to the runner's `onExtracted`. Optional — absent on paths that don't surface bundled files. */
   setProgramDir?: (dir: string) => void;
   /** Resolves when a host seam SUSPENDS the run — wired to the host's `onSuspend`, threaded into the
-   *  program runner so a suspend short-circuits the body out of band (docs/SUSPENSION.md). Absent ⇒
+   *  program runner so a suspend short-circuits the body out of band (the durable-suspension design). Absent ⇒
    *  no durable suspension on this path (a suspend then surfaces as a thrown SuspendError). */
   suspendSignal?: Promise<SuspendSignal>;
 }>;
@@ -184,7 +184,7 @@ export interface ProgramWorkerDeps {
   /** Periodic runtime metering (optional — absent disables it, e.g. the local/test path). */
   startRuntimeFlush?: RuntimeMeterStarter;
   finalizer: RunFinalizer;
-  /** Persists a durable suspension (docs/SUSPENSION.md). Absent ⇒ no suspension support: a run that
+  /** Persists a durable suspension (the durable-suspension design). Absent ⇒ no suspension support: a run that
    *  reaches a suspend fails cleanly rather than stranding (the brokered worker always wires it). */
   suspender?: RunSuspender;
   buildHost: ProgramHostBuilder;
@@ -246,7 +246,7 @@ export async function runProgramWorker(
 
   // Fetch + verify the program ARTIFACT before any work (pre-flight; an integrity failure = no charge,
   // no run). The bytes are the EXACT artifact the manifest was derived from at deploy; verifying the
-  // sha256 here means a tampered/corrupted object can never be imported (docs/WORKFLOW_RUNTIME.md §3.9).
+  // sha256 here means a tampered/corrupted object can never be imported (the workflow runtime design).
   let tarball: Uint8Array;
   try {
     tarball = await deps.fetchProgram(loaded.program.downloadUrl);

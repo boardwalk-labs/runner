@@ -552,7 +552,7 @@ describe("runProgramWorker — program failure (charges, then fails)", () => {
     expect(h.lease.stopped).toBe(1); // the renewer is still drained
   });
 
-  it("redacts a resolved secret from a thrown error before finalizing (review #5)", async () => {
+  it("redacts a resolved secret from a thrown error before finalizing", async () => {
     const secret = "sk-live-supersecret-value-1234";
     const h = harness({
       programSource: `throw new Error("upstream rejected key ${secret}");`,

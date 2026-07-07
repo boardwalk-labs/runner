@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Runner-direct BYO inference (docs/SELF_HOSTED_RUNNERS.md D7): the managed lane stays
+// Runner-direct BYO inference (the self-hosted runner design): the managed lane stays
 // brokered (the platform key never leaves the platform), but a BYO provider is the ORG'S OWN
 // endpoint + key — class-3 material the runner may hold — so the runtime calls it directly
 // with the SAME engine adapters the broker uses. This is what makes a LAN-only model work on
@@ -80,9 +80,16 @@ export async function streamDirectTurn(
   entry: ByoInferenceProvider,
   req: DirectTurnRequest,
   onDelta: ((text: string) => void) | undefined,
+  /** Register the resolved key with the CURRENT leaf's engine redactor, before the model call.
+   *  The key resolves mid-leaf (after the leaf's redactor snapshot is seeded), so without this a
+   *  provider that echoes the Authorization header in an error body would leak it into that
+   *  leaf's error run event. The run-level redactor already has it via resolveSecret; this closes
+   *  the per-leaf gap. */
+  registerSecret?: (value: string) => void,
 ): Promise<{ turn: ChatTurn; modelRef: string }> {
   const apiKey =
     entry.auth_secret_name === null ? null : await deps.resolveSecret(entry.auth_secret_name);
+  if (apiKey !== null) registerSecret?.(apiKey);
   if (entry.base_url === null) {
     throw new Error(`BYO provider '${entry.name}' has no base_url`);
   }

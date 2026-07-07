@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// The self-hosted runner daemon (docs/SELF_HOSTED_RUNNERS.md R4): poll → claim → spawn ONE run
+// The self-hosted runner daemon (the self-hosted runner design): poll → claim → spawn ONE run
 // process → heartbeat while it runs → clean → poll. One run at a time per daemon (concurrency =
 // more daemons/machines); drain (Ctrl-C, admin drain, org toggle off) finishes the current run
 // then stops claiming. The per-run process is the SAME runtime a Boardwalk-hosted worker boots
@@ -71,7 +71,7 @@ export function runProcessEnv(
     BOARDWALK_RUN_TOKEN: claim.control_plane.run_token,
     BOARDWALK_API_KEY: claim.control_plane.api_token,
     BOARDWALK_TASK_CPU_UNITS: String(os.cpus().length * 1024),
-    // The org's BYO inference providers, as data (plan D7) — consumed by the runtime's direct
+    // The org's BYO inference providers, as data (the runner-direct BYO design) — consumed by the runtime's direct
     // model path. Names + endpoints + secret NAMES only; never a credential value.
     BOARDWALK_BYO_PROVIDERS: JSON.stringify(claim.byo_providers),
     WORKER_ID: opts.runnerId,
@@ -141,6 +141,12 @@ export function startDaemon(deps: DaemonDeps): DaemonController {
 
   const done = (async () => {
     log.info("daemon_started", { runnerId: deps.runnerId, workDir: deps.workDir });
+    // Reclaim run dirs a previous daemon left behind (crash / SIGKILL / force-quit): a completed
+    // run always cleans its own dir, so anything here is orphaned and may hold a workspace the
+    // crashed run wrote. Best-effort; a failure must not stop the daemon.
+    await rm(path.join(deps.workDir, "runs"), { recursive: true, force: true }).catch(
+      () => undefined,
+    );
     while (!draining) {
       deps.onIdle?.();
       try {

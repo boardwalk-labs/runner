@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect, vi } from "vitest";
-import { mkdtemp, mkdir, writeFile, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, stat, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { runProcessEnv, startDaemon, type RunProcessHandle } from "./daemon.js";
@@ -257,5 +258,34 @@ describe("identity round-trip", () => {
     await mkdir(dir, { recursive: true });
     await writeFile(path.join(dir, "api.example--default.json"), "{not json");
     expect(await loadIdentity(dir, "https://api.example", "default")).toBeNull();
+  });
+});
+
+describe("startDaemon — startup reclaim", () => {
+  it("removes an orphaned runs/ dir left by a crashed daemon before polling", async () => {
+    const workDir = await mkdtemp(path.join(os.tmpdir(), "bw-daemon-reclaim-"));
+    const orphan = path.join(workDir, "runs", "run_crashed", "workspace");
+    await mkdir(orphan, { recursive: true });
+    await writeFile(path.join(orphan, "leaked.txt"), "stale credential material");
+
+    const client = {
+      poll: vi.fn().mockResolvedValue({ action: "continue", assignment: null }),
+      claim: vi.fn(),
+      heartbeat: vi.fn(),
+    };
+    const daemon = startDaemon({
+      client: client,
+      runtimeEntry: "/x",
+      workDir,
+      runnerId: "r",
+      spawn: () => ({ wait: () => Promise.resolve(0), kill: () => undefined }),
+      once: true,
+      sleep: () => Promise.resolve(),
+    });
+    // Give the first poll a tick, then drain out.
+    daemon.drain();
+    await daemon.done;
+    expect(existsSync(path.join(workDir, "runs", "run_crashed"))).toBe(false);
+    await rm(workDir, { recursive: true, force: true });
   });
 });

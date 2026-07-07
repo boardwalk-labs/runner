@@ -1,5 +1,5 @@
 // BrokerEventPublisher — a `RedisPublisher` that ships the agent event-stream through the broker
-// instead of publishing to Redis directly (docs/RUNNER_BROKER.md §4 — Telemetry).
+// instead of publishing to Redis directly (the Runner Credential Broker model).
 //
 // The run-event live channel is a per-event `redis.publish(run:<id>, frame)`. Under the broker the
 // runner holds no Redis credential, so this stand-in BUFFERS frames and POSTs them in batches to the

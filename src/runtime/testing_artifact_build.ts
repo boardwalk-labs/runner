@@ -1,4 +1,4 @@
-// Server-side single-file artifact build (web / MCP deploy surface, docs/WORKFLOW_RUNTIME.md §3.9).
+// Server-side single-file artifact build (web / MCP deploy surface, the workflow runtime design).
 //
 // The CLI bundles packages locally; web + MCP submit a single TS/JS file with no client bundler, so
 // the api-server builds the IDENTICAL artifact shape: type-strip the source → `index.mjs`, pack a

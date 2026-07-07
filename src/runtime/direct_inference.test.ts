@@ -83,6 +83,29 @@ describe("streamDirectTurn", () => {
     expect((init.headers as Record<string, string>).authorization).toBe("Bearer sk-org-own");
   });
 
+  it("registers the resolved key with the leaf redactor before the model call (leak guard)", async () => {
+    const resolveSecret = vi.fn().mockResolvedValue("sk-org-own");
+    // Endpoint 401s with a body echoing the key (a hostile/naive BYO endpoint).
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: "bad key: Bearer sk-org-own" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const registered: string[] = [];
+    await expect(
+      streamDirectTurn(
+        { registry: [VLLM], resolveSecret, fetchImpl },
+        VLLM,
+        { model: "qwen3", messages: [{ role: "user", text: "hi" }], tools: [] },
+        undefined,
+        (v) => registered.push(v),
+      ),
+    ).rejects.toBeDefined();
+    // The key was registered BEFORE the failing call, so the leaf redactor can scrub the error.
+    expect(registered).toEqual(["sk-org-own"]);
+  });
+
   it("passes apiKey null through for a keyless endpoint (e.g. LAN ollama)", async () => {
     const fetchImpl = vi
       .fn()
