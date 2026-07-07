@@ -6,11 +6,16 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { existsSync } from "node:fs";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { agent as sdkAgent } from "@boardwalk-labs/workflow";
 import type { WorkflowHost } from "@boardwalk-labs/workflow/runtime";
 import { extract as tarExtract } from "tar";
 import {
+  ensureSdkLink,
   runWorkflowProgram,
   type ProgramResult,
   type ProgramRunnerDeps,
@@ -307,5 +312,30 @@ describe("runWorkflowProgram — runtime teardown", () => {
     await expect(sdkAgent("after", { model: "anthropic/claude-sonnet-4.5" })).rejects.toThrow(
       /no host installed/,
     );
+  });
+});
+
+describe("ensureSdkLink", () => {
+  it("links the runtime's own @boardwalk-labs/workflow into the exec dir", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bw-sdklink-"));
+    await ensureSdkLink(dir);
+    const link = path.join(dir, "node_modules", "@boardwalk-labs", "workflow");
+    const real = await fs.realpath(link);
+    // Same package instance the runtime imported: realpath of the link == realpath of our dep.
+    const require = createRequire(import.meta.url);
+    // Same package instance the runtime imported: the link's realpath is the package root the
+    // main entry lives under (the export map exposes no "./package.json" subpath).
+    const expected = await fs.realpath(
+      path.dirname(path.dirname(require.resolve("@boardwalk-labs/workflow"))),
+    );
+    expect(real).toBe(expected);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("is idempotent (second call is a no-op, not an error)", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bw-sdklink-"));
+    await ensureSdkLink(dir);
+    await ensureSdkLink(dir);
+    await fs.rm(dir, { recursive: true, force: true });
   });
 });

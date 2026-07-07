@@ -21,8 +21,9 @@
 // (no checkpoint, no exit). A crash mid-run restarts the run from the top (handled by the
 // worker/scheduler-sweep, not here). Output capture is deferred (v0 returns null).
 
-import { mkdir, writeFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, writeFile, rm, symlink } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import {
@@ -40,6 +41,37 @@ const log = createLogger("ProgramRunner");
 
 /** Subdirectory (under the work root) that holds transient extracted program trees. */
 const RUN_DIR = ".bw-runs";
+
+/**
+ * Link THIS runtime's `@boardwalk-labs/workflow` into the exec dir's `node_modules` so the
+ * program's bare import resolves anywhere (a self-hosted daemon workspace has no ancestor
+ * `node_modules`; hosted images do, making the link a harmless no-op there). A symlink — not a
+ * copy — is load-bearing: Node resolves it to the REAL path, so the program gets the same
+ * module instance the host adapter was installed on (the singleton contract). `junction` covers
+ * Windows without elevation; a failed link is only logged, since a resolvable ancestor may
+ * still exist.
+ */
+export async function ensureSdkLink(execDir: string): Promise<void> {
+  try {
+    // Resolve via the MAIN entry (the SDK's export map exposes no "./package.json") and cut the
+    // path back to the package root.
+    const entry = createRequire(import.meta.url).resolve("@boardwalk-labs/workflow");
+    const marker = join("node_modules", "@boardwalk-labs", "workflow");
+    const idx = entry.lastIndexOf(marker);
+    const sdkDir = idx === -1 ? dirname(dirname(entry)) : entry.slice(0, idx + marker.length);
+    const scopeDir = join(execDir, "node_modules", "@boardwalk-labs");
+    await mkdir(scopeDir, { recursive: true });
+    await symlink(
+      sdkDir,
+      join(scopeDir, "workflow"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+      log.warn("sdk_link_failed", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+}
 /** Scratch filename for the in-flight artifact tarball inside a run's dir. */
 const ARTIFACT_FILE = "__program.tgz";
 
@@ -136,6 +168,9 @@ export async function runWorkflowProgram(
     await rm(tgzPath, { force: true });
     // The bundled tree is now on disk — let the worker point the agent() leaf at `<dir>/skills/*.md`.
     deps.onExtracted?.(dir);
+    // Make the bare `@boardwalk-labs/workflow` import resolve from ANY work root — hosted images
+    // provide it via an ancestor node_modules, but a self-hosted daemon's workspace has none.
+    await ensureSdkLink(dir);
 
     const entryPath = join(dir, ...args.entry.split("/"));
     // Run the program body. A SUSPEND is surfaced two ways and both land here as a `suspended`
