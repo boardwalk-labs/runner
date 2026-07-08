@@ -39,6 +39,7 @@ import type { WorkflowManifest } from "./wire/manifest.js";
 import { RecordingSecretResolver } from "./recording_secret_resolver.js";
 import { EngineLeafExecutor } from "./leaf_executor.js";
 import { parseByoProviders } from "./direct_inference.js";
+import { applyIdentityToEnv, connectIdentityRelayFd, relayFdFromEnv } from "./identity_relay.js";
 import type { ByoInferenceProvider } from "../contract.js";
 import { WorkerWorkflowHost, type RuntimeContext } from "./workflow_host.js";
 import {
@@ -564,6 +565,21 @@ export function capturePlatformContext(env: NodeJS.ProcessEnv): PlatformContext 
 }
 
 export async function main(): Promise<void> {
+  // Relay-mode bootstrap (the snapshot-based microVM substrate): when the guest init handed
+  // us an identity relay fd, park here — warm, generic, pre-identity; this await is what the
+  // base snapshot freezes — until the run's identity arrives, then map it onto process.env
+  // so the capture below is transport-agnostic. Everywhere else (Fargate, self-hosted
+  // daemon) the fd is absent and the worker env-boots exactly as before. The post-restore
+  // uniqueness reseed will hook in at this boundary, before any run code executes.
+  const relayFd = relayFdFromEnv(process.env);
+  if (relayFd !== null) {
+    const relay = connectIdentityRelayFd(relayFd);
+    relay.announceReady();
+    const identity = await relay.awaitIdentity();
+    applyIdentityToEnv(identity, process.env);
+    relay.acceptIdentity();
+  }
+
   // Capture the platform context into private state and remove it from process.env BEFORE anything
   // else — so no user program / agent tool / subprocess we later spawn can read the run token or
   // API token (the run env/credential rules). WORKER_ID / WORKSPACE_ROOT are non-secret infra knobs.

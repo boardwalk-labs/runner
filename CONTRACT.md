@@ -82,6 +82,29 @@ offered ──claim──▶ leased ──heartbeat──▶ leased            (
    files behind). Cross-run leakage is a P0 bug.
 5. **Secret values never appear** in run events, logs, or error messages.
 
+## The identity relay (microVM bootstrap, v0)
+
+On Boardwalk's snapshot-based microVM substrate the runtime is started _before_ it has a run:
+the guest init (PID 1) spawns it warm, the platform snapshots the VM at the pre-identity park,
+and each run restores that snapshot and injects the run identity through an in-guest relay
+instead of container env. The runtime half lives in `src/runtime/identity_relay.ts`
+(schemas exported from the runtime module).
+
+- **Activation:** the init sets `BOARDWALK_IDENTITY_RELAY_FD=<fd>` (an inherited `AF_UNIX`
+  `SOCK_STREAM` socketpair end, conventionally fd 3). When absent, the runtime env-boots
+  exactly as on Fargate or under the self-hosted daemon — one package, two entry shapes.
+- **Wire:** one JSON object per LF-terminated line: `{"type":"worker_ready"}` (runtime →
+  init, the park is reached — the base-snapshot gate), `{"type":"identity","payload":{…}}`
+  (init → runtime; the payload is the platform env contract as JSON — `run_id`,
+  `control_plane_url`, `run_token`, optional `api_token`/`task_cpu_units`/`byo_providers`,
+  plus the resolved non-secret user `env`), `{"type":"identity_accepted"}` (runtime → init;
+  init acknowledges its own control channel only after this).
+- **Semantics:** platform keys always win over same-named user env entries; unknown message
+  types are ignored (forward-compatible — suspend/wake ride this relay in a later phase); a
+  malformed identity payload is a hard boot error, identical to a missing env var today.
+  Everything after acceptance — claim, program fetch, secrets, events — is the unchanged
+  run-token'd Runner Control API flow above.
+
 ## What the contract deliberately does not cover
 
 Scheduling decisions, run creation, billing, the manifest/wire-format shapes (owned by
