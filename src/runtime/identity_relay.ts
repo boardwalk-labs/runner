@@ -12,11 +12,17 @@
 //	                                                           forwarded verbatim by init)
 //	{"type":"identity","payload":{...}}        init → worker   the run identity (see schema below)
 //	{"type":"identity_accepted"}               worker → init   captured; init acks its host
+//	{"type":"suspend_request","payload":{...}} worker → init   a quiescent seam asks to be frozen
+//	{"type":"suspend_abort","payload":{...}}   init → worker   snapshot failed; the seam holds instead
+//	{"type":"wake","payload":{...}}            init → worker   resolve the frozen seam (fresh tokens
+//	                                                           + the wake value, verbatim)
+//	{"type":"wake_accepted"}                   worker → init   tokens swapped, seam resolved; init acks
 //
-// The payload carries exactly the platform env contract (snake_case) plus the resolved user
-// env; `applyIdentityToEnv` maps it onto `process.env` so `capturePlatformContext` runs
+// The identity payload carries exactly the platform env contract (snake_case) plus the resolved
+// user env; `applyIdentityToEnv` maps it onto `process.env` so `capturePlatformContext` runs
 // UNCHANGED afterward — same fields, same capture-and-delete discipline, two transports.
-// The stream stays open after identity: later platform phases speak suspend/wake over it.
+// The stream stays open after identity: `openChannel` attaches the suspend/wake consumer
+// (the FreezeCoordinator drives the choreography above it).
 
 import { createRequire } from "node:module";
 import { Socket } from "node:net";
@@ -54,6 +60,21 @@ const relayMessageSchema = z.object({
   type: z.string(),
   payload: z.unknown().optional(),
 });
+
+/** The init→worker halves of the post-identity relay: `wake` resolves a frozen suspending
+ *  seam (payload: the wake-inject body, verbatim), `suspend_abort` tells a parked seam the
+ *  snapshot attempt failed and it should fall back to holding. */
+export interface RelayChannelHandlers {
+  onWake(payload: unknown): void;
+  onSuspendAbort(payload: unknown): void;
+}
+
+/** The worker→init halves: ask to be frozen (payload: the suspend-request body — reason,
+ *  wake summary, opaque broker signal), and confirm a wake landed (init then acks its host). */
+export interface RelayChannel {
+  sendSuspendRequest(payload: unknown): void;
+  sendWakeAccepted(): void;
+}
 
 /**
  * Read the relay fd from `env`, deleting the key (bootstrap-only plumbing; run code has no
@@ -212,14 +233,61 @@ export class IdentityRelay {
   }
 
   /**
-   * Stop reading until the suspend/wake phase attaches its own consumer. Without this,
-   * anything init sends post-identity would accumulate in the line buffer forever (nothing
-   * reads it yet); parked, the socket backpressures into the kernel buffer instead. The
-   * stream stays open — it IS the future suspend/wake channel.
+   * Attach the post-identity consumer: the suspend/wake channel (the same fd, the same JSON
+   * lines). From here the relay dispatches init→worker messages to the handlers —
+   * `wake` (resolve a frozen seam) and `suspend_abort` (the seam falls back to holding) —
+   * and the returned channel sends the worker→init halves (`suspend_request`,
+   * `wake_accepted`). Unknown types are ignored (forward-compatible); malformed lines are
+   * logged and skipped, exactly as pre-identity. Call once, after {@link acceptIdentity}.
    */
-  park(): void {
-    this.stream.off("data", this.onData);
-    this.stream.pause();
+  openChannel(handlers: RelayChannelHandlers): RelayChannel {
+    void this.pumpChannel(handlers);
+    return {
+      sendSuspendRequest: (payload: unknown): void => {
+        this.writeLine({ type: "suspend_request", payload });
+      },
+      sendWakeAccepted: (): void => {
+        this.writeLine({ type: "wake_accepted" });
+      },
+    };
+  }
+
+  private async pumpChannel(handlers: RelayChannelHandlers): Promise<void> {
+    for (;;) {
+      let line: string;
+      try {
+        line = await this.readLine();
+      } catch (err) {
+        // The relay dying mid-run means init is gone — the guest is being torn down; the
+        // worker's own exit follows. Log, don't throw into nowhere.
+        log.warn("relay_channel_closed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        log.warn("relay_malformed_line_skipped", { length: line.length });
+        continue;
+      }
+      const message = relayMessageSchema.safeParse(parsed);
+      if (!message.success) {
+        log.warn("relay_malformed_message_skipped", {});
+        continue;
+      }
+      switch (message.data.type) {
+        case "wake":
+          handlers.onWake(message.data.payload);
+          break;
+        case "suspend_abort":
+          handlers.onSuspendAbort(message.data.payload);
+          break;
+        default:
+          log.warn("relay_unexpected_type_ignored", { type: message.data.type });
+      }
+    }
   }
 
   private writeLine(message: { type: string; payload?: unknown }): void {

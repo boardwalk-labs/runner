@@ -765,3 +765,22 @@ describe("RunnerControlClient — durable suspension", () => {
     expect((await client(without.fetchImpl).claim("w", 300))?.lastJournalSeq).toBe(0);
   });
 });
+
+describe("swapRunToken (the wake path)", () => {
+  it("every call after the swap carries the fresh bearer", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response(null, { status: 204 }));
+    const c = new RunnerControlClient({
+      baseUrl: "https://api.test",
+      runToken: "old-token",
+      runId: "run_1",
+      fetchImpl,
+    });
+    await c.finalize("completed", {}, "w1");
+    c.swapRunToken("fresh-token");
+    await c.finalize("completed", {}, "w1");
+    expect(calls.map((r) => r.headers.authorization)).toEqual([
+      "Bearer old-token",
+      "Bearer fresh-token",
+    ]);
+  });
+});

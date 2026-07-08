@@ -89,6 +89,33 @@ describe("RuntimeFlusher — delta accounting", () => {
       [3, "run_1:s1:rt:0"],
     ]);
   });
+
+  it("excludeIdle keeps frozen (suspended) wall-time out of billed runtime", async () => {
+    const { flusher, reports, advance } = setup();
+    // 10s of real work, then the pre-freeze flush books the tail.
+    advance(10_000);
+    await flusher.flushNow();
+    expect(reports).toEqual([{ seconds: 10, id: "run_1:s1:rt:0" }]);
+    // 2 hours frozen: the wake rebases the meter past the whole window…
+    advance(2 * 3_600_000);
+    flusher.excludeIdle(2 * 3_600_000);
+    // …then 5s of post-wake work bills exactly 5s, not 2h5s.
+    advance(5_000);
+    await flusher.flushFinal();
+    expect(reports).toEqual([
+      { seconds: 10, id: "run_1:s1:rt:0" },
+      { seconds: 5, id: "run_1:s1:rt:1" },
+    ]);
+  });
+
+  it("excludeIdle ignores non-positive windows", async () => {
+    const { flusher, reports, advance } = setup();
+    flusher.excludeIdle(-500);
+    flusher.excludeIdle(0);
+    advance(3_000);
+    await flusher.flushFinal();
+    expect(reports).toEqual([{ seconds: 3, id: "run_1:s1:rt:0" }]);
+  });
 });
 
 describe("RuntimeFlusher — periodic timer", () => {

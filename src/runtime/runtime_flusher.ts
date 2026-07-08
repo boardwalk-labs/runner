@@ -50,8 +50,23 @@ export class RuntimeFlusher {
   private flushedSeconds = 0;
   /** Per-flush sequence — advances only on a successful flush, so a retry reuses the same id. */
   private seq = 0;
+  /** Wall-clock ms excluded from billing — frozen (suspended) time on the snapshot substrate. */
+  private excludedMs = 0;
 
   constructor(private readonly deps: RuntimeFlusherDeps) {}
+
+  /** Book everything unbilled right now (the pre-freeze flush: suspended time must never appear as
+   *  billed runtime, so the tail is booked BEFORE the snapshot — SUSPEND_POLICY billing rule). */
+  async flushNow(): Promise<void> {
+    await this.flush(false);
+  }
+
+  /** Exclude `ms` of wall-clock from billing — the frozen window on a wake (computed from the wake's
+   *  authoritative wall clock, since the guest's own clock was stopped). Never lets elapsed go
+   *  negative. */
+  excludeIdle(ms: number): void {
+    if (ms > 0) this.excludedMs += ms;
+  }
 
   /** Begin periodic delta flushing. */
   start(): void {
@@ -90,7 +105,7 @@ export class RuntimeFlusher {
     const vcpus = this.deps.vcpus ?? 1;
     const total = Math.max(
       0,
-      Math.round(((this.deps.now() - this.deps.startedAtMs) / 1000) * vcpus),
+      Math.round(((this.deps.now() - this.deps.startedAtMs - this.excludedMs) / 1000) * vcpus),
     );
     const delta = total - this.flushedSeconds;
     if (delta < 1) return;

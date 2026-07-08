@@ -181,16 +181,52 @@ describe("IdentityRelay", () => {
     await expect(pending).rejects.toThrow(/exceeds/);
   });
 
-  it("park detaches the reader so post-identity traffic is not buffered", async () => {
+  it("openChannel dispatches wake and suspend_abort and sends the worker halves", async () => {
     const [workerEnd, initEnd] = duplexPair();
     const relay = new IdentityRelay(workerEnd);
     const pending = relay.awaitIdentity();
     initEnd.write(JSON.stringify({ type: "identity", payload: identity() }) + "\n");
     await pending;
     relay.acceptIdentity();
-    relay.park();
-    expect(workerEnd.listenerCount("data")).toBe(0);
-    expect(workerEnd.isPaused()).toBe(true);
+
+    const wakes: unknown[] = [];
+    const aborts: unknown[] = [];
+    const channel = relay.openChannel({
+      onWake: (p) => wakes.push(p),
+      onSuspendAbort: (p) => aborts.push(p),
+    });
+
+    const initLines: string[] = [];
+    let buffer = "";
+    initEnd.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (let i = buffer.indexOf("\n"); i >= 0; i = buffer.indexOf("\n")) {
+        initLines.push(buffer.slice(0, i));
+        buffer = buffer.slice(i + 1);
+      }
+    });
+
+    // Worker → init halves.
+    channel.sendSuspendRequest({ reason: "sleep", wake: { kind: "sleep" } });
+    channel.sendWakeAccepted();
+    await new Promise((r) => setImmediate(r));
+    // The listener attached after acceptIdentity, but the pipe buffered that line too.
+    expect(initLines.map((l) => (JSON.parse(l) as { type: string }).type)).toEqual([
+      "identity_accepted",
+      "suspend_request",
+      "wake_accepted",
+    ]);
+
+    // Init → worker halves, with a malformed line and an unknown type skipped in between.
+    initEnd.write("garbage\n");
+    initEnd.write(JSON.stringify({ type: "mystery" }) + "\n");
+    initEnd.write(
+      JSON.stringify({ type: "suspend_abort", payload: { reason: "store_unavailable" } }) + "\n",
+    );
+    initEnd.write(JSON.stringify({ type: "wake", payload: { run_token: "fresh" } }) + "\n");
+    await new Promise((r) => setImmediate(r));
+    expect(aborts).toEqual([{ reason: "store_unavailable" }]);
+    expect(wakes).toEqual([{ run_token: "fresh" }]);
   });
 });
 

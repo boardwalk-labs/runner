@@ -83,10 +83,19 @@ export interface BrokerChild {
 export class RunnerControlClient {
   private readonly base: string;
   private readonly fetchImpl: typeof fetch;
+  /** The live bearer. Mutable: on the snapshot substrate a wake carries a FRESH run token (the
+   *  frozen one expired while suspended) and the worker swaps it at runtime. */
+  private runToken: string;
 
   constructor(private readonly cfg: RunnerControlClientConfig) {
     this.base = cfg.baseUrl.replace(/\/+$/, "");
     this.fetchImpl = cfg.fetchImpl ?? fetch;
+    this.runToken = cfg.runToken;
+  }
+
+  /** Swap the bearer for a fresh run token (the wake path). Every subsequent call uses it. */
+  swapRunToken(token: string): void {
+    this.runToken = token;
   }
 
   /** Claim the run's lease. Returns the run on success, or null when it isn't claimable (409 —
@@ -504,7 +513,7 @@ export class RunnerControlClient {
 
   private headers(json: boolean): Record<string, string> {
     const h: Record<string, string> = {
-      authorization: `Bearer ${this.cfg.runToken}`,
+      authorization: `Bearer ${this.runToken}`,
       accept: "application/json",
     };
     if (json) h["content-type"] = "application/json";

@@ -44,7 +44,9 @@ import {
   connectIdentityRelayFd,
   relayFdFromEnv,
   workerDiagnostics,
+  type IdentityRelay,
 } from "./identity_relay.js";
+import { FreezeCoordinator } from "./freeze_coordinator.js";
 import type { ByoInferenceProvider } from "../contract.js";
 import { WorkerWorkflowHost, type RuntimeContext } from "./workflow_host.js";
 import {
@@ -92,6 +94,10 @@ export interface WorkerRuntime {
   /** vCPUs provisioned for this task (the dispatcher's resolved machine size ÷ 1024 cpu units). Runtime
    *  is billed per vCPU-SECOND, so the RuntimeFlusher scales wall-clock by this. Defaults to 1. */
   vcpus: number;
+  /** The in-guest identity relay, present ONLY on the snapshot-based microVM substrate (relay-mode
+   *  boot). When set, the worker suspends by FREEZING — the FreezeCoordinator parks seams over this
+   *  relay's suspend/wake channel — instead of the exit-and-replay path. */
+  freezeRelay?: IdentityRelay;
 }
 
 /** Durable events are deferred (run_step_events table) — live fan-out via the broker only. */
@@ -145,6 +151,25 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
   // buildHost (which runs right after claim) when constructing the per-run host.
   let replayFrontier = 0;
 
+  // Snapshot-substrate suspension (relay-mode boot only): one coordinator for the process, wired to
+  // the relay's suspend/wake channel now; its per-run hooks (token swap, meter rebase, workspace
+  // persist) late-bind in buildHost/startRuntimeFlush once those objects exist. The circular
+  // channel↔handler reference resolves through the thunks.
+  let freeze: FreezeCoordinator | undefined;
+  let activeFlusher: RuntimeFlusher | null = null;
+  if (runtime.freezeRelay !== undefined) {
+    const channel = runtime.freezeRelay.openChannel({
+      onWake: (payload) => {
+        freeze?.onWake(payload);
+      },
+      onSuspendAbort: (payload) => {
+        freeze?.onSuspendAbort(payload);
+      },
+    });
+    freeze = new FreezeCoordinator({ channel });
+    log.info("freeze_mode_enabled", { runId: runtime.runId });
+  }
+
   // Live agent-event stream → /telemetry (broker publishes to Redis server-side). Inference,
   // web_search, artifacts, and the model call are all brokered — no Redis / model creds / Tavily / S3.
   const eventPublisher = new BrokerEventPublisher({
@@ -161,7 +186,8 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
   // can't read it. The program reaches it ONLY via `runtime.apiToken()` (built below); we still
   // record it in each run's redactor so a value the program threads into a tool can't echo back out
   // of a tool result. Absent in the dev no-signing-key path. (the run env/credential rules)
-  const runApiKey = runtime.controlPlane.apiToken;
+  // MUTABLE: on the snapshot substrate a wake carries a fresh token (the frozen one expired).
+  let runApiKey = runtime.controlPlane.apiToken;
   // The broker (Runner Control API) is hosted on the api-server, so the public API shares its
   // origin; `runtime.apiUrl` exposes it and the program appends `/v1` or `/mcp/v1`.
   const apiUrl = publicApiOrigin(runtime.controlPlane.baseUrl);
@@ -359,8 +385,39 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
             },
           }
         : {}),
+      // Snapshot-substrate suspension: seams freeze in place under the quiescence gate instead of
+      // raising onSuspend (which stays wired as the transitional/local path's fallback).
+      ...(freeze !== undefined ? { freeze } : {}),
       phases: phaseTracker,
     });
+    // Late-bind the coordinator's per-run hooks now that the run-scoped objects exist.
+    if (freeze !== undefined) {
+      const coordinator = freeze;
+      let freezeWallMs = 0;
+      coordinator.setHooks({
+        // At quiescence, immediately before the freeze: book the runtime tail (suspended time must
+        // never appear billed — SUSPEND_POLICY) and persist the workspace (crash-during-suspension
+        // recovery parity with the sleep-hold path). The wall stamp anchors the idle rebase below.
+        onBeforeFreeze: async (): Promise<void> => {
+          freezeWallMs = Date.now();
+          await activeFlusher?.flushNow();
+          await workspaceStore?.persist();
+        },
+        // On wake: swap the fresh tokens onto the broker client + the program-facing apiToken()
+        // (recording the new values in the run's redactor, same discipline as boot), and exclude
+        // the frozen window from billed runtime using the wake's authoritative wall clock (the
+        // guest's own clock was stopped).
+        onAfterWake: (wake): void => {
+          broker.swapRunToken(wake.run_token);
+          redactor.record(wake.run_token);
+          if (wake.api_token !== undefined && wake.api_token !== "") {
+            runApiKey = wake.api_token;
+            redactor.record(wake.api_token);
+          }
+          activeFlusher?.excludeIdle(wake.wall_clock_ms - freezeWallMs);
+        },
+      });
+    }
     // Hand the redactor back too: the worker scrubs a terminal error's message with it;
     // workspace (when opted in) hydrates at start + persists at terminal.
     return Promise.resolve({
@@ -450,6 +507,9 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
         now: Date.now,
         report: (deltaSeconds, identifier) => broker.reportUsage(deltaSeconds, identifier),
       });
+      // The freeze coordinator's hooks flush this before a snapshot + rebase it past the frozen
+      // window on wake (suspended time must never appear as billed runtime).
+      activeFlusher = flusher;
       flusher.start();
       return { stop: () => flusher.stop(), flushFinal: () => flusher.flushFinal() };
     },
@@ -577,15 +637,16 @@ export async function main(): Promise<void> {
   // daemon) the fd is absent and the worker env-boots exactly as before. The post-restore
   // uniqueness reseed will hook in at this boundary, before any run code executes.
   const relayFd = relayFdFromEnv(process.env);
+  let freezeRelay: IdentityRelay | undefined;
   if (relayFd !== null) {
     const relay = connectIdentityRelayFd(relayFd);
     relay.announceReady(workerDiagnostics());
     const identity = await relay.awaitIdentity();
     applyIdentityToEnv(identity, process.env);
     relay.acceptIdentity();
-    // Park until the suspend/wake phase reads this channel — otherwise post-identity relay
-    // traffic would buffer in the heap with no consumer.
-    relay.park();
+    // The relay now becomes the suspend/wake channel: assembleWorkerDeps opens it into the
+    // FreezeCoordinator, and the host's suspending seams freeze in place instead of exiting.
+    freezeRelay = relay;
   }
 
   // Capture the platform context into private state and remove it from process.env BEFORE anything
@@ -604,6 +665,7 @@ export async function main(): Promise<void> {
     controlPlane: platform.controlPlane,
     vcpus: platform.vcpus,
     ...(byoProviders.length > 0 ? { byoProviders } : {}),
+    ...(freezeRelay !== undefined ? { freezeRelay } : {}),
   });
 
   // The only thing to drain is the batched telemetry buffer — the runner opens no DB/Redis/SQS.
