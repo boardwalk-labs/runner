@@ -2,10 +2,12 @@ import { describe, it, expect } from "vitest";
 import { PassThrough, Duplex } from "node:stream";
 import {
   IdentityRelay,
+  MAX_RELAY_LINE_BYTES,
   RELAY_FD_ENV,
   applyIdentityToEnv,
   relayFdFromEnv,
   relayIdentitySchema,
+  workerDiagnostics,
   type RelayIdentity,
 } from "./identity_relay.js";
 
@@ -149,5 +151,54 @@ describe("IdentityRelay", () => {
     const pending = relay.awaitIdentity();
     initEnd.end();
     await expect(pending).rejects.toThrow(/closed before/);
+  });
+
+  it("announceReady carries the diagnostics payload when provided", async () => {
+    const [workerEnd, initEnd] = duplexPair();
+    const relay = new IdentityRelay(workerEnd);
+    const lines: string[] = [];
+    initEnd.on("data", (chunk: Buffer) => lines.push(chunk.toString("utf8")));
+    relay.announceReady({ worker_version: "0.1.11", node_version: "v24.1.0" });
+    await new Promise((r) => setImmediate(r));
+    expect(JSON.parse(lines.join(""))).toEqual({
+      type: "worker_ready",
+      payload: { worker_version: "0.1.11", node_version: "v24.1.0" },
+    });
+  });
+
+  it("an oversized unterminated line fails the relay instead of buffering forever", async () => {
+    const [workerEnd, initEnd] = duplexPair();
+    // The relay destroys its end on failure; the in-memory pair surfaces that to the writer
+    // as an abort error, which is exactly the point — swallow it so vitest doesn't flag it.
+    initEnd.on("error", () => undefined);
+    const relay = new IdentityRelay(workerEnd);
+    const pending = relay.awaitIdentity();
+    // Feed past the cap without a newline — no legal line can ever complete.
+    const chunk = "x".repeat(1024 * 1024);
+    for (let sent = 0; sent <= MAX_RELAY_LINE_BYTES; sent += chunk.length) {
+      initEnd.write(chunk);
+    }
+    await expect(pending).rejects.toThrow(/exceeds/);
+  });
+
+  it("park detaches the reader so post-identity traffic is not buffered", async () => {
+    const [workerEnd, initEnd] = duplexPair();
+    const relay = new IdentityRelay(workerEnd);
+    const pending = relay.awaitIdentity();
+    initEnd.write(JSON.stringify({ type: "identity", payload: identity() }) + "\n");
+    await pending;
+    relay.acceptIdentity();
+    relay.park();
+    expect(workerEnd.listenerCount("data")).toBe(0);
+    expect(workerEnd.isPaused()).toBe(true);
+  });
+});
+
+describe("workerDiagnostics", () => {
+  it("reports the node version and best-effort package versions", () => {
+    const got = workerDiagnostics();
+    expect(got.node_version).toBe(process.version);
+    // In this repo the runner's own package.json is two levels up from the module — present.
+    expect(got.worker_version).toMatch(/^\d+\.\d+\.\d+/);
   });
 });

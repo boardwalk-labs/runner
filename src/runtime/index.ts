@@ -39,7 +39,12 @@ import type { WorkflowManifest } from "./wire/manifest.js";
 import { RecordingSecretResolver } from "./recording_secret_resolver.js";
 import { EngineLeafExecutor } from "./leaf_executor.js";
 import { parseByoProviders } from "./direct_inference.js";
-import { applyIdentityToEnv, connectIdentityRelayFd, relayFdFromEnv } from "./identity_relay.js";
+import {
+  applyIdentityToEnv,
+  connectIdentityRelayFd,
+  relayFdFromEnv,
+  workerDiagnostics,
+} from "./identity_relay.js";
 import type { ByoInferenceProvider } from "../contract.js";
 import { WorkerWorkflowHost, type RuntimeContext } from "./workflow_host.js";
 import {
@@ -574,10 +579,13 @@ export async function main(): Promise<void> {
   const relayFd = relayFdFromEnv(process.env);
   if (relayFd !== null) {
     const relay = connectIdentityRelayFd(relayFd);
-    relay.announceReady();
+    relay.announceReady(workerDiagnostics());
     const identity = await relay.awaitIdentity();
     applyIdentityToEnv(identity, process.env);
     relay.acceptIdentity();
+    // Park until the suspend/wake phase reads this channel — otherwise post-identity relay
+    // traffic would buffer in the heap with no consumer.
+    relay.park();
   }
 
   // Capture the platform context into private state and remove it from process.env BEFORE anything
