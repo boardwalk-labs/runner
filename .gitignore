@@ -2,3 +2,7 @@ node_modules
 dist
 coverage
 *.tsbuildinfo
+
+# Native addon build outputs — CI (release.yml) builds prebuilds/ at publish; never commit binaries.
+prebuilds/
+build/

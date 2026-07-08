@@ -43,6 +43,13 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      # The clause-3 uniqueness reseed native addon (native/reseed.c → prebuilds/linux-x64/*.node).
+      # Built HERE on the ubuntu-x64 runner because the Firecracker snapshot substrate is
+      # Intel-x86-only (NORTH_STAR: nested virt is Intel-only), so linux-x64 is the only platform
+      # that ever loads it; every other consumer (arm64 Fargate, self-host) no-ops via
+      # node-gyp-build's absent-prebuild path. `files` ships prebuilds/ in the package.
+      - run: pnpm exec prebuildify --napi --strip -t 24.0.0
+      - run: ls prebuilds/linux-x64/*.node
       # Trusted Publishing needs a recent npm (>= 11.5.1); node 24's bundled npm may be older.
       - run: npm install -g npm@latest
       - run: npm publish --provenance --access public

@@ -37,7 +37,10 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "native",
+    "binding.gyp",
+    "prebuilds"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -46,13 +49,15 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run --coverage",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prebuild": "prebuildify --napi --strip -t 24.0.0"
   },
   "dependencies": {
     "zod": "^4.0.0",
     "@boardwalk-labs/engine": "^0.1.29",
     "@boardwalk-labs/workflow": "^0.1.17",
-    "tar": "^7.5.16"
+    "tar": "^7.5.16",
+    "node-gyp-build": "^4.8.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",
@@ -62,7 +67,8 @@
     "prettier": "^3.4.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.20.0",
-    "vitest": "^3.0.0"
+    "vitest": "^3.0.0",
+    "prebuildify": "^6.0.1"
   },
   "bin": {
     "boardwalk-runner": "./dist/bin.js"

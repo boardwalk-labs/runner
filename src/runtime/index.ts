@@ -47,6 +47,7 @@ import {
   type IdentityRelay,
 } from "./identity_relay.js";
 import { FreezeCoordinator } from "./freeze_coordinator.js";
+import { reseedUserspaceCsprng } from "./uniqueness_reseed.js";
 import type { ByoInferenceProvider } from "../contract.js";
 import { WorkerWorkflowHost, type RuntimeContext } from "./workflow_host.js";
 import {
@@ -403,13 +404,14 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
           await activeFlusher?.flushNow();
           await workspaceStore?.persist();
         },
-        // On wake: swap the fresh tokens onto the broker client + the program-facing apiToken()
-        // (recording the new values in the run's redactor, same discipline as boot), and exclude
-        // the frozen window from billed runtime using the wake's authoritative wall clock (the
-        // guest's own clock was stopped). The clause-3 userspace-DRBG reseed also belongs here
-        // (a snapshot restored more than once repeats its draws) — pending the native reseed
-        // decision (see the fresh-run boundary above).
+        // On wake: reseed the userspace CSPRNG (clause 3 — a suspend snapshot restored more than
+        // once, e.g. a re-dispatch retry, would otherwise repeat its post-wake `crypto.*` draws),
+        // swap the fresh tokens onto the broker client + the program-facing apiToken() (recording
+        // the new values in the run's redactor, same discipline as boot), and exclude the frozen
+        // window from billed runtime using the wake's authoritative wall clock. The reseed runs
+        // BEFORE the seam resolves, so no woken author code draws from the stale (pre-suspend) DRBG.
         onAfterWake: (wake): void => {
+          reseedUserspaceCsprng();
           broker.swapRunToken(wake.run_token);
           redactor.record(wake.run_token);
           if (wake.api_token !== undefined && wake.api_token !== "") {
@@ -645,11 +647,12 @@ export async function main(): Promise<void> {
     relay.announceReady(workerDiagnostics());
     const identity = await relay.awaitIdentity();
     applyIdentityToEnv(identity, process.env);
-    // Clause 3 (SNAPSHOT_UNIQUENESS_CONTRACT) — the userspace DRBG reseed — hooks in HERE (this
-    // run shares the base snapshot's OpenSSL DRBG with every other run). It is NOT yet
-    // implemented: a pure-JS monkeypatch of `node:crypto` was proven insufficient (named ESM
-    // imports bypass it — measured 2026-07-09), so the robust fix is a native OpenSSL reseed,
-    // a packaging decision tracked in the contract §7 + the plan.
+    // Clause 3 (SNAPSHOT_UNIQUENESS_CONTRACT): this run was restored from the SHARED base
+    // snapshot, so its OpenSSL DRBG is identical to every other run's. Reseed it from the
+    // (VMGenID-diverged) OS entropy BEFORE `acceptIdentity` releases the worker into the brokered
+    // lifecycle — so no `crypto.*` draw by the SDK, the agent, or author code can collide across
+    // clones. Every wake reseeds again (the after-wake hook).
+    reseedUserspaceCsprng();
     relay.acceptIdentity();
     // The relay now becomes the suspend/wake channel: assembleWorkerDeps opens it into the
     // FreezeCoordinator, and the host's suspending seams freeze in place instead of exiting.
