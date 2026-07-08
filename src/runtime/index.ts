@@ -406,7 +406,9 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
         // On wake: swap the fresh tokens onto the broker client + the program-facing apiToken()
         // (recording the new values in the run's redactor, same discipline as boot), and exclude
         // the frozen window from billed runtime using the wake's authoritative wall clock (the
-        // guest's own clock was stopped).
+        // guest's own clock was stopped). The clause-3 userspace-DRBG reseed also belongs here
+        // (a snapshot restored more than once repeats its draws) — pending the native reseed
+        // decision (see the fresh-run boundary above).
         onAfterWake: (wake): void => {
           broker.swapRunToken(wake.run_token);
           redactor.record(wake.run_token);
@@ -643,6 +645,11 @@ export async function main(): Promise<void> {
     relay.announceReady(workerDiagnostics());
     const identity = await relay.awaitIdentity();
     applyIdentityToEnv(identity, process.env);
+    // Clause 3 (SNAPSHOT_UNIQUENESS_CONTRACT) — the userspace DRBG reseed — hooks in HERE (this
+    // run shares the base snapshot's OpenSSL DRBG with every other run). It is NOT yet
+    // implemented: a pure-JS monkeypatch of `node:crypto` was proven insufficient (named ESM
+    // imports bypass it — measured 2026-07-09), so the robust fix is a native OpenSSL reseed,
+    // a packaging decision tracked in the contract §7 + the plan.
     relay.acceptIdentity();
     // The relay now becomes the suspend/wake channel: assembleWorkerDeps opens it into the
     // FreezeCoordinator, and the host's suspending seams freeze in place instead of exiting.
