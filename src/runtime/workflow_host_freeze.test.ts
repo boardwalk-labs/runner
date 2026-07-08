@@ -22,7 +22,13 @@ function childStub(over: Partial<ChildDispatcher> = {}): ChildDispatcher {
 }
 
 /** A real coordinator over a scripted channel, plus a freeze-mode host around it. */
-function makeFrozenHost(over: Partial<{ leaf: LeafExecutor; children: ChildDispatcher }> = {}): {
+interface FakeHeld {
+  register: (seq: number, gate: unknown) => Promise<unknown>;
+  poll: (seq: number) => Promise<Record<string, unknown>>;
+}
+function makeFrozenHost(
+  over: Partial<{ leaf: LeafExecutor; children: ChildDispatcher; heldInput: FakeHeld }> = {},
+): {
   host: WorkerWorkflowHost;
   freeze: FreezeCoordinator;
   requests: unknown[];
@@ -56,6 +62,7 @@ function makeFrozenHost(over: Partial<{ leaf: LeafExecutor; children: ChildDispa
     },
     now: () => 1_000,
     freeze,
+    ...(over.heldInput !== undefined ? { heldInput: over.heldInput, heldPollIntervalMs: 1 } : {}),
   });
   return { host, freeze, requests, held };
 }
@@ -249,5 +256,71 @@ describe("WorkerWorkflowHost freeze mode", () => {
     wake(freeze, { kind: "sleep" });
     await sleeping;
     await expect(secret).resolves.toBe("sek");
+  });
+
+  it("register-without-release: a held gate answered during a running sibling resolves WITHOUT freezing", async () => {
+    let releaseLeaf: () => void = () => undefined;
+    const leaf: LeafExecutor = {
+      run: () => new Promise((resolve) => (releaseLeaf = () => resolve("slow-leaf"))),
+    };
+    const registered: number[] = [];
+    let answered = false;
+    const heldInput: FakeHeld = {
+      register: (seq) => {
+        registered.push(seq);
+        return Promise.resolve(true);
+      },
+      // The human answers while the sibling is still running.
+      poll: () => Promise.resolve(answered ? { approve: { value: "yes", isOther: false } } : {}),
+    };
+    const { host, requests } = makeFrozenHost({ leaf, heldInput });
+
+    const agent = host.agent("slow", undefined); // sibling in flight → the gate will HOLD
+    await tick();
+    const gate = host.humanInput({
+      key: "approve",
+      prompt: "ok?",
+      input: { kind: "choice", options: ["yes", "no"] },
+    });
+    await tick();
+    expect(registered).toEqual([expect.any(Number)]); // registered immediately (answerable while held)
+    expect(requests).toHaveLength(0); // holding — never froze
+
+    answered = true; // the human responds during the hold
+    await expect(gate).resolves.toEqual({ value: "yes", isOther: false });
+    expect(requests).toHaveLength(0); // resolved in-process, no freeze
+
+    releaseLeaf();
+    await agent;
+  });
+
+  it("register-without-release: an unanswered held gate freezes once the sibling finishes; wake carries the answer", async () => {
+    let releaseLeaf: () => void = () => undefined;
+    const leaf: LeafExecutor = {
+      run: () => new Promise((resolve) => (releaseLeaf = () => resolve("slow-leaf"))),
+    };
+    const heldInput: FakeHeld = {
+      register: () => Promise.resolve(true),
+      poll: () => Promise.resolve({}), // never answered via poll
+    };
+    const { host, freeze, requests } = makeFrozenHost({ leaf, heldInput });
+
+    const agent = host.agent("slow", undefined);
+    await tick();
+    const gate = host.humanInput({
+      key: "approve",
+      prompt: "ok?",
+      input: { kind: "choice", options: ["yes", "no"] },
+    });
+    await tick();
+    expect(requests).toHaveLength(0); // holding
+
+    releaseLeaf(); // sibling done → quiescence → the gate freezes
+    await agent;
+    await tick();
+    expect(requests).toHaveLength(1);
+
+    wake(freeze, { kind: "human_input", answers: { approve: { value: "no", isOther: false } } });
+    await expect(gate).resolves.toEqual({ value: "no", isOther: false });
   });
 });

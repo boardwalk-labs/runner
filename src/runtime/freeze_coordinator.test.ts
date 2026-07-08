@@ -238,3 +238,38 @@ describe("FreezeCoordinator", () => {
     expect(requests).toHaveLength(0); // never asked to freeze with an unflushed meter
   });
 });
+
+describe("FreezeCoordinator — withdraw (register-without-release)", () => {
+  it("an abort while HOLDING withdraws the wait (never freezes)", async () => {
+    const { channel, requests } = fakeChannel();
+    const c = new FreezeCoordinator({ channel });
+    // Keep a leaf in flight so the suspending wait HOLDS (never reaches quiescence).
+    let releaseLeaf: () => void = () => undefined;
+    void c.trackWork(() => new Promise<void>((r) => (releaseLeaf = r)));
+
+    const abort = new AbortController();
+    const wait = c.suspendingWait(sleepSignal(), abort.signal);
+    await tick();
+    expect(requests).toHaveLength(0); // holding, not frozen
+
+    abort.abort();
+    const outcome = await wait;
+    expect(outcome).toEqual({ kind: "withdrawn" });
+    expect(requests).toHaveLength(0); // never froze
+    releaseLeaf();
+  });
+
+  it("an abort AFTER the freeze request is moot — the freeze still resolves via wake", async () => {
+    const { channel, requests } = fakeChannel();
+    const c = new FreezeCoordinator({ channel });
+    const abort = new AbortController();
+    const wait = c.suspendingWait(sleepSignal(), abort.signal);
+    await tick();
+    expect(requests).toHaveLength(1); // already froze (quiescent immediately)
+
+    abort.abort(); // too late — the process would be frozen; the wake still lands
+    c.onWake(wakePayload());
+    const outcome = await wait;
+    expect(outcome.kind).toBe("wake");
+  });
+});

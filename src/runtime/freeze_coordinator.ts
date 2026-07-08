@@ -69,7 +69,12 @@ const suspendAbortSchema = z.object({ reason: z.string().optional() });
 /** What a suspending wait resolves to: the wake (the normal path), or — for a `sleep` seam
  *  only — the abort that tells it to hold its remainder in-process (other reasons retry the
  *  freeze internally and never surface an abort). */
-export type FreezeOutcome = { kind: "wake"; wake: WakeValue } | { kind: "aborted"; reason: string };
+export type FreezeOutcome =
+  | { kind: "wake"; wake: WakeValue }
+  | { kind: "aborted"; reason: string }
+  /** The caller withdrew the wait via its abort signal BEFORE it froze (register-without-release:
+   *  a held gate got its answer during the hold, so it resolves in-process instead of freezing). */
+  | { kind: "withdrawn" };
 
 export interface FreezeCoordinatorHooks {
   /** Runs at quiescence, immediately before the freeze is requested: flush billable runtime
@@ -163,7 +168,7 @@ export class FreezeCoordinator {
    * the abort (the seam then holds in-process); other reasons retry the freeze after a
    * backoff. Concurrent suspending waits serialize through an internal chain.
    */
-  suspendingWait(signal: SuspendSignal): Promise<FreezeOutcome> {
+  suspendingWait(signal: SuspendSignal, abort?: AbortSignal): Promise<FreezeOutcome> {
     const turn = this.chain;
     let release: () => void = () => undefined;
     this.chain = new Promise((resolve) => {
@@ -174,7 +179,13 @@ export class FreezeCoordinator {
       try {
         let backoff = ABORT_RETRY_INITIAL_MS;
         for (;;) {
-          await this.awaitQuiescence();
+          // Withdraw window: the abort can cancel the wait any time BEFORE it sends
+          // suspend_request (once sent, the VM freezes and the abort is moot — the process is
+          // paused). This is register-without-release: a held gate answered during the hold.
+          // awaitQuiescence short-circuits when already aborted, so one check after it covers
+          // both loop entry and a mid-hold abort.
+          await this.awaitQuiescence(abort);
+          if (abort?.aborted === true) return { kind: "withdrawn" };
           try {
             await this.hooks.onBeforeFreeze?.();
           } catch (err) {
@@ -201,6 +212,9 @@ export class FreezeCoordinator {
           this.freezePending = false;
           this.releaseGate();
           if (outcome.kind === "wake") return outcome;
+          // The park only ever resolves wake or aborted (never withdrawn — that returns before the
+          // park). Narrow explicitly so `.reason` is safe and a stray outcome propagates.
+          if (outcome.kind !== "aborted") return outcome;
           if (signal.reason === "sleep") return outcome;
           log.warn("suspend_aborted_retrying", {
             reason: outcome.reason,
@@ -262,10 +276,13 @@ export class FreezeCoordinator {
     resolve({ kind: "aborted", reason });
   }
 
-  private awaitQuiescence(): Promise<void> {
-    if (this.inFlight === 0) return Promise.resolve();
+  private awaitQuiescence(abort?: AbortSignal): Promise<void> {
+    if (this.inFlight === 0 || abort?.aborted === true) return Promise.resolve();
     return new Promise((resolve) => {
+      // Resolve on quiescence OR abort (a held wait wakes immediately to withdraw). Resolving
+      // twice is harmless; endWork may still call the queued waiter later.
       this.quiescenceWaiters.push(resolve);
+      abort?.addEventListener("abort", () => resolve(), { once: true });
     });
   }
 

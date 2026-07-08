@@ -818,3 +818,27 @@ describe("control-call timeout (freeze-mid-poll safety)", () => {
     expect(signals[0]).toBeInstanceOf(AbortSignal); // control call is bounded
   });
 });
+
+describe("register-without-release (held HITL gates)", () => {
+  it("registerInput POSTs the gate and returns whether it was newly registered", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => json(200, { registered: true }));
+    const c = client(fetchImpl);
+    const created = await c.registerInput(3, { key: "approve", prompt: "ok?" });
+    expect(created).toBe(true);
+    expect(calls[0]?.url).toMatch(/\/runner\/v1\/runs\/run_1\/inputs$/);
+    expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({
+      seq: 3,
+      humanInput: { key: "approve", prompt: "ok?" },
+    });
+  });
+
+  it("pollInputAnswers GETs the resolved answers for a seq", async () => {
+    const { fetchImpl, calls } = fakeFetch(() =>
+      json(200, { answers: { approve: { value: "yes" } } }),
+    );
+    const c = client(fetchImpl);
+    const answers = await c.pollInputAnswers(3);
+    expect(answers).toEqual({ approve: { value: "yes" } });
+    expect(calls[0]?.url).toMatch(/\/runner\/v1\/runs\/run_1\/inputs\/3$/);
+  });
+});

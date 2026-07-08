@@ -5,12 +5,12 @@
 // `AppError(BUDGET_EXCEEDED)` and the loop tears down with a `turn_ended
 // reason='error'` event.
 //
-// USD here tracks the bill closely: for a MANAGED turn the meter is fed OpenRouter's exact per-request
-// `usage.cost` (already cache-discounted + model-correct), so the `max_usd` cap reflects real spend —
+// USD here tracks the bill closely: for a MANAGED turn the meter is fed the managed provider's exact
+// per-request cost (already cache-discounted + model-correct), so the `max_usd` cap reflects real spend —
 // not a hand-rolled token estimate. Only a BYO turn (no upstream price) or a managed turn whose cost
 // the broker couldn't read falls back to a single flat representative rate
 // (`model_rates.ts::BUDGET_GUARDRAIL_RATE`), since a per-`agent()`-model run has no one model. Actual
-// billing remains per-request cost pass-through via Stripe meters (the platform spec). The meter takes
+// billing is metered by the platform, not by the runner. The meter takes
 // the fallback rate as a constructor arg so tests inject a fixed rate.
 
 import { AppError, ErrorCode } from "../support/index.js";
@@ -115,7 +115,7 @@ export class BudgetMeter {
 
   /**
    * Add a usage delta to the accumulator + recompute USD. `realCostUsd`, when provided, is the EXACT
-   * upstream cost the broker observed for this turn (OpenRouter's per-request `usage.cost`) — used
+   * upstream cost the broker observed for this turn (the managed provider's per-request cost) — used
    * verbatim so the `max_usd` cap tracks ACTUAL spend (already cache-discounted, model-correct).
    * Omitted for a BYO turn (no upstream price) or a managed turn whose cost the broker couldn't read,
    * which fall back to the representative-rate {@link costFor} estimate. Token counts accumulate on
@@ -131,7 +131,7 @@ export class BudgetMeter {
 
   /**
    * THIS SESSION's accumulator snapshot (excludes prior-session usage). Read by per-session token
-   * metering — which reports token deltas to Stripe (deferred; not yet wired into the brokered
+   * metering — which reports token deltas to the platform (deferred; not yet wired into the brokered
    * loop) — and by audit/post-run cost rollups. Cap enforcement uses {@link cumulative} instead.
    */
   snapshot(): BudgetSnapshot {
@@ -151,7 +151,7 @@ export class BudgetMeter {
    * construction. Cap enforcement ({@link assertWithinCaps}) and checkpoint persistence use
    * this so a run that resumes after a sleep/wait/crash is bounded by its declared caps across
    * the whole run — not once per session. `snapshot()` stays session-local because
-   * per-session token metering reports token deltas; seeding it would double-report to Stripe.
+   * per-session token metering reports token deltas; seeding it would double-report usage.
    */
   cumulative(): BudgetSnapshot {
     const s = this.snapshot();
@@ -253,7 +253,7 @@ export class BudgetMeter {
   /**
    * USD cost for a single delta — the representative-rate ESTIMATE used only when the broker reports
    * no real upstream cost for the turn (a BYO-provider turn, or a managed turn whose cost tap missed).
-   * Managed turns instead carry OpenRouter's exact `usage.cost` through to {@link addUsage}. Public so
+   * Managed turns instead carry the managed provider's exact per-request cost through to {@link addUsage}. Public so
    * the loop can stamp the per-step `cost_usd` column on `run_steps` without re-deriving the rate table.
    */
   costFor(delta: UsageDelta): number {

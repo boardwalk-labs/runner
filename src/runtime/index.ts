@@ -1,5 +1,5 @@
-// Worker composition root (the workflow runtime design). The Boardwalk-hosted
-// worker container runs `node dist/fargate/worker/index.js`; the dispatcher launches it per run with
+// Worker composition root (the workflow runtime design). The hosted worker container runs the
+// compiled worker entrypoint; the dispatcher launches it per run with
 // RUN_ID + the per-run control-plane handle. This file assembles real implementations behind every
 // seam `runProgramWorker(runId, deps)` injects, then runs the one workflow program to terminal.
 //
@@ -11,21 +11,21 @@
 //   - secrets.get()   → broker /secrets/resolve (allowlist enforced server-side).
 //   - workflows.call()→ broker /children (durable child run, hold + poll).
 //   - events.emit()   → broker /events (fan-out server-side).
-//   - artifacts / web_search → broker /artifacts + /tools/web_search (no S3 / Tavily creds here).
+//   - artifacts / web_search → broker /artifacts + /tools/web_search (no storage or search-provider creds here).
 //   - lifecycle / usage / telemetry → broker /claim,/version,/finalize,/usage,/telemetry.
-// There is no DB / Redis / Stripe / Bedrock client on the runner — so its task role is near-zero and
-// the metadata-endpoint escape has nothing to steal. The legacy direct (pre-broker) path is removed.
+// There is no database, cache, billing, or model-provider client on the runner — so its task role is
+// near-zero and the metadata-endpoint escape has nothing to steal. The legacy direct (pre-broker) path is removed.
 //
 // Split: `assembleWorkerDeps(runtime)` is pure wiring (unit-tested with a fake fetch); `main()` is the
 // bootstrap shell (read the control-plane env, install signal handlers).
 //
-// Per-session loops wired here (all brokered): a UsageFlusher meters token deltas (§10.7 →
-// /usage/tokens), a CreditWatcher polls funding (§15 → /credit, aborting the run on exhaustion), and a
-// CancelWatcher polls for a user cancel (§6 → /cancel, aborting the run when the user cancels — the
-// brokered worker holds no Redis, so it can't receive the api-server's cancel publish directly).
+// Per-session loops wired here (all brokered): a UsageFlusher meters token deltas (→ /usage/tokens), a
+// CreditWatcher polls funding (→ /credit, aborting the run on exhaustion), and a CancelWatcher polls
+// for a user cancel (→ /cancel, aborting the run when the user cancels — the brokered worker holds no
+// cache client, so it can't receive the platform's cancel publish directly).
 //
-// Documented v0 deferral (a clear seam): durable events — a no-op AgentEventStore (live Redis fan-out
-// via the broker only) until the run_step_events table lands.
+// Documented v0 deferral (a clear seam): durable events — a no-op AgentEventStore (live fan-out
+// via the broker only) until durable event storage lands.
 
 import { createLogger, newId, AppError, ErrorCode, DEFAULT_LEASE_MS } from "./support/index.js";
 import { LspService } from "@boardwalk-labs/engine/core";
@@ -138,7 +138,7 @@ export function tokenMeterIdentifiers(
 }
 
 /** Pure wiring: build the full ProgramWorkerDeps from the control-plane handle. The runner reaches
- *  every privileged seam through the broker over its run token — no DB / Redis / Stripe / model creds. */
+ *  every privileged seam through the broker over its run token — no database, cache, billing, or model creds. */
 export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
   const broker = new RunnerControlClient({
     baseUrl: runtime.controlPlane.baseUrl,
@@ -171,8 +171,9 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     log.info("freeze_mode_enabled", { runId: runtime.runId });
   }
 
-  // Live agent-event stream → /telemetry (broker publishes to Redis server-side). Inference,
-  // web_search, artifacts, and the model call are all brokered — no Redis / model creds / Tavily / S3.
+  // Live agent-event stream → /telemetry (broker fans out server-side). Inference,
+  // web_search, artifacts, and the model call are all brokered — no cache client, model creds,
+  // search-provider creds, or object-storage creds here.
   const eventPublisher = new BrokerEventPublisher({
     send: (frames) => broker.publishTelemetry(frames),
   });
@@ -186,11 +187,11 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
   // bootstrap captured + scrubbed it (capturePlatformContext) so the agent's bash / subprocesses
   // can't read it. The program reaches it ONLY via `runtime.apiToken()` (built below); we still
   // record it in each run's redactor so a value the program threads into a tool can't echo back out
-  // of a tool result. Absent in the dev no-signing-key path. (the run env/credential rules)
+  // of a tool result. Absent in the dev no-signing-key path.
   // MUTABLE: on the snapshot substrate a wake carries a fresh token (the frozen one expired).
   let runApiKey = runtime.controlPlane.apiToken;
-  // The broker (Runner Control API) is hosted on the api-server, so the public API shares its
-  // origin; `runtime.apiUrl` exposes it and the program appends `/v1` or `/mcp/v1`.
+  // The broker (Runner Control API) shares an origin with the public API;
+  // `runtime.apiUrl` exposes it and the program appends `/v1` or `/mcp/v1`.
   const apiUrl = publicApiOrigin(runtime.controlPlane.baseUrl);
 
   // Per-run host: agent() leaf + sleep-hold + secrets + children + events, all brokered. `signal`
@@ -274,9 +275,9 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // until the artifact extracts. The empty `/workspace` and this dir are SEPARATE dirs on hosted,
       // exactly the two-tier case the engine's AGENTS.md loader is built for.
       programDir: () => programDir,
-      // Per-leaf, per-model token metering — reported THROUGH the broker (the worker holds no Stripe
-      // credential); the broker decides `billed_by_boardwalk` per model + meters to Stripe (BYO models
-      // no-op there). Fire-and-forget: a metering hiccup must never fail the run.
+      // Per-leaf, per-model token metering — reported THROUGH the broker (the worker holds no billing
+      // credential); the broker decides `billed_by_boardwalk` per model + meters usage to the platform
+      // (BYO models no-op there). Fire-and-forget: a metering hiccup must never fail the run.
       meterUsage: ({
         model,
         inputTokens,
@@ -389,6 +390,16 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // Snapshot-substrate suspension: seams freeze in place under the quiescence gate instead of
       // raising onSuspend (which stays wired as the transitional/local path's fallback).
       ...(freeze !== undefined ? { freeze } : {}),
+      // Register-without-release for held HITL gates (docs/SUSPEND_POLICY.md §1.2) — only on the
+      // freeze substrate, backed by the broker's inputs endpoints.
+      ...(freeze !== undefined
+        ? {
+            heldInput: {
+              register: (seq: number, gate: unknown) => broker.registerInput(seq, gate),
+              poll: (seq: number) => broker.pollInputAnswers(seq),
+            },
+          }
+        : {}),
       phases: phaseTracker,
     });
     // Late-bind the coordinator's per-run hooks now that the run-scoped objects exist.
@@ -397,7 +408,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       let freezeWallMs = 0;
       coordinator.setHooks({
         // At quiescence, immediately before the freeze: book the runtime tail (suspended time must
-        // never appear billed — SUSPEND_POLICY) and persist the workspace (crash-during-suspension
+        // never appear billed) and persist the workspace (crash-during-suspension
         // recovery parity with the sleep-hold path). The wall stamp anchors the idle rebase below.
         onBeforeFreeze: async (): Promise<void> => {
           freezeWallMs = Date.now();
@@ -529,10 +540,10 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       watcher.start();
       return { stop: () => watcher.stop() };
     },
-    // Mid-run user-cancel watching (§6): a CancelWatcher polls the broker's GET /cancel on a timer;
+    // Mid-run user-cancel watching: a CancelWatcher polls the broker's GET /cancel on a timer;
     // when the user cancels (the run is flipped to `cancelling`), onCancelled aborts the run. This is
-    // how the brokered (Redis-less) worker learns of a cancel — the api-server's Redis publish can't
-    // reach it.
+    // how the brokered (cache-less) worker learns of a cancel — the platform's cancel publish can't
+    // reach it directly.
     startCancelWatch: ({ run, onCancelled }) => {
       const watcher = new CancelWatcher({
         runId: run.id,
@@ -590,7 +601,7 @@ export interface PlatformContext {
 }
 
 /** The public-API origin a run uses for raw API / MCP / CLI calls. The broker (Runner Control API)
- *  is hosted on the api-server, so the public API shares its origin; the program appends `/v1` or
+ *  shares an origin with the public API, so the program appends `/v1` or
  *  `/mcp/v1`. Falls back to the broker URL unchanged if it can't be parsed. */
 export function publicApiOrigin(controlPlaneBaseUrl: string): string {
   try {
@@ -614,7 +625,7 @@ export function capturePlatformContext(env: NodeJS.ProcessEnv): PlatformContext 
     return value.trim();
   };
   // The dispatcher always injects the control-plane handle (the Runner Credential Broker model). The runner is
-  // brokered-only — there is no DB/Redis/Stripe fallback — so a missing handle is a hard config error.
+  // brokered-only — there is no database, cache, or billing fallback — so a missing handle is a hard config error.
   const runId = read("RUN_ID");
   const apiToken = env.BOARDWALK_API_KEY?.trim();
   const controlPlane = {
@@ -678,7 +689,7 @@ export async function main(): Promise<void> {
     ...(freezeRelay !== undefined ? { freezeRelay } : {}),
   });
 
-  // The only thing to drain is the batched telemetry buffer — the runner opens no DB/Redis/SQS.
+  // The only thing to drain is the batched telemetry buffer — the runner opens no database, cache, or queue.
   const cleanup = async (): Promise<void> => {
     await deps.flushTelemetry?.().catch(() => undefined);
   };

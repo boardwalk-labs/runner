@@ -56,7 +56,7 @@ export class RuntimeFlusher {
   constructor(private readonly deps: RuntimeFlusherDeps) {}
 
   /** Book everything unbilled right now (the pre-freeze flush: suspended time must never appear as
-   *  billed runtime, so the tail is booked BEFORE the snapshot — SUSPEND_POLICY billing rule). */
+   *  billed runtime, so the tail is booked BEFORE the snapshot — the suspension billing rule). */
   async flushNow(): Promise<void> {
     await this.flush(false);
   }

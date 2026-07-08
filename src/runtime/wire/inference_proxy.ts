@@ -123,7 +123,7 @@ export function serializeDeltaFrame(text: string): string {
 }
 
 /** Serialize the single terminal turn result as one NDJSON line. `costMicros` is the turn's EXACT
- *  upstream cost (OpenRouter `usage.cost` × 1e6) on the managed lane — 0 for BYO or when unavailable.
+ *  upstream cost (the managed provider's per-request cost × 1e6) on the managed lane — 0 for BYO or when unavailable.
  *  The worker feeds it to the budget guardrail so `max_usd` tracks real spend, not a token estimate. */
 export function serializeResultFrame(turn: ChatTurn, modelRef: string, costMicros = 0): string {
   return `${JSON.stringify({ t: "result", turn, modelRef, costMicros })}\n`;

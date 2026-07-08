@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Runtime support shims — the small slice of the platform's `@boardwalk/common` +
-// `domain/authz` the worker runtime depends on, ported verbatim where it matters
-// (AppError taxonomy) and minimally where it doesn't (the logger: structured JSON to
-// stdout, same call surface as the platform's Powertools child logger).
+// Runtime support shims — a small, self-contained slice of the error taxonomy and logging the
+// worker runtime depends on. The AppError taxonomy mirrors the platform's error codes so brokered
+// responses map cleanly; the logger emits structured JSON to stdout.
 
 import { randomUUID } from "node:crypto";
 
-// ---- errors (ported from boardwalk-backend src/common/errors.ts; keep in sync until the
-// backend consumes this package and the copy there is deleted) ----
+// ---- errors (the shared AppError taxonomy — mirrors the platform's error codes so brokered
+// responses deserialize to the same shape) ----
 
 export enum ErrorCode {
   VALIDATION_FAILED = "VALIDATION_FAILED",

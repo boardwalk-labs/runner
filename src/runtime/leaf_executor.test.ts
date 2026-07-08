@@ -262,7 +262,7 @@ describe("EngineLeafExecutor.run — budget + metering", () => {
   });
 });
 
-describe("EngineLeafExecutor.run — secret redaction (the platform spec)", () => {
+describe("EngineLeafExecutor.run — secret redaction", () => {
   it("seeds the engine redactor from recorded secrets so the prompt is scrubbed on the wire", async () => {
     const redactor = new SecretRedactor();
     redactor.record("sk-live-abc123def");

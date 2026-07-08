@@ -118,6 +118,14 @@ export interface SecretAccessor {
   get(name: string): Promise<string>;
 }
 
+/** Register-without-release (docs/SUSPEND_POLICY.md §1.2): register a HELD HITL gate so it is
+ *  answerable while the run keeps running, and poll for the answer. Backed by the broker's
+ *  `inputs` endpoints. Absent ⇒ a held gate is only answerable once it freezes. */
+export interface HeldInputPort {
+  register(seq: number, gate: SuspendSignal["humanInput"]): Promise<unknown>;
+  poll(seq: number): Promise<Record<string, unknown>>;
+}
+
 /** Holds the process for `ms` milliseconds. The seam exists so tests don't wait on real time. An
  *  abort fires the hold REJECT (with the signal's RunAbortedError) and clears the timer — so a
  *  multi-day sleep aborted early doesn't leave a live timer pinning the event loop open. */
@@ -238,6 +246,11 @@ export interface WorkerWorkflowHostDeps {
    * stream, and work arriving while a freeze is pending queues until the wake.
    */
   freeze?: FreezeCoordinator;
+  /** Register-without-release for HELD human-input gates (docs/SUSPEND_POLICY.md §1.2). Only
+   *  meaningful alongside `freeze`; absent ⇒ a held gate is answerable only once it freezes. */
+  heldInput?: HeldInputPort;
+  /** Poll interval for a held gate's answer (default 3s). */
+  heldPollIntervalMs?: number;
   /**
    * The highest journaled seq at claim (0 on a fresh run). While re-running seams up to this
    * frontier on a resume, the host is REPLAYING and observability (phase markers, program logs) is
@@ -250,6 +263,7 @@ export class WorkerWorkflowHost implements WorkflowHost {
   private readonly sleeper: SleepController;
   private readonly now: () => number;
   private readonly maxSleepMs: number;
+  private readonly heldPollIntervalMs: number;
   /** Synchronous durable-seam counter + silent-replay live flag (the durable-suspension design). */
   private readonly seq: SeamSequencer;
   /** Run context + on-demand public-API bearer the SDK `runtime` accessor reads off the host. */
@@ -259,6 +273,7 @@ export class WorkerWorkflowHost implements WorkflowHost {
     this.sleeper = deps.sleeper ?? new TimerSleepController();
     this.now = deps.now ?? Date.now;
     this.maxSleepMs = deps.maxSleepMs ?? MAX_SLEEP_MS;
+    this.heldPollIntervalMs = deps.heldPollIntervalMs ?? 3_000;
     this.seq = new SeamSequencer(deps.replayFrontier ?? 0);
     this.runtime = deps.runtime;
   }
@@ -305,13 +320,94 @@ export class WorkerWorkflowHost implements WorkflowHost {
   private async freezeWait(
     freeze: FreezeCoordinator,
     signal: SuspendSignal,
+    abort?: AbortSignal,
   ): Promise<FreezeOutcome> {
     freeze.endWork();
     try {
-      return await freeze.suspendingWait(signal);
+      return await freeze.suspendingWait(signal, abort);
     } finally {
       freeze.beginWork();
     }
+  }
+
+  /**
+   * Snapshot-substrate `humanInput()` with REGISTER-WITHOUT-RELEASE (docs/SUSPEND_POLICY.md §1.2).
+   * A gate reached while a sibling seam is still in flight HOLDS (the quiescence gate won't freeze
+   * yet), but a human must still be able to answer during that hold. So: register the gate with the
+   * broker immediately (it surfaces in the inbox/API at once), then race two outcomes —
+   *   - the answer arrives (brokered poll) while holding ⇒ WITHDRAW the freeze wait and resolve
+   *     in-process (the run never froze); or
+   *   - quiescence is reached with no answer ⇒ the wait freezes, and the wake carries the answer.
+   * Once frozen the poll is frozen too (same process), so the race is only live during the hold.
+   * A register/poll failure degrades to the plain freeze wait — the gate still works, just without
+   * the answerable-while-held property.
+   */
+  private async freezeHumanInput(
+    freeze: FreezeCoordinator,
+    signal: SuspendSignal,
+    key: string,
+  ): Promise<HumanInputResult> {
+    const held = this.deps.heldInput;
+    if (held === undefined) {
+      // No held-input port wired: the gate can only be answered once it freezes.
+      return this.resolveFreezeAnswer(await this.freezeWait(freeze, signal), key);
+    }
+    await held.register(signal.seq, signal.humanInput);
+    const withdraw = new AbortController();
+    const poll = this.pollHeldAnswer(held, signal.seq, key, withdraw.signal);
+    const outcome = await Promise.race([
+      poll.then((answer) => ({ kind: "answered" as const, answer })),
+      this.freezeWait(freeze, signal, withdraw.signal).then((o) => ({ kind: "froze" as const, o })),
+    ]);
+    if (outcome.kind === "answered") {
+      withdraw.abort(); // withdraw the still-holding freeze wait (no-op if it already froze)
+      return normalizeHumanInputResult(outcome.answer);
+    }
+    withdraw.abort(); // stop the poll loop; the wake path carries the answer
+    return this.resolveFreezeAnswer(outcome.o, key);
+  }
+
+  /** Poll the broker for a held gate's answer until it arrives or the wait withdraws. Resolves with
+   *  the answer value; never rejects the run (a transient poll error just retries next tick). Runs
+   *  OUTSIDE the quiescence gate (it is not run work — it must not block a freeze). */
+  private async pollHeldAnswer(
+    held: HeldInputPort,
+    seq: number,
+    key: string,
+    abort: AbortSignal,
+  ): Promise<unknown> {
+    for (;;) {
+      if (abort.aborted) return await new Promise<never>(() => undefined); // frozen path won: never resolve
+      try {
+        const answers = await held.poll(seq);
+        if (key in answers) return answers[key];
+      } catch {
+        /* transient — retry next tick */
+      }
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, this.heldPollIntervalMs);
+        abort.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(t);
+            resolve();
+          },
+          { once: true },
+        );
+      });
+    }
+  }
+
+  /** Map a froze/aborted freeze outcome to the gate's answer (or throw on an unexpected abort). */
+  private resolveFreezeAnswer(outcome: FreezeOutcome, key: string): HumanInputResult {
+    if (outcome.kind !== "wake") {
+      throw new AppError(
+        ErrorCode.INTERNAL_ERROR,
+        `Freeze wait for a human-input gate ended unexpectedly (${outcome.kind})`,
+        { kind: "unexpected_freeze_outcome", key },
+      );
+    }
+    return normalizeHumanInputResult(this.gateAnswer(outcome.wake, key));
   }
 
   /** The wake's answer for one gate key. A wake whose value is missing the parked gate means the
@@ -454,16 +550,7 @@ export class WorkerWorkflowHost implements WorkflowHost {
     };
     const freeze = this.deps.freeze;
     if (freeze !== undefined) {
-      // Snapshot substrate: park in place; the wake carries the validated answer.
-      const outcome = await this.freezeWait(freeze, signal);
-      if (outcome.kind !== "wake") {
-        throw new AppError(
-          ErrorCode.INTERNAL_ERROR,
-          "Suspend aborted surfaced to a human-input seam (the coordinator retries these)",
-          { kind: "unexpected_abort", seq },
-        );
-      }
-      return normalizeHumanInputResult(this.gateAnswer(outcome.wake, key));
+      return await this.freezeHumanInput(freeze, signal, key);
     }
     return this.suspend(signal);
   }

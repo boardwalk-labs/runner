@@ -1,14 +1,14 @@
-// CreditWatcher — stops a run when its org runs out of prepaid credit mid-flight (the platform spec).
+// CreditWatcher — stops a run when its org runs out of prepaid credit mid-flight.
 //
 // One per run session. On a timer it asks — through the broker (`GET /credit`, since the runner holds
-// no Stripe credential) — whether the org is still funded; the FIRST time it isn't, it fires
+// no billing credential) — whether the org is still funded; the FIRST time it isn't, it fires
 // `onExhausted` once (the orchestrator wires this to `AbortController.abort`, which the WorkflowHost
 // honors cooperatively) and stops checking. This is the org-level counterpart to the per-run
-// BudgetMeter cap: the run can't see Stripe balances, so funding is enforced here, out of band,
+// BudgetMeter cap: the run can't see its billing balance, so funding is enforced here, out of band,
 // against the live balance that incremental token metering keeps fresh.
 //
-// "Prompt, not instant": Stripe meter aggregation is eventually-consistent and the host honors the
-// abort at the next hook boundary, so a run stops within ~one check interval (plus Stripe's lag) of
+// "Prompt, not instant": the platform's usage metering is eventually-consistent and the host honors the
+// abort at the next hook boundary, so a run stops within ~one check interval (plus metering lag) of
 // going unfunded — bounding overshoot, not eliminating it. Applies to MANAGED and BYOK runs alike,
 // since runtime always burns credit (the gate requires the runtime floor regardless of token billing).
 
@@ -23,7 +23,7 @@ export interface CreditWatcherDeps {
   /** The run being watched (for correlation/logging). */
   runId: string;
   /** Resolves true while the org can keep spending; false once it's out of credit. Brokered
-   *  (`RunnerControlClient.checkCredit` → `GET /credit`), so the runner never reads Stripe. */
+   *  (`RunnerControlClient.checkCredit` → `GET /credit`), so the runner never reads billing state directly. */
   isFunded: () => Promise<boolean>;
   /** Fired exactly once when the org is first seen to be out of credit. */
   onExhausted: () => void;

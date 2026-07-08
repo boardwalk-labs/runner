@@ -293,6 +293,29 @@ export class RunnerControlClient {
     return ((await res.json()) as { cancelRequested: boolean }).cancelRequested;
   }
 
+  /** Register-without-release (docs/SUSPEND_POLICY.md §1.2): register a HELD HITL gate's request row
+   *  so it is answerable while the run keeps running — no suspend. Idempotent. Returns whether a new
+   *  gate was registered. */
+  async registerInput(seq: number, gate: unknown): Promise<boolean> {
+    const res = await this.controlFetch(this.url("inputs"), {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify({ seq, humanInput: gate }),
+    });
+    if (res.status !== 200) throw await brokerError(res, "register-input");
+    return ((await res.json()) as { registered: boolean }).registered;
+  }
+
+  /** Poll the resolved answers for a held gate at `seq` (empty until a human responds). */
+  async pollInputAnswers(seq: number): Promise<Record<string, unknown>> {
+    const res = await this.controlFetch(this.url(`inputs/${encodeURIComponent(String(seq))}`), {
+      method: "GET",
+      headers: this.headers(false),
+    });
+    if (res.status !== 200) throw await brokerError(res, "poll-inputs");
+    return ((await res.json()) as { answers: Record<string, unknown> }).answers;
+  }
+
   /** Mint a presigned GET URL to restore this workflow's last `/workspace` snapshot (workspace
    *  persistence, §5). `null` when the run isn't eligible (not opted-in, or self-hosted). */
   async workspaceHydrateUrl(): Promise<string | null> {
