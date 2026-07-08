@@ -48,6 +48,10 @@ export interface RunnerControlClientConfig {
   runId: string;
   /** Injected fetch (defaults to global fetch). */
   fetchImpl?: typeof fetch;
+  /** Per-call ceiling for short control calls (default 30s) — bounds a poll frozen mid-flight. */
+  controlTimeoutMs?: number;
+  /** Per-call ceiling for bulk artifact/workspace transfers (default 5 min). */
+  bulkTimeoutMs?: number;
 }
 
 /** The pinned program's download reference (the worker fetches + verifies + extracts it). */
@@ -86,16 +90,39 @@ export class RunnerControlClient {
   /** The live bearer. Mutable: on the snapshot substrate a wake carries a FRESH run token (the
    *  frozen one expired while suspended) and the worker swaps it at runtime. */
   private runToken: string;
+  private readonly controlTimeoutMs: number;
+  private readonly bulkTimeoutMs: number;
 
   constructor(private readonly cfg: RunnerControlClientConfig) {
     this.base = cfg.baseUrl.replace(/\/+$/, "");
     this.fetchImpl = cfg.fetchImpl ?? fetch;
     this.runToken = cfg.runToken;
+    this.controlTimeoutMs = cfg.controlTimeoutMs ?? 30_000;
+    this.bulkTimeoutMs = cfg.bulkTimeoutMs ?? 300_000;
   }
 
   /** Swap the bearer for a fresh run token (the wake path). Every subsequent call uses it. */
   swapRunToken(token: string): void {
     this.runToken = token;
+  }
+
+  /**
+   * Every SHORT control call (claim / renew / cancel / credit / journal / …) goes through here so
+   * it carries a hard timeout. Without one, a poll frozen mid-flight on the snapshot substrate
+   * hangs FOREVER on restore (the socket is dead but never reset), and since a watcher serializes
+   * its ticks, one hung tick wedges that watcher — the §9 dead-connections gotcha for the
+   * background pollers (lease/cancel/credit), which run on untracked timers the quiescence gate
+   * doesn't cover. Also plain robustness: no broker call should hang on a network blip. The
+   * streaming inference call is the ONE exception (long-lived NDJSON) and bypasses this.
+   */
+  private controlFetch(url: string, init: RequestInit): Promise<Response> {
+    return this.fetchImpl(url, { ...init, signal: AbortSignal.timeout(this.controlTimeoutMs) });
+  }
+
+  /** Bulk transfers (artifact + workspace up/download over presigned S3) — a much larger ceiling
+   *  than a control call, but still bounded so a dead socket can't hang the run. */
+  private bulkFetch(url: string, init: RequestInit): Promise<Response> {
+    return this.fetchImpl(url, { ...init, signal: AbortSignal.timeout(this.bulkTimeoutMs) });
   }
 
   /** Claim the run's lease. Returns the run on success, or null when it isn't claimable (409 —
@@ -104,7 +131,7 @@ export class RunnerControlClient {
     workerId: string,
     leaseSeconds: number,
   ): Promise<{ run: Run; lastEventCursor: number; lastJournalSeq: number } | null> {
-    const res = await this.fetchImpl(this.url("claim"), {
+    const res = await this.controlFetch(this.url("claim"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ workerId, leaseSeconds }),
@@ -129,7 +156,7 @@ export class RunnerControlClient {
    *  `leaseUntil`, or null when the lease was lost (409 — another worker reclaimed the run), which
    *  the worker treats as "stop". */
   async renewLease(workerId: string, leaseSeconds: number): Promise<number | null> {
-    const res = await this.fetchImpl(this.url("renew"), {
+    const res = await this.controlFetch(this.url("renew"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ workerId, leaseSeconds }),
@@ -144,7 +171,7 @@ export class RunnerControlClient {
    *  whose lease expired and whose run was reclaimed + re-dispatched to a new owner), so a
    *  hung/partitioned worker that later recovers can't clobber the live run or revive a terminal one. */
   async finalize(status: "completed" | "failed", output: unknown, workerId: string): Promise<void> {
-    const res = await this.fetchImpl(this.url("finalize"), {
+    const res = await this.controlFetch(this.url("finalize"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ status, output, workerId }),
@@ -155,7 +182,7 @@ export class RunnerControlClient {
   /** Look up a durable-seam journal entry by its seq (the durable-suspension design), or null on a replay miss
    *  (404). The broker joins a parked agent leaf's answers into the result server-side. */
   async journalGet(seq: number): Promise<JournalLookup | null> {
-    const res = await this.fetchImpl(this.url(`journal/${encodeURIComponent(String(seq))}`), {
+    const res = await this.controlFetch(this.url(`journal/${encodeURIComponent(String(seq))}`), {
       method: "GET",
       headers: this.headers(false),
     });
@@ -173,7 +200,7 @@ export class RunnerControlClient {
     label: string;
     result: unknown;
   }): Promise<void> {
-    const res = await this.fetchImpl(this.url("journal"), {
+    const res = await this.controlFetch(this.url("journal"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify(entry),
@@ -185,7 +212,7 @@ export class RunnerControlClient {
    *  entry + a human-input request row for HITL, or the wake time for a long sleep), flips the run to
    *  its suspended status, and releases the lease — transactionally. No finalize; a wake re-dispatches. */
   async suspend(signal: SuspendSignal, workerId: string): Promise<void> {
-    const res = await this.fetchImpl(this.url("suspend"), {
+    const res = await this.controlFetch(this.url("suspend"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ ...signal, workerId }),
@@ -203,7 +230,7 @@ export class RunnerControlClient {
 
   /** Fetch the run's pinned manifest + program source, or null when the version is missing (404). */
   async getVersion(): Promise<BrokerVersion | null> {
-    const res = await this.fetchImpl(this.url("version"), {
+    const res = await this.controlFetch(this.url("version"), {
       method: "GET",
       headers: this.headers(false),
     });
@@ -215,7 +242,7 @@ export class RunnerControlClient {
   /** Book a runtime-seconds DELTA (the worker's RuntimeFlusher → broker). `identifier` makes a
    *  retried/duplicate flush idempotent; distinct per-flush ids sum into the run's runtime total. */
   async reportUsage(runtimeSeconds: number, identifier: string): Promise<void> {
-    const res = await this.fetchImpl(this.url("usage"), {
+    const res = await this.controlFetch(this.url("usage"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ runtimeSeconds, identifier }),
@@ -235,7 +262,7 @@ export class RunnerControlClient {
     cachedReadTokens?: number;
     cachedWriteTokens?: number;
   }): Promise<void> {
-    const res = await this.fetchImpl(this.url("usage/tokens"), {
+    const res = await this.controlFetch(this.url("usage/tokens"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify(input),
@@ -246,7 +273,7 @@ export class RunnerControlClient {
   /** Check whether the run's org is still funded (the CreditWatcher → broker). The broker reads the
    *  live Stripe balance server-side; `false` means out of credit (the watcher then aborts the run). */
   async checkCredit(): Promise<boolean> {
-    const res = await this.fetchImpl(this.url("credit"), {
+    const res = await this.controlFetch(this.url("credit"), {
       method: "GET",
       headers: this.headers(false),
     });
@@ -258,7 +285,7 @@ export class RunnerControlClient {
    *  cancelled the run (the broker flipped it to `cancelling`/`cancelled`); the watcher then aborts the
    *  run. Brokered because the runner holds no DB/Redis — this replaces the unreachable Redis channel. */
   async checkCancelled(): Promise<boolean> {
-    const res = await this.fetchImpl(this.url("cancel"), {
+    const res = await this.controlFetch(this.url("cancel"), {
       method: "GET",
       headers: this.headers(false),
     });
@@ -269,7 +296,7 @@ export class RunnerControlClient {
   /** Mint a presigned GET URL to restore this workflow's last `/workspace` snapshot (workspace
    *  persistence, §5). `null` when the run isn't eligible (not opted-in, or self-hosted). */
   async workspaceHydrateUrl(): Promise<string | null> {
-    const res = await this.fetchImpl(this.url("workspace/hydrate-url"), {
+    const res = await this.controlFetch(this.url("workspace/hydrate-url"), {
       method: "POST",
       headers: this.headers(false),
     });
@@ -284,7 +311,7 @@ export class RunnerControlClient {
   async workspacePersistUrl(
     sizeBytes: number,
   ): Promise<{ url: string; contentType: string } | null> {
-    const res = await this.fetchImpl(this.url("workspace/persist-url"), {
+    const res = await this.controlFetch(this.url("workspace/persist-url"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ sizeBytes }),
@@ -297,7 +324,7 @@ export class RunnerControlClient {
   /** Download bytes from a presigned S3 URL (workspace hydrate). `null` on 404 (no snapshot yet —
    *  e.g. the workflow's first run); throws on any other non-2xx. Goes straight to S3, not the broker. */
   async downloadBytes(url: string): Promise<Uint8Array | null> {
-    const res = await this.fetchImpl(url, { method: "GET" });
+    const res = await this.bulkFetch(url, { method: "GET" });
     if (res.status === 404) return null;
     if (!res.ok) throw await brokerError(res, "workspace-download");
     return new Uint8Array(await res.arrayBuffer());
@@ -307,7 +334,7 @@ export class RunnerControlClient {
    *  third-party-verifiable token (gated server-side on `permissions.id_token: "write"`) — used to
    *  federate into the org's OWN cloud (AWS/GCP). DIFFERENT from this client's run token. */
   async requestOidcToken(audience: string): Promise<{ token: string; expiresIn: number }> {
-    const res = await this.fetchImpl(this.url("oidc/token"), {
+    const res = await this.controlFetch(this.url("oidc/token"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ audience }),
@@ -319,7 +346,7 @@ export class RunnerControlClient {
   /** Publish a batch of live agent-event frames (the SSE live-tail source) — the broker publishes
    *  them to the run's Redis channel server-side, so the runner holds no Redis credential. */
   async publishTelemetry(frames: string[]): Promise<void> {
-    const res = await this.fetchImpl(this.url("telemetry"), {
+    const res = await this.controlFetch(this.url("telemetry"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ frames }),
@@ -330,7 +357,7 @@ export class RunnerControlClient {
   /** Store a run artifact through the broker (which holds the S3 credential + neutralizes the served
    *  content type server-side). Returns the catalog id + a signed download URL. */
   async writeArtifact(input: ArtifactWriteInput): Promise<ArtifactWriteResult> {
-    const res = await this.fetchImpl(this.url("artifacts"), {
+    const res = await this.controlFetch(this.url("artifacts"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify(input),
@@ -343,7 +370,7 @@ export class RunnerControlClient {
    *  broker derives the S3 key + neutralizes/pins the served content type; it returns the upload URL +
    *  required headers + the `s3Key` to echo back at commit. No catalog row exists yet. */
   async presignArtifact(input: ArtifactPresignInput): Promise<ArtifactPresignResult> {
-    const res = await this.fetchImpl(this.url("artifacts/presign"), {
+    const res = await this.controlFetch(this.url("artifacts/presign"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify(input),
@@ -356,7 +383,7 @@ export class RunnerControlClient {
    *  presign response and MUST be sent verbatim — the content type is pinned into the signature, so
    *  S3 rejects a mismatch. This call goes straight to S3, not the broker. */
   async uploadBytes(url: string, headers: Record<string, string>, body: Uint8Array): Promise<void> {
-    const res = await this.fetchImpl(url, { method: "PUT", headers, body });
+    const res = await this.bulkFetch(url, { method: "PUT", headers, body });
     if (!res.ok) throw await brokerError(res, "artifacts-upload");
   }
 
@@ -365,7 +392,7 @@ export class RunnerControlClient {
    *  broker re-validates the run prefix + re-neutralizes the content type, then returns the catalog id
    *  + a signed download URL. */
   async commitArtifact(input: ArtifactCommitInput): Promise<ArtifactWriteResult> {
-    const res = await this.fetchImpl(this.url("artifacts/commit"), {
+    const res = await this.controlFetch(this.url("artifacts/commit"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify(input),
@@ -376,7 +403,7 @@ export class RunnerControlClient {
 
   /** List the artifacts this run has produced. */
   async listArtifacts(): Promise<ArtifactSummary[]> {
-    const res = await this.fetchImpl(this.url("artifacts"), {
+    const res = await this.controlFetch(this.url("artifacts"), {
       method: "GET",
       headers: this.headers(false),
     });
@@ -386,7 +413,7 @@ export class RunnerControlClient {
 
   /** Mint a fresh signed download URL for one of this run's artifacts. */
   async signArtifactUrl(artifactId: string, ttlSeconds: number): Promise<ArtifactSignResult> {
-    const res = await this.fetchImpl(
+    const res = await this.controlFetch(
       this.url(`artifacts/${encodeURIComponent(artifactId)}/signed-url`),
       {
         method: "POST",
@@ -401,7 +428,7 @@ export class RunnerControlClient {
   /** Resolve an org secret the run's manifest allows (the program's `secrets.get`). The broker
    *  enforces the allowlist + returns the value; a forbidden/missing secret surfaces as a throw. */
   async resolveSecret(name: string): Promise<string> {
-    const res = await this.fetchImpl(this.url("secrets/resolve"), {
+    const res = await this.controlFetch(this.url("secrets/resolve"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ name }),
@@ -416,7 +443,7 @@ export class RunnerControlClient {
    *  A 403 (no active connection / non-allowlisted host) degrades to `{ accessToken: null, hint }` so
    *  the engine surfaces a clean failure instead of a thrown 500 mid-run; the token is never logged. */
   async mcpToken(serverUrl: string, invalidateToken?: string): Promise<McpTokenResult> {
-    const res = await this.fetchImpl(this.url("mcp/token"), {
+    const res = await this.controlFetch(this.url("mcp/token"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({
@@ -435,7 +462,7 @@ export class RunnerControlClient {
   /** Proxy a web_search through the broker (which holds the Tavily key) — the runner sends the
    *  query, the broker calls Tavily and returns the results. */
   async webSearch(input: unknown): Promise<WebSearchOutput> {
-    const res = await this.fetchImpl(this.url("tools/web_search"), {
+    const res = await this.controlFetch(this.url("tools/web_search"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify(input),
@@ -446,7 +473,7 @@ export class RunnerControlClient {
 
   /** Create (or idempotently re-attach to) a child run for `workflows.call`. */
   async startChild(slug: string, input: unknown): Promise<BrokerChild> {
-    const res = await this.fetchImpl(this.url("children"), {
+    const res = await this.controlFetch(this.url("children"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ slug, input }),
@@ -458,7 +485,7 @@ export class RunnerControlClient {
 
   /** Provision a durable schedule for `workflows.schedule`; returns the new schedule's id. */
   async scheduleWorkflow(slug: string, input: unknown, spec: BrokerScheduleSpec): Promise<string> {
-    const res = await this.fetchImpl(this.url("schedules"), {
+    const res = await this.controlFetch(this.url("schedules"), {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ slug, input, ...spec }),
@@ -471,7 +498,7 @@ export class RunnerControlClient {
   async getChild(
     childRunId: string,
   ): Promise<{ id: string; status: string; output: unknown } | null> {
-    const res = await this.fetchImpl(this.url(`children/${encodeURIComponent(childRunId)}`), {
+    const res = await this.controlFetch(this.url(`children/${encodeURIComponent(childRunId)}`), {
       method: "GET",
       headers: this.headers(false),
     });

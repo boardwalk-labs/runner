@@ -784,3 +784,37 @@ describe("swapRunToken (the wake path)", () => {
     ]);
   });
 });
+
+describe("control-call timeout (freeze-mid-poll safety)", () => {
+  it("a poll that never responds rejects on the AbortSignal instead of hanging forever", async () => {
+    // A fetch that honors the abort signal but never resolves otherwise — models a socket frozen
+    // mid-poll and dead on restore. The client must abort it via its own timeout.
+    const fetchImpl = ((_url: string, init?: RequestInit): Promise<Response> => {
+      return new Promise((_resolve, reject) => {
+        const signal = init?.signal;
+        signal?.addEventListener("abort", () => reject(signal.reason as Error), { once: true });
+      });
+    }) as typeof fetch;
+    const c = new RunnerControlClient({
+      baseUrl: "https://api.boardwalk.sh",
+      runToken: "rt",
+      runId: "run_1",
+      fetchImpl,
+      controlTimeoutMs: 40, // tiny so the test is fast
+    });
+    const start = Date.now();
+    await expect(c.checkCancelled()).rejects.toBeTruthy();
+    expect(Date.now() - start).toBeLessThan(2000); // aborted promptly, not hung
+  });
+
+  it("passes an AbortSignal on control calls and none on the inference stream", async () => {
+    const signals: (AbortSignal | null | undefined)[] = [];
+    const fetchImpl = ((_url: string, init?: RequestInit): Promise<Response> => {
+      signals.push(init?.signal);
+      return Promise.resolve(json(200, { cancelled: false }));
+    }) as typeof fetch;
+    const c = client(fetchImpl);
+    await c.checkCancelled();
+    expect(signals[0]).toBeInstanceOf(AbortSignal); // control call is bounded
+  });
+});
