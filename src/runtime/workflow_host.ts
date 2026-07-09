@@ -16,12 +16,15 @@ import type {
   AgentOptions,
   ArtifactBody,
   ArtifactRef,
+  BrowserSession,
+  BrowserSessionOptions,
   CallOptions,
   HumanInputOptions,
   HumanInputResult,
   PhaseOptions,
   SleepArg,
 } from "@boardwalk-labs/workflow/runtime";
+import type { BrowserSessionManager } from "./browser_session.js";
 import { LeafParked, type LeafResume } from "@boardwalk-labs/engine/core";
 import { normalizeHumanInputResult } from "./wire/human_input.js";
 import {
@@ -207,6 +210,10 @@ export interface WorkerWorkflowHostDeps {
     body: ArtifactBody,
     metadata: Record<string, unknown> | undefined,
   ) => Promise<ArtifactRef>;
+  /** Per-run browser-session manager (computer use, the browser tier). Absent ⇒ `computer.openBrowser`
+   *  is unsupported (no desktop/browser backend) and the host method rejects clearly. When present,
+   *  `agent({ session })` binds the session's in-VM Playwright MCP to the leaf. */
+  browserSessions?: BrowserSessionManager;
   /** Cooperative-cancellation signal for the run (credit exhaustion today; user cancel later). Every
    *  hook checks it at entry and unwinds (throws RunAbortedError); the spending/blocking hooks
    *  (`agent`/`sleep`/`callWorkflow`) thread it down so an in-flight op stops promptly. Absent ⇒ no
@@ -460,9 +467,13 @@ export class WorkerWorkflowHost implements WorkflowHost {
         resume = leafResumeSchema.parse(existing.result);
       }
     }
+    // Bind a computer-use session's tools (browser tier ⇒ its in-VM Playwright MCP) if one was passed.
+    // Done AFTER the fingerprint so the injected MCP never perturbs determinism (the fingerprint keys
+    // on provider/model/prompt/schema only — an mcp/session change must not invalidate a journal hit).
+    const effectiveOpts = this.bindBrowserSession(opts);
     for (;;) {
       try {
-        const result = await this.deps.leaf.run(prompt, opts, this.deps.signal, resume);
+        const result = await this.deps.leaf.run(prompt, effectiveOpts, this.deps.signal, resume);
         await this.deps.journal?.put({
           seq,
           kind: "agent",
@@ -722,6 +733,40 @@ export class WorkerWorkflowHost implements WorkflowHost {
       const ref = await this.deps.writeArtifact(name, contentType, body, metadata);
       return ref;
     });
+  }
+
+  /** `computer.openBrowser()`: open a program-owned, in-VM browser session (the browser tier of
+   *  computer use). Not a durable seam — a session is a live resource, reaped at run end, never
+   *  journaled/replayed. Absent backend ⇒ a clear "not available" error. */
+  openBrowserSession(opts: BrowserSessionOptions | undefined): Promise<BrowserSession> {
+    return this.guarded(async () => {
+      if (this.deps.browserSessions === undefined) {
+        throw new AppError(
+          ErrorCode.VALIDATION_FAILED,
+          "computer.openBrowser is not available in this runtime (no browser backend)",
+        );
+      }
+      return await this.deps.browserSessions.open(opts);
+    });
+  }
+
+  /** Translate `agent({ session })` into the leaf's `mcp`: append the browser session's in-VM
+   *  Playwright MCP (its http ref, which passes assertHostedMcpAllowed and reaches localhost without
+   *  the egress proxy) and strip the `session` handle (the engine doesn't understand it). No-op when
+   *  no session is bound. */
+  private bindBrowserSession(opts: AgentOptions | undefined): AgentOptions | undefined {
+    if (opts === undefined || opts.session === undefined) return opts;
+    const ref = this.deps.browserSessions?.mcpRefFor(opts.session);
+    if (ref === null || ref === undefined) {
+      throw new AppError(
+        ErrorCode.VALIDATION_FAILED,
+        "agent({ session }) received a browser session that is not open in this run",
+        { kind: "browser_session_not_open" },
+      );
+    }
+    const rest: AgentOptions = { ...opts };
+    delete rest.session;
+    return { ...rest, mcp: [...(rest.mcp ?? []), ref] };
   }
 
   sleep(arg: SleepArg): Promise<void> {

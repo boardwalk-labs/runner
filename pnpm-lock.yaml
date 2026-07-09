@@ -11,8 +11,8 @@ importers:
         specifier: ^0.1.29
         version: 0.1.29
       "@boardwalk-labs/workflow":
-        specifier: ^0.1.17
-        version: 0.1.17
+        specifier: ^0.1.22
+        version: 0.1.22
       node-gyp-build:
         specifier: ^4.8.4
         version: 4.8.4
@@ -106,10 +106,10 @@ packages:
     engines: { node: ">=24.0.0" }
     hasBin: true
 
-  "@boardwalk-labs/workflow@0.1.17":
+  "@boardwalk-labs/workflow@0.1.22":
     resolution:
       {
-        integrity: sha512-whexM3gvA6NaO4CelNJBITjJ3WRxRuhzlYreQFWZVnp+9sKxnjcJxEdKik1apI8kpFao43tHxcvAHt/vTUC6Og==,
+        integrity: sha512-4vrKvQs8fkgeIPWFyQnrWcMsG5Qgga/bJR+opcSjciWQuzosrD5BX2fzzHidRe/GhDB3LP/E3NAgn+NiWTlWuQ==,
       }
     engines: { node: ">=24" }
 
@@ -2456,10 +2456,10 @@ snapshots:
 
   "@boardwalk-labs/engine@0.1.29":
     dependencies:
-      "@boardwalk-labs/workflow": 0.1.17
+      "@boardwalk-labs/workflow": 0.1.22
       zod: 4.4.3
 
-  "@boardwalk-labs/workflow@0.1.17":
+  "@boardwalk-labs/workflow@0.1.22":
     dependencies:
       typescript: 5.9.3
       zod: 4.4.3

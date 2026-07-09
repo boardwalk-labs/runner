@@ -4,8 +4,11 @@ import type {
   AgentOptions,
   ArtifactBody,
   ArtifactRef,
+  BrowserSession,
   CallOptions,
+  McpServerRef,
 } from "@boardwalk-labs/workflow/runtime";
+import type { BrowserSessionManager } from "./browser_session.js";
 import {
   WorkerWorkflowHost,
   TimerSleepController,
@@ -53,6 +56,7 @@ function makeHost(
     journal: JournalSeam;
     onSuspend: (signal: SuspendSignal) => void;
     replayFrontier: number;
+    browserSessions: BrowserSessionManager;
   }> = {},
 ): { host: WorkerWorkflowHost; held: number[] } {
   const held: number[] = [];
@@ -82,6 +86,7 @@ function makeHost(
     ...(over.journal ? { journal: over.journal } : {}),
     ...(over.onSuspend ? { onSuspend: over.onSuspend } : {}),
     ...(over.replayFrontier !== undefined ? { replayFrontier: over.replayFrontier } : {}),
+    ...(over.browserSessions ? { browserSessions: over.browserSessions } : {}),
   });
   return { host, held };
 }
@@ -760,5 +765,60 @@ describe("WorkerWorkflowHost — callWorkflow durable seam", () => {
       journal,
     });
     await expect(host.callWorkflow("child-wf", {}, undefined)).rejects.toThrow(/failed/);
+  });
+});
+
+describe("computer.openBrowser + agent({ session })", () => {
+  function fakeManager(over: Partial<BrowserSessionManager> = {}): BrowserSessionManager {
+    return {
+      open: vi.fn().mockResolvedValue({ id: "sess_1" }),
+      mcpRefFor: vi.fn().mockReturnValue(null),
+      closeAll: vi.fn().mockResolvedValue(undefined),
+      ...over,
+    } as unknown as BrowserSessionManager;
+  }
+
+  it("openBrowserSession rejects when no browser backend is wired", async () => {
+    const { host } = makeHost();
+    await expect(host.openBrowserSession(undefined)).rejects.toThrow(/not available/);
+  });
+
+  it("openBrowserSession delegates to the manager", async () => {
+    const session = { id: "sess_9" } as BrowserSession;
+    const open = vi.fn().mockResolvedValue(session);
+    const { host } = makeHost({ browserSessions: fakeManager({ open }) });
+    await expect(host.openBrowserSession({ startUrl: "https://x" })).resolves.toBe(session);
+    expect(open).toHaveBeenCalledWith({ startUrl: "https://x" });
+  });
+
+  it("agent({ session }) injects the session's http MCP ref and strips the handle", async () => {
+    const session = { id: "sess_1" } as BrowserSession;
+    const ref: McpServerRef = {
+      name: "browser-sess_1",
+      transport: "http",
+      url: "http://127.0.0.1:9/mcp",
+    };
+    let seenOpts: AgentOptions | undefined;
+    const { host } = makeHost({
+      leaf: {
+        run: (_p, opts) => {
+          seenOpts = opts;
+          return Promise.resolve("ok");
+        },
+      },
+      browserSessions: fakeManager({ mcpRefFor: vi.fn().mockReturnValue(ref) }),
+    });
+    await host.agent("drive", { session, mcp: [] });
+    expect(seenOpts?.session).toBeUndefined();
+    expect(seenOpts?.mcp).toEqual([ref]);
+  });
+
+  it("agent({ session }) throws for a session not open in this run", async () => {
+    const { host } = makeHost({
+      browserSessions: fakeManager({ mcpRefFor: vi.fn().mockReturnValue(null) }),
+    });
+    await expect(
+      host.agent("drive", { session: { id: "ghost" } as BrowserSession }),
+    ).rejects.toThrow(/not open in this run/);
   });
 });
