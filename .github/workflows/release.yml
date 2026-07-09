@@ -48,9 +48,10 @@ jobs:
       # Intel-x86-only (nested virtualization is Intel-x86-only), so linux-x64 is the only platform
       # that ever loads it; every other consumer (arm64 hosted runners, self-host) no-ops via
       # node-gyp-build's absent-prebuild path. `files` ships prebuilds/ in the package.
-      # prebuildify shells out to `node-gyp` by bare name, so it must be on PATH — install it
-      # globally (ubuntu-latest already has python3 + build-essential for the compile).
-      - run: npm install -g node-gyp
+      # prebuildify shells out to `node-gyp` by bare name; it's a devDependency, so `pnpm exec`
+      # puts node_modules/.bin (incl. node-gyp) on PATH — NOT installed globally, which would
+      # perturb the global npm that the provenance publish below relies on. ubuntu-latest ships
+      # python3 + build-essential for the compile.
       - run: pnpm exec prebuildify --napi --strip -t 24.0.0
       - run: ls prebuilds/linux-x64/*.node
       # Trusted Publishing needs a recent npm (>= 11.5.1); node 24's bundled npm may be older.
