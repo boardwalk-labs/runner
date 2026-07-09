@@ -78,7 +78,7 @@ export interface EngineLeafExecutorDeps {
   budget: BudgetMeter;
   /** RUN-level redactor (shared with the secret resolver): every resolved secret value is recorded
    *  here. We seed a fresh engine `Redactor` from it per leaf so the loop scrubs known values out of
-   *  the prompt, tool args/results, and transcript before they reach the model (the platform spec). */
+   *  the prompt, tool args/results, and transcript before they reach the model. */
   redactor: SecretRedactor;
   /** Builds this leaf's event sink; `leafIndex` (1-based) is only a metering identifier — the sink
    *  owns the run-global cursor. `identity` names the leaf on its turn frames. */
@@ -97,7 +97,7 @@ export interface EngineLeafExecutorDeps {
    *  omitted ⇒ no bundled tier (only the workspace AGENTS.md applies). */
   programDir?: () => string | null;
   /** Per-leaf token metering seam (fire-and-forget). Reports THIS leaf's tokens + its model to the
-   *  broker, which decides `billed_by_boardwalk` per model + meters to Stripe. Omitted in tests. */
+   *  broker, which decides `billed_by_boardwalk` per model + meters usage to the platform. Omitted in tests. */
   meterUsage?: (input: MeterUsageInput) => void;
   /** Backend for the engine's host-backed built-in tools (`webfetch` / `web_search` / `artifacts`):
    *  set as the leaf's `capabilities.host` so the engine registers them. Broker-backed on hosted runs

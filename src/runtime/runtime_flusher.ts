@@ -1,10 +1,10 @@
 // RuntimeFlusher — meters a run's held-task runtime as periodic DELTAS, instead of one charge at
-// terminal (the platform spec). The heartbeat counterpart to the credit / cancel
+// terminal. The heartbeat counterpart to the credit / cancel
 // / lease watchers.
 //
 // Why: runtime used to be booked once, at terminal (`now - sessionStart`). That left two holes — a run
 // that never terminates (a perpetual loop) NEVER billed its runtime (and the credit watcher, reading
-// Stripe, never saw the burn so it couldn't stop it); and a session that crashed before finalizing had
+// the billing balance, never saw the burn so it couldn't stop it); and a session that crashed before finalizing had
 // its whole runtime lost. Metering on a timer closes both: runtime is billed as it accrues, the credit
 // watcher sees it, and a crashed session keeps the deltas it already flushed (the fresh session bills
 // its own — distinct ids sum, so the restart isn't double-charged or under-charged for the overlap-free

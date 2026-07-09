@@ -1,6 +1,6 @@
 // WorkflowProgramRunner — executes a workflow program (the JS-body model, the workflow runtime design).
 //
-// A run is the execution of a built program ARTIFACT (§3.9): the worker is handed the VERIFIED tarball
+// A run is the execution of a built program ARTIFACT: the worker is handed the VERIFIED tarball
 // (its sha256 already checked against the pinned digest by the orchestrator) plus the entry module
 // name. This module is the mechanism: it installs the host adapter + trigger payload onto the
 // `@boardwalk-labs/workflow` singleton, extracts the artifact into a unique temp dir under a
@@ -143,7 +143,7 @@ export interface ProgramRunnerDeps {
    * Scrubs known secret values out of a string (the run's `SecretRedactor.redactText`). Applied to a
    * top-level throw's message before it is logged AND before it is returned to the worker — a program
    * that resolves a secret and then throws it in an error message must NOT land that secret raw in the
-   * logs or the finalized run output (the platform spec). Defaults to identity (tests/local).
+   * logs or the finalized run output. Defaults to identity (tests/local).
    */
   redactText?: (text: string) => string;
   /**

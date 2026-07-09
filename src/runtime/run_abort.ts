@@ -1,11 +1,11 @@
 // run_abort — the provider-agnostic cooperative-cancellation substrate for a run (the Runner Credential Broker model).
 //
-// The cancellation primitive is a Web-standard `AbortSignal` — NOT a Strands/model concept. The worker
+// The cancellation primitive is a Web-standard `AbortSignal` — NOT a framework/model concept. The worker
 // owns one `AbortController` per run session; a watcher (credit, later user-cancel) calls
 // `controller.abort(new RunAbortedError(reason))`. The WorkflowHost honors that signal at every hook
 // boundary (`agent`/`sleep`/`workflows.call`/…), unwinding the program. The ONLY place that translates
-// the signal into a model-specific stop is the Strands leaf (signal → `agent.cancel()`); a future
-// non-Strands leaf honors the SAME `AbortSignal` its own way. So nothing here, in the host, or in the
+// the signal into a model-specific stop is the agent leaf (signal → the leaf's cancel path); a different
+// leaf implementation honors the SAME `AbortSignal` its own way. So nothing here, in the host, or in the
 // program-facing SDK depends on the model backend.
 //
 // `signal.aborted` is AUTHORITATIVE at the orchestrator: a program that catches RunAbortedError and

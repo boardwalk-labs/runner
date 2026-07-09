@@ -11,12 +11,12 @@
 //      aborted mid-flight — credit exhaustion — finalize failed with the abort reason).
 //
 // While the program runs, two per-session loops watch it (both brokered): a UsageFlusher meters token
-// deltas (§10.7) and a CreditWatcher polls the org's funding (§15). When credit hits zero the watcher
+// deltas and a CreditWatcher polls the org's funding. When credit hits zero the watcher
 // aborts the run's AbortSignal, which the WorkflowHost honors at every hook (cooperative
 // cancellation, run_abort.ts) — `signal.aborted` is authoritative for the terminal status.
 //
 // What's gone vs. the old worker: no checkpoint load/pause, no resume, no sleep/wait_for_child
-// pause outcomes (the program holds), no per-turn transcript. The Strands loop now lives one
+// pause outcomes (the program holds), no per-turn transcript. The agent loop now lives one
 // level down, behind the host's agent() leaf.
 //
 // v0 deferral (a clear seam): run-level outcome validation (needs program output capture).
@@ -62,7 +62,7 @@ export interface ProgramVersionReader {
   getById(id: string): Promise<{ manifest: unknown; program: ProgramRef } | null>;
 }
 
-/** Books the run's RUNTIME usage as periodic deltas (the worker's RuntimeFlusher; §10.7 + §15). The
+/** Books the run's RUNTIME usage as periodic deltas (the worker's RuntimeFlusher). The
  *  orchestrator drives the lifecycle: the timer flushes mid-run, `stop()` halts it at the body's end,
  *  and `flushFinal()` books the tail on a clean terminal (skipped on a `lease_lost` handoff — the new
  *  owner books its own runtime). Replaces the old single terminal runtime charge. */
@@ -90,7 +90,7 @@ export interface RunSuspender {
   suspend(signal: SuspendSignal, workerId: string): Promise<void>;
 }
 
-/** Restores/snapshots the workflow's persistent `/workspace` (§5). Best-effort — both no-op when the
+/** Restores/snapshots the workflow's persistent `/workspace`. Best-effort — both no-op when the
  *  run isn't eligible (not opted-in / self-hosted), and neither throws. */
 export interface WorkspaceHandle {
   hydrate(): Promise<void>;
@@ -198,7 +198,7 @@ export interface ProgramWorkerDeps {
   /** Emit the program's `console.*` output as `log` run-events while the body runs (optional —
    *  absent disables capture). Wired by the entrypoint to the batched telemetry publisher. */
   onProgramLog?: (stream: LogStream, text: string) => void;
-  /** ECS task ARN (or any stable worker identity). */
+  /** Task ARN (or any stable worker identity). */
   workerId: string;
   /** Drain any buffered telemetry before the worker exits (brokered path's BrokerEventPublisher).
    *  Called by the worker entrypoint's cleanup; the orchestrator itself never invokes it. */
@@ -323,16 +323,16 @@ export async function runProgramWorker(
   // self-hosted, or on a first run). Best-effort — never fails the run.
   if (workspace !== undefined) await workspace.hydrate();
   // Token metering is PER-LEAF: each agent() leaf reports its own tokens + model to the broker, which
-  // decides `billed_by_boardwalk` per model + meters to Stripe (see leaf_executor `meterUsage`). A
+  // decides `billed_by_boardwalk` per model + meters usage to the platform (see leaf_executor `meterUsage`). A
   // workflow has no run-level model, so there is no run-level token metering here.
-  // Mid-run credit watching (§15): when the org runs out of credit, abort the run cooperatively.
+  // Mid-run credit watching: when the org runs out of credit, abort the run cooperatively.
   const credit = deps.startCreditWatch?.({
     run: claimed,
     onExhausted: () => {
       controller.abort(new RunAbortedError("credit_exhausted"));
     },
   });
-  // Mid-run user-cancel watching (§6): when the user cancels, abort the run cooperatively. The host
+  // Mid-run user-cancel watching: when the user cancels, abort the run cooperatively. The host
   // honors the abort at the next hook boundary (a `sleep` hold wakes immediately); the broker then
   // upgrades the terminal write to `cancelled` because the run was flipped to `cancelling`.
   const cancel = deps.startCancelWatch?.({
@@ -341,7 +341,7 @@ export async function runProgramWorker(
       controller.abort(new RunAbortedError("cancelled"));
     },
   });
-  // Lease renewal (§6): heartbeat the lease so a long run isn't reclaimed mid-flight. If the lease is
+  // Lease renewal: heartbeat the lease so a long run isn't reclaimed mid-flight. If the lease is
   // definitively lost (another worker reclaimed it), abort `lease_lost` — the run stops without
   // finalizing (the new owner owns the terminal write; see the lease_lost guard after the body).
   const lease = deps.startLeaseRenew?.({
@@ -350,7 +350,7 @@ export async function runProgramWorker(
       controller.abort(new RunAbortedError("lease_lost"));
     },
   });
-  // Runtime metering (§15): flush runtime as periodic deltas from the claim, so a long/perpetual run
+  // Runtime metering: flush runtime as periodic deltas from the claim, so a long/perpetual run
   // bills as it burns (and the credit watcher sees it) instead of only at terminal. The tail is booked
   // by `flushFinal()` after the body (on every path except a lease_lost handoff).
   const runtimeFlush = deps.startRuntimeFlush?.({ run: claimed, startedAtMs: sessionStartMs });

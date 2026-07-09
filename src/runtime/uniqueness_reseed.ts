@@ -2,7 +2,7 @@
 // the determinism contract that survives the journal's deletion.
 //
 // A memory snapshot freezes OpenSSL's DRBG, so two clones of one base snapshot hand every run
-// byte-identical `crypto.*` output (proven, contract §6.5). The kernel CSPRNG diverges across
+// byte-identical `crypto.*` output (proven, contract). The kernel CSPRNG diverges across
 // clones (VMGenID) but that reseed never reaches OpenSSL, and a pure-JS monkeypatch was proven
 // insufficient (named ESM imports of `node:crypto` bypass it — measured 2026-07-09). So the robust
 // fix is a native step that reseeds OpenSSL's DRBG UNDERNEATH every caller: the `bw_reseed` addon

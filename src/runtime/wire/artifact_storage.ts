@@ -1,5 +1,5 @@
 // Artifact storage policy — the server-side rules for turning an agent's artifact-write request into
-// a stored S3 object (the platform spec). These used to live in the `artifacts` TOOL,
+// a stored S3 object. These used to live in the `artifacts` TOOL,
 // which runs on the UNTRUSTED runner; under the Runner Credential Broker (the Runner Credential Broker model) the
 // broker owns them so a malicious runner can't bypass content-type neutralization or escape its
 // run's key prefix. Pure functions — unit-tested exhaustively.
@@ -13,7 +13,7 @@ export function workspaceS3Key(orgId: string, workflowId: string): string {
   return `orgs/${orgId}/workflows/${workflowId}/workspace.tar.gz`;
 }
 
-// ---- run-artifact retention tag (Phase 18.5 S3 lifecycle safety net) ----
+// ---- run-artifact retention tag (S3 lifecycle safety net) ----
 //
 // Run artifacts share the `orgs/{org}/...` prefix with workspace snapshots (`.../workflows/...`) and
 // program artifacts (`.../program-artifacts/...`), and S3 lifecycle prefix filters can't express

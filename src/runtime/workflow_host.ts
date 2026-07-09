@@ -1,7 +1,7 @@
 // WorkerWorkflowHost — the real WorkflowHost the worker installs onto @boardwalk-labs/workflow
 // before running a program (the workflow runtime design). The program's hooks delegate here:
 //
-//   agent(prompt, opts)        → an ephemeral Strands agent leaf (the demoted agent loop)
+//   agent(prompt, opts)        → an ephemeral agent leaf (the demoted agent loop)
 //   sleep(arg)                 → an IN-PROCESS hold (hold-and-pay; no checkpoint, no exit)
 //   workflows.call(slug, in)   → a durable child run (parent holds while it runs)
 //   secrets.get(name)          → the run's fail-closed secret resolver
@@ -118,7 +118,7 @@ export interface SecretAccessor {
   get(name: string): Promise<string>;
 }
 
-/** Register-without-release (docs/SUSPEND_POLICY.md §1.2): register a HELD HITL gate so it is
+/** Register-without-release: register a HELD HITL gate so it is
  *  answerable while the run keeps running, and poll for the answer. Backed by the broker's
  *  `inputs` endpoints. Absent ⇒ a held gate is only answerable once it freezes. */
 export interface HeldInputPort {
@@ -246,7 +246,7 @@ export interface WorkerWorkflowHostDeps {
    * stream, and work arriving while a freeze is pending queues until the wake.
    */
   freeze?: FreezeCoordinator;
-  /** Register-without-release for HELD human-input gates (docs/SUSPEND_POLICY.md §1.2). Only
+  /** Register-without-release for HELD human-input gates. Only
    *  meaningful alongside `freeze`; absent ⇒ a held gate is answerable only once it freezes. */
   heldInput?: HeldInputPort;
   /** Poll interval for a held gate's answer (default 3s). */
@@ -331,7 +331,7 @@ export class WorkerWorkflowHost implements WorkflowHost {
   }
 
   /**
-   * Snapshot-substrate `humanInput()` with REGISTER-WITHOUT-RELEASE (docs/SUSPEND_POLICY.md §1.2).
+   * Snapshot-substrate `humanInput()` with REGISTER-WITHOUT-RELEASE.
    * A gate reached while a sibling seam is still in flight HOLDS (the quiescence gate won't freeze
    * yet), but a human must still be able to answer during that hold. So: register the gate with the
    * broker immediately (it surfaces in the inbox/API at once), then race two outcomes —

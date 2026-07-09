@@ -1,4 +1,4 @@
-// artifacts — persist + reference run outputs (the platform spec). Available to any agent
+// artifacts — persist + reference run outputs. Available to any agent
 // (no sandbox required). Three operations:
 //   * write(name, content_type, body)   → store a file under the run's prefix; returns id + a signed URL.
 //   * list()                            → artifacts produced in THIS run.

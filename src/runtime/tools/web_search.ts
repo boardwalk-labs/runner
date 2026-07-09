@@ -1,12 +1,11 @@
 // web_search — wraps the Tavily API (https://docs.tavily.com/docs/api-reference).
 //
-// Per the platform spec: Tavily is Boardwalk's default web-search provider. API
-// key fetched from Secrets Manager (`boardwalk/<stage>/tavily/api-key`) and
-// cached at the module level per container, NEVER appearing in the agent's
-// conversation.
+// The platform's default web-search provider. API
+// key fetched from the org's secret store and cached at the module level per
+// container, NEVER appearing in the agent's conversation.
 //
-// 429 from Tavily → `AppError(RATE_LIMIT)` so Strands' retry strategy handles
-// backoff. 5xx → `AppError(TOOL_ERROR)`. Network-level fetch failures fall
+// 429 from the provider → `AppError(RATE_LIMIT)` so the agent loop's retry strategy
+// handles backoff. 5xx → `AppError(TOOL_ERROR)`. Network-level fetch failures fall
 // back to `TOOL_ERROR`.
 
 import { z } from "zod";

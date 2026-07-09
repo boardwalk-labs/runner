@@ -1,15 +1,15 @@
 // Boardwalk's internal Tool contract. Concrete tools (`echo`, `http`, `web_search`, `sleep`,
-// `workflows.call`, …) implement this interface; the worker registers a `ZodTool`-flavored
-// adapter into Strands at agent construction time.
+// `workflows.call`, …) implement this interface; the worker registers a schema-typed
+// adapter into the agent leaf at construction time.
 //
-// Why a Boardwalk-side interface instead of using `ZodTool` directly?
-//   * Tests can drive tool logic without instantiating Strands.
+// Why a Boardwalk-side interface instead of the leaf's native tool type?
+//   * Tests can drive tool logic without instantiating the agent leaf.
 //   * Control-signal tools (`sleep`, `workflows.call`) need to return a
 //     specially-shaped value the worker interprets — they don't really "run";
-//     they bubble a signal up to the engine. Our adapter (lands with the worker
-//     in Phase 10.5) translates between this interface and the Strands surface.
+//     they bubble a signal up to the engine. Our adapter translates between
+//     this interface and the agent leaf's tool surface.
 //
-// Per the platform spec: tools NEVER see secret values. Secrets resolve to
+// Tools NEVER see secret values. Secrets resolve to
 // short-lived bearer tokens, ARNs, etc. via the injected `SecretResolver`.
 
 import type { z } from "zod";
@@ -18,7 +18,7 @@ import type { SecretRefManifest } from "../wire/manifest.js";
 
 /**
  * Per-invocation context the worker threads through to a tool. Equivalent to
- * Strands' `ToolContext` but typed in Boardwalk's idiom (AuthContext + run id +
+ * a tool framework's `ToolContext` but typed in Boardwalk's idiom (AuthContext + run id +
  * secret resolver scoped to this run's permissions).
  */
 export interface ToolContext {
@@ -44,7 +44,7 @@ export interface SecretResolver {
  *   * Return a `ToolReturn` body — synchronous "normal" tools (echo, http,
  *     web_search). The body lands in the conversation as the assistant's
  *     tool-result block.
- *   * Return a `ToolControlSignal` — the legacy Strands-level sleep/workflows.call path. The
+ *   * Return a `ToolControlSignal` — the legacy tool-level sleep/workflows.call path. The
  *     current JS-body worker exposes these as program SDK hooks instead; agent() leaves strip
  *     control-flow tools before registering model-callable tools.
  */
@@ -58,8 +58,8 @@ export interface BoardwalkTool<TInput = unknown, TOutput = unknown> {
   /**
    * Zod schema for the tool's SUCCESS output (the `TOutput` shape — never the
    * control-signal branch). The adapter validates the tool's return value
-   * against this before it lands in the LLM conversation, per the code standards
-   * §2.1/§8.3 (LLM-facing output is treated like untrusted external input).
+   * against this before it lands in the LLM conversation
+   * (LLM-facing output is treated like untrusted external input).
    */
   readonly outputSchema: z.ZodType<TOutput>;
   /**
@@ -81,7 +81,7 @@ export interface BoardwalkTool<TInput = unknown, TOutput = unknown> {
   normalizeInput?(raw: unknown): unknown;
   /**
    * Invoke the tool. `input` (LLM-supplied) comes first, `ctx` (worker-supplied)
-   * second — see the `Tool` naming note in SPEC §9. Returns either the typed
+   * second — see the `Tool` naming note in SPEC.md. Returns either the typed
    * `TOutput` body or a `ToolControlSignal` (sleep / workflows.call) the worker
    * intercepts before serialization.
    */

@@ -110,7 +110,7 @@ export class RunnerControlClient {
    * Every SHORT control call (claim / renew / cancel / credit / journal / …) goes through here so
    * it carries a hard timeout. Without one, a poll frozen mid-flight on the snapshot substrate
    * hangs FOREVER on restore (the socket is dead but never reset), and since a watcher serializes
-   * its ticks, one hung tick wedges that watcher — the §9 dead-connections gotcha for the
+   * its ticks, one hung tick wedges that watcher — the dead-connections gotcha for the
    * background pollers (lease/cancel/credit), which run on untracked timers the quiescence gate
    * doesn't cover. Also plain robustness: no broker call should hang on a network blip. The
    * streaming inference call is the ONE exception (long-lived NDJSON) and bypasses this.
@@ -251,8 +251,8 @@ export class RunnerControlClient {
   }
 
   /** Report a token-usage delta for incremental in-run metering (the usage flusher → broker). The
-   *  broker gates on the run's per-connection `billed_by_boardwalk` server-side + meters to Stripe;
-   *  `identifier` makes a retried/duplicate flush idempotent. Satisfies {@link TokenUsageReporter}. */
+   *  broker gates on the run's per-connection `billed_by_boardwalk` server-side + meters usage to the
+   *  platform; `identifier` makes a retried/duplicate flush idempotent. Satisfies {@link TokenUsageReporter}. */
   async meterTokens(input: {
     inputTokens: number;
     outputTokens: number;
@@ -271,7 +271,7 @@ export class RunnerControlClient {
   }
 
   /** Check whether the run's org is still funded (the CreditWatcher → broker). The broker reads the
-   *  live Stripe balance server-side; `false` means out of credit (the watcher then aborts the run). */
+   *  live billing balance server-side; `false` means out of credit (the watcher then aborts the run). */
   async checkCredit(): Promise<boolean> {
     const res = await this.controlFetch(this.url("credit"), {
       method: "GET",
@@ -293,7 +293,7 @@ export class RunnerControlClient {
     return ((await res.json()) as { cancelRequested: boolean }).cancelRequested;
   }
 
-  /** Register-without-release (docs/SUSPEND_POLICY.md §1.2): register a HELD HITL gate's request row
+  /** Register-without-release: register a HELD HITL gate's request row
    *  so it is answerable while the run keeps running — no suspend. Idempotent. Returns whether a new
    *  gate was registered. */
   async registerInput(seq: number, gate: unknown): Promise<boolean> {
@@ -317,7 +317,7 @@ export class RunnerControlClient {
   }
 
   /** Mint a presigned GET URL to restore this workflow's last `/workspace` snapshot (workspace
-   *  persistence, §5). `null` when the run isn't eligible (not opted-in, or self-hosted). */
+   *  persistence). `null` when the run isn't eligible (not opted-in, or self-hosted). */
   async workspaceHydrateUrl(): Promise<string | null> {
     const res = await this.controlFetch(this.url("workspace/hydrate-url"), {
       method: "POST",

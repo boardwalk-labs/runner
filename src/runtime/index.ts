@@ -78,7 +78,7 @@ const log = createLogger("worker_entrypoint");
  *  runner holds NO platform credential — only the per-run control-plane handle (run token + broker
  *  URL); everything else is reached through the Runner Control API (the Runner Credential Broker model). */
 export interface WorkerRuntime {
-  /** Stable worker identity stamped onto the lease (ECS task arn / hostname / run-derived). */
+  /** Stable worker identity stamped onto the lease (task ARN / hostname / run-derived). */
   workerId: string;
   /** Sandbox workspace root for filesystem/shell/git tools. */
   workspaceRoot: string;
@@ -101,14 +101,14 @@ export interface WorkerRuntime {
   freezeRelay?: IdentityRelay;
 }
 
-/** Durable events are deferred (run_step_events table) — live fan-out via the broker only. */
+/** Durable events are deferred (durable event storage) — live fan-out via the broker only. */
 
 /** Synthesize the run's AuthContext. The run was already authorized at trigger time; the
  *  worker acts on the org's behalf, so it carries the org + an owner role. Tool-level
  *  boundaries (the broker's server-side manifest allowlist) are the real guard.
  *
  *  source='workflow' (NOT 'session_jwt'): the program must never perform SESSION_JWT_ONLY
- *  credential mutations (§12.11), so a tool that ever exposed such a service is denied by
+ *  credential mutations, so a tool that ever exposed such a service is denied by
  *  construction regardless of the owner role. */
 export function workerAuthContext(run: Run): AuthContext {
   const userId = run.actor.type === "user" ? run.actor.user_id : `workflow:${run.workflowId}`;
@@ -206,7 +206,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // Fallback budget-cap rate. A managed turn caps on the broker's EXACT upstream cost (forwarded on
       // the inference result frame → BudgetMeter `realCostUsd`); this representative sonnet-class rate
       // applies only to a turn with no upstream cost (BYO / unavailable). `max_usd` is a guardrail, not
-      // the bill — that's per-leaf cost pass-through at the broker.
+      // the bill — the platform meters the actual per-leaf usage.
       rate: BUDGET_GUARDRAIL_RATE,
       startedAt: Date.now(),
       // deadline_seconds is WALL-CLOCK from the run's ORIGINAL start (incl. suspended idle), so a run
@@ -223,7 +223,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     const nextMeterIdentifier = tokenMeterIdentifiers(run.id, meteringSessionId);
     // Per-run secret boundary: every value resolved (program `secrets.get` OR a tool's
     // ctx.secrets.resolve) is recorded into one shared redactor; the leaf seeds a fresh engine
-    // Redactor from it so the loop scrubs those values out of all model-bound content. the platform spec
+    // Redactor from it so the loop scrubs those values out of all model-bound content.
     const redactor = new SecretRedactor();
     // Record the run's own API key so a prompt-injected agent can't echo it back to the model.
     if (runApiKey !== undefined && runApiKey !== "") redactor.record(runApiKey);
@@ -309,7 +309,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // comes from the org's connection vault via the Runner Control API — never stored on the worker.
       brokerMcpToken: (serverUrl, invalidateToken) => broker.mcpToken(serverUrl, invalidateToken),
     });
-    // Per-workflow persistent /workspace (§5): only when the manifest opts in. The BROKER additionally
+    // Per-workflow persistent /workspace: only when the manifest opts in. The BROKER additionally
     // gates on hosted (self-hosted runs get null URLs), and snapshots are keyed per-workflow + scoped
     // by the run token — so even the untrusted in-process program can't reach another tenant's data.
     const workspaceStore =
@@ -390,7 +390,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // Snapshot-substrate suspension: seams freeze in place under the quiescence gate instead of
       // raising onSuspend (which stays wired as the transitional/local path's fallback).
       ...(freeze !== undefined ? { freeze } : {}),
-      // Register-without-release for held HITL gates (docs/SUSPEND_POLICY.md §1.2) — only on the
+      // Register-without-release for held HITL gates — only on the
       // freeze substrate, backed by the broker's inputs endpoints.
       ...(freeze !== undefined
         ? {
@@ -507,7 +507,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     suspender: {
       suspend: (signal, workerId) => broker.suspend(signal, workerId),
     },
-    // Runtime metering (§15): flush runtime as periodic deltas (+ a terminal tail) through the broker,
+    // Runtime metering: flush runtime as periodic deltas (+ a terminal tail) through the broker,
     // idempotent per flush, so a long/perpetual run bills as it burns and the credit watcher sees it —
     // not a single charge at terminal (which a never-terminating run never reached). A fresh per-session
     // id keeps a restarted run's sessions distinct in the idempotency key (distinct ids sum).
@@ -529,7 +529,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       return { stop: () => flusher.stop(), flushFinal: () => flusher.flushFinal() };
     },
     buildHost,
-    // Mid-run credit watching (§15): a CreditWatcher polls the broker's GET /credit on a timer; when
+    // Mid-run credit watching: a CreditWatcher polls the broker's GET /credit on a timer; when
     // the org runs out, onExhausted aborts the run (the orchestrator wires it to AbortController).
     startCreditWatch: ({ run, onExhausted }) => {
       const watcher = new CreditWatcher({
@@ -553,7 +553,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       watcher.start();
       return { stop: () => watcher.stop() };
     },
-    // Lease renewal (§6): a LeaseRenewer extends the lease through the broker's POST /renew on a timer
+    // Lease renewal: a LeaseRenewer extends the lease through the broker's POST /renew on a timer
     // (well under the lease), so a run longer than the 5-min lease isn't reclaimed mid-flight by the
     // recovery sweep. `renew` re-extends with the SAME workerId that claimed it; a null result (the
     // run is no longer ours) fires onLost → the run aborts `lease_lost` without finalizing.
@@ -579,7 +579,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
 // ---- Bootstrap (real container only) -------------------------------------------------
 
 /**
- * The per-run platform values the dispatcher injects as container env (ecs_run_task_client.ts). They
+ * The per-run platform values the dispatcher injects as container env. They
  * are captured into private worker state at bootstrap and DELETED from `process.env` before any user
  * program / agent leaf / subprocess can run — the run token + API token are credentials, and nothing
  * untrusted run code touches should inherit them (the run env/credential rules). The user owns the rest
@@ -694,7 +694,7 @@ export async function main(): Promise<void> {
     await deps.flushTelemetry?.().catch(() => undefined);
   };
 
-  // SIGTERM: ECS is stopping the task. Hold-and-pay has no mid-run checkpoint; we exit and let the
+  // SIGTERM: the orchestrator is stopping the task. Hold-and-pay has no mid-run checkpoint; we exit and let the
   // lease expire → the scheduler-sweep reclaims it and a fresh worker RESTARTS the run from the
   // top (Lambda/GHA semantics; durable children re-attach via idempotency). Crash-safe by design.
   let shuttingDown = false;

@@ -254,7 +254,7 @@ export class BudgetMeter {
    * USD cost for a single delta — the representative-rate ESTIMATE used only when the broker reports
    * no real upstream cost for the turn (a BYO-provider turn, or a managed turn whose cost tap missed).
    * Managed turns instead carry the managed provider's exact per-request cost through to {@link addUsage}. Public so
-   * the loop can stamp the per-step `cost_usd` column on `run_steps` without re-deriving the rate table.
+   * the loop can stamp the per-step cost without re-deriving the rate table.
    */
   costFor(delta: UsageDelta): number {
     const inputCost = ((delta.inputTokens ?? 0) * this.rate.inputPerMillion) / 1_000_000;

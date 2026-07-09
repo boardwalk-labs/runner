@@ -1,4 +1,4 @@
-// SecretRedactor — scrubs known secret values from everything bound for an LLM (the platform spec).
+// SecretRedactor — scrubs known secret values from everything bound for an LLM.
 //
 // The architectural guarantee is structural: secrets live ONLY in the workflow PROGRAM (the trusted
 // deterministic tool layer), which holds them via `secrets.get` / `ctx.secrets.resolve`. The

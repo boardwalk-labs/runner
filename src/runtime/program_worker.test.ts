@@ -342,7 +342,7 @@ describe("runProgramWorker — happy path", () => {
   });
 });
 
-describe("runProgramWorker — workspace persistence (§5)", () => {
+describe("runProgramWorker — workspace persistence", () => {
   it("hydrates before the program and persists at terminal when opted in", async () => {
     const h = harness({ persistWorkspace: true });
     const outcome = await runProgramWorker("run_1", h.deps);

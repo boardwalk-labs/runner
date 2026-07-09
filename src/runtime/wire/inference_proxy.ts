@@ -13,7 +13,7 @@
 //
 // Transport: the response is **newline-delimited JSON** (one frame per line). A model turn streams
 // many text deltas; NDJSON lets the runner consume them incrementally over the raw socket (the
-// buffered REST path can't stream — the platform spec). Each frame is one of:
+// buffered REST path can't stream). Each frame is one of:
 //   { "t": "delta",  "text": <string> }                  — a streamed assistant-text chunk
 //   { "t": "result", "turn": <ChatTurn>, "modelRef": <string>, "costMicros": <number> }  — terminal turn
 //   { "t": "error",  "error": { code, message } }         — a terminal model/broker error
