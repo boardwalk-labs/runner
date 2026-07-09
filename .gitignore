@@ -6,3 +6,6 @@ coverage
 # Native addon build outputs — CI (release.yml) builds prebuilds/ at publish; never commit binaries.
 prebuilds/
 build/
+
+# Project-local pnpm store (created when the ambient env has no global store; never commit it).
+.pnpm-store/

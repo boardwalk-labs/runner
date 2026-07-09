@@ -10,7 +10,7 @@ import {
 function proc(overrides: Partial<BrowserProcess> = {}): BrowserProcess {
   return {
     cdpUrl: "http://127.0.0.1:9222",
-    mcpUrl: "http://127.0.0.1:9333/mcp",
+    mcpUrl: "http://localhost:9333/mcp",
     kill: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
@@ -64,7 +64,7 @@ describe("BrowserSessionManager.open", () => {
     expect(manager.mcpRefFor(session)).toEqual({
       name: "browser-s1",
       transport: "http",
-      url: "http://127.0.0.1:9333/mcp",
+      url: "http://localhost:9333/mcp",
     });
   });
 

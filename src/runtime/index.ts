@@ -50,6 +50,12 @@ import { FreezeCoordinator } from "./freeze_coordinator.js";
 import { reseedUserspaceCsprng } from "./uniqueness_reseed.js";
 import type { ByoInferenceProvider } from "../contract.js";
 import { WorkerWorkflowHost, type RuntimeContext } from "./workflow_host.js";
+import { BrowserSessionManager, type BrowserBackend } from "./browser_session.js";
+import {
+  loadGuestBrowserConfig,
+  makeGuestBrowserBackend,
+  connectSessionMcp,
+} from "./browser_session_backend.js";
 import {
   runProgramWorker,
   type ProgramWorkerDeps,
@@ -99,6 +105,10 @@ export interface WorkerRuntime {
    *  boot). When set, the worker suspends by FREEZING — the FreezeCoordinator parks seams over this
    *  relay's suspend/wake channel — instead of the exit-and-replay path. */
   freezeRelay?: IdentityRelay;
+  /** The browser tier's process backend, present ONLY when the runner IMAGE ships the browser stack
+   *  (Chromium + a pre-installed Playwright MCP + an X display; gated by BOARDWALK_BROWSER_TIER).
+   *  When absent, `computer.openBrowser()` fails with a clear "not available on this runner image". */
+  browserBackend?: BrowserBackend;
 }
 
 /** Durable events are deferred (durable event storage) — live fan-out via the broker only. */
@@ -237,6 +247,28 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     // Broker-backed artifact store (shared by the program's artifacts.write hook AND the engine's
     // host-backed `artifacts` tool). Presigned for large bodies; the runner holds no S3 creds.
     const artifactStore = new BrokerArtifactStore(broker);
+    // Browser tier (browser-session computer use): a per-run manager over the image's process backend.
+    // Only present when the runner image ships the browser stack (runtime.browserBackend set); else
+    // `computer.openBrowser()` throws "not available". A captured screenshot is stored as a run artifact
+    // through the SAME broker store — decoded from the MCP image block's base64 as binary bytes.
+    const browserSessions =
+      runtime.browserBackend !== undefined
+        ? new BrowserSessionManager({
+            backend: runtime.browserBackend,
+            connect: connectSessionMcp,
+            writeArtifact: (name, contentType, base64, metadata) =>
+              artifactStore
+                .write({
+                  name,
+                  contentType,
+                  body: base64,
+                  encoding: "base64",
+                  ...(metadata !== undefined ? { metadata } : {}),
+                })
+                .then((res) => ({ id: res.id, name: res.name, url: res.signedUrl })),
+            nextId: () => newId(),
+          })
+        : undefined;
     // Backend for the engine's host-backed built-in tools (webfetch/web_search/artifacts): web_search
     // + artifact read-back go through the broker (no Tavily/S3 creds here); webfetch is an in-process
     // fetch already gated by the worker's egress proxy.
@@ -400,6 +432,9 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
             },
           }
         : {}),
+      // Browser tier: `computer.openBrowser()` + `agent({ session })` resolve through this manager
+      // (absent ⇒ the host throws "not available on this runner image").
+      ...(browserSessions !== undefined ? { browserSessions } : {}),
       phases: phaseTracker,
     });
     // Late-bind the coordinator's per-run hooks now that the run-scoped objects exist.
@@ -457,6 +492,9 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // Resolves when a host seam suspends the run; the program runner races it against the body.
       suspendSignal,
       ...(workspaceStore !== undefined ? { workspace: workspaceStore } : {}),
+      // The orchestrator reaps every still-open browser session on terminal (kill Chromium + its
+      // Playwright MCP) so no browser process leaks past the run.
+      ...(browserSessions !== undefined ? { browserSessions } : {}),
     });
   };
 
@@ -679,6 +717,13 @@ export async function main(): Promise<void> {
   const byoProviders = parseByoProviders(process.env.BOARDWALK_BYO_PROVIDERS);
   Reflect.deleteProperty(process.env, "BOARDWALK_BYO_PROVIDERS");
 
+  // Browser tier: only when the runner IMAGE declares the browser stack (BOARDWALK_BROWSER_TIER=1 +
+  // a Chrome path). The backend is run-independent (buildHost builds the per-run manager over it);
+  // absent ⇒ `computer.openBrowser()` fails clearly. Read here so env-reading stays out of the pure wiring.
+  const guestBrowserConfig = loadGuestBrowserConfig(process.env);
+  const browserBackend =
+    guestBrowserConfig !== null ? makeGuestBrowserBackend(guestBrowserConfig) : undefined;
+
   const deps = assembleWorkerDeps({
     workerId: process.env.WORKER_ID ?? `worker-${runId}`,
     workspaceRoot: process.env.WORKSPACE_ROOT ?? "/workspace",
@@ -687,6 +732,7 @@ export async function main(): Promise<void> {
     vcpus: platform.vcpus,
     ...(byoProviders.length > 0 ? { byoProviders } : {}),
     ...(freezeRelay !== undefined ? { freezeRelay } : {}),
+    ...(browserBackend !== undefined ? { browserBackend } : {}),
   });
 
   // The only thing to drain is the batched telemetry buffer — the runner opens no database, cache, or queue.

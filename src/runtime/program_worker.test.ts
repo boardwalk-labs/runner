@@ -61,6 +61,8 @@ interface Harness {
   workspace: { hydrated: number; persisted: number };
   /** Per-run LSP close capture (only when withLsp is set) — asserts teardown on every terminal path. */
   lsp: { closed: number };
+  /** Browser-session reap capture (only when withBrowser is set) — asserts closeAll on every terminal path. */
+  browser: { closed: number };
   /** ensureWorkspace (mkdir /workspace) call count — fires on EVERY run, persist or not. */
   ensured: { count: number };
   /** Ordered log of workspace-prep steps ("ensure" then "hydrate") to assert ordering. */
@@ -89,6 +91,8 @@ function harness(
     persistWorkspace?: boolean;
     /** When true, buildHost returns a per-run LSP handle (the worker always wires one on hosted runs). */
     withLsp?: boolean;
+    /** When true, buildHost returns a browser-session manager (image ships the browser stack). */
+    withBrowser?: boolean;
     /** When true, ensureWorkspace rejects — asserts best-effort (the run still proceeds). */
     ensureWorkspaceThrows?: boolean;
     /** When true, a host seam SUSPENDS the run: the program holds (the host's sleep never resolves)
@@ -102,6 +106,7 @@ function harness(
   const finalized: { status: string; output: unknown }[] = [];
   const workspace = { hydrated: 0, persisted: 0 };
   const lsp = { closed: 0 };
+  const browser = { closed: 0 };
   const ensured = { count: 0 };
   const order: string[] = [];
   const hostCalls = { agent: [] as string[], sleeps: [] as unknown[], phases: [] as string[] };
@@ -170,6 +175,7 @@ function harness(
     lease,
     workspace,
     lsp,
+    browser,
     ensured,
     order,
     suspended,
@@ -240,6 +246,16 @@ function harness(
                 lsp: {
                   close: () => {
                     lsp.closed += 1;
+                    return Promise.resolve();
+                  },
+                },
+              }
+            : {}),
+          ...(over.withBrowser === true
+            ? {
+                browserSessions: {
+                  closeAll: () => {
+                    browser.closed += 1;
                     return Promise.resolve();
                   },
                 },
@@ -357,6 +373,19 @@ describe("runProgramWorker — workspace persistence", () => {
     });
     await runProgramWorker("run_1", h.deps);
     expect(h.workspace.persisted).toBe(1);
+  });
+
+  it("reaps every open browser session at terminal (success)", async () => {
+    const h = harness({ withBrowser: true });
+    const outcome = await runProgramWorker("run_1", h.deps);
+    expect(outcome).toEqual({ kind: "completed" });
+    expect(h.browser.closed).toBe(1);
+  });
+
+  it("reaps browser sessions even when the program fails", async () => {
+    const h = harness({ withBrowser: true, programSource: `throw new Error("boom");` });
+    await runProgramWorker("run_1", h.deps);
+    expect(h.browser.closed).toBe(1);
   });
 
   it("does nothing when the workflow didn't opt in (no workspace handle)", async () => {

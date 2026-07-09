@@ -144,6 +144,10 @@ export type ProgramHostBuilder = (
    *  program runner so a suspend short-circuits the body out of band (the durable-suspension design). Absent ⇒
    *  no durable suspension on this path (a suspend then surfaces as a thrown SuspendError). */
   suspendSignal?: Promise<SuspendSignal>;
+  /** The run's browser-session manager (browser tier). The orchestrator reaps every still-open session
+   *  on EVERY terminal path so no Chromium / Playwright MCP process leaks past the run. `closeAll` is
+   *  best-effort + never throws. Absent on images without the browser stack. */
+  browserSessions?: { closeAll(): Promise<void> };
 }>;
 
 /** Handle to a running per-session loop (metering or credit watch); `stop()` ends + drains it. */
@@ -306,6 +310,7 @@ export async function runProgramWorker(
     return { kind: "failed", reason: "host_build_failed" };
   }
   const { host, redactor, workspace, phases, activity, setProgramDir, lsp, suspendSignal } = built;
+  const browserSessions = built.browserSessions;
   // Guarantee the /workspace sandbox dir exists for EVERY run (persist or not) so a program can write
   // to /workspace without a defensive mkdir. Runs before hydrate (whose extract targets the dir).
   // Best-effort — the image pre-creates the dir; a failure here would resurface at the program's write.
@@ -398,6 +403,16 @@ export async function runProgramWorker(
     // language-server process leaks. `close()` is idempotent + never throws, so this best-effort call
     // is safe (it runs before the workspace snapshot, which is the slowest step).
     if (lsp !== undefined) await lsp.close();
+    // Reap every still-open browser session (kill Chromium + its Playwright MCP) on EVERY terminal
+    // path, before the workspace snapshot. Best-effort — a dead session must not mask the run's outcome.
+    if (browserSessions !== undefined) {
+      await browserSessions.closeAll().catch((err: unknown) => {
+        log.warn("browser_sessions_close_failed", {
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
     // Snapshot the final /workspace so the workflow's NEXT run hydrates it. Best-effort.
     if (workspace !== undefined) {
       await workspace.persist();

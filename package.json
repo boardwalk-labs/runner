@@ -55,6 +55,7 @@
   "dependencies": {
     "@boardwalk-labs/engine": "^0.1.29",
     "@boardwalk-labs/workflow": "^0.1.22",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "node-gyp-build": "^4.8.4",
     "tar": "^7.5.16",
     "zod": "^4.0.0"
