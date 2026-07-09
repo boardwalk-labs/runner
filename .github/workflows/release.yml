@@ -54,8 +54,11 @@ jobs:
       # python3 + build-essential for the compile.
       - run: pnpm exec prebuildify --napi --strip -t 24.0.0
       - run: ls prebuilds/linux-x64/*.node
-      # Trusted Publishing needs a recent npm (>= 11.5.1); node 24's bundled npm may be older.
-      - run: npm install -g npm@latest
+      # Publish with node 24's BUNDLED npm (11.6.x, already >= the 11.5.1 Trusted-Publishing
+      # threshold). Do NOT `npm install -g npm@latest`: npm 12.0.0's self-install leaves the
+      # provenance publisher unable to require `sigstore` (Cannot find module 'sigstore'), which
+      # broke every v0.1.12 publish attempt. If the bundled npm ever drops below 11.5.1, pin a
+      # specific known-good 11.x here rather than @latest.
       - run: npm publish --provenance --access public
 
   # The self-hosted RUN image (base + the just-published runtime). Runs AFTER publish so it installs
