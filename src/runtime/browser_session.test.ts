@@ -65,6 +65,8 @@ describe("BrowserSessionManager.open", () => {
       name: "browser-s1",
       transport: "http",
       url: "http://localhost:9333/mcp",
+      // The arbitrary-JS tools are hidden from the agent (the program keeps them via its own client).
+      excludeTools: ["browser_evaluate", "browser_run_code_unsafe"],
     });
   });
 

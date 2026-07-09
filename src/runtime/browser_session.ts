@@ -20,6 +20,13 @@ import type {
 } from "@boardwalk-labs/workflow/runtime";
 import { AppError, ErrorCode } from "./support/index.js";
 
+/** Browser tools hidden from the AGENT: arbitrary page JS (`browser_evaluate`) and arbitrary
+ *  Playwright driver code (`browser_run_code_unsafe`). The engine drops them from the agent's tool
+ *  set (McpServerRef.excludeTools), while the trusted program keeps them via its own MCP client (the
+ *  SessionMcpCaller connects to the same server directly, unfiltered) — so `session.eval()` still
+ *  works and the model can't run arbitrary code. Least privilege; see docs/COMPUTER_USE_SESSION.md. */
+const AGENT_EXCLUDED_BROWSER_TOOLS = ["browser_evaluate", "browser_run_code_unsafe"] as const;
+
 /** One MCP tool result content block (the subset we consume). */
 export interface McpContentBlock {
   type: string;
@@ -100,7 +107,12 @@ export class BrowserSessionManager {
       await proc.kill();
       throw err;
     }
-    const mcpRef: McpServerRef = { name: `browser-${id}`, transport: "http", url: proc.mcpUrl };
+    const mcpRef: McpServerRef = {
+      name: `browser-${id}`,
+      transport: "http",
+      url: proc.mcpUrl,
+      excludeTools: AGENT_EXCLUDED_BROWSER_TOOLS,
+    };
     const handle = makeBrowserSessionHandle(id, caller, this.deps.writeArtifact, () =>
       this.reap(id),
     );
