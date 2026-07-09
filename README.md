@@ -38,6 +38,24 @@ finishes, nothing new is claimed. Useful flags: `--once` (execute one run, then 
 and `HTTPS_PROXY` set; the daemon and the run processes both honor it. Runs inherit this
 machine's network — a model or service reachable from the box is reachable from the run.
 
+### Browser tier (computer use)
+
+`computer.openBrowser()` and `agent({ session })` drive an in-VM browser. On the hosted
+runners the environment ships it; on a self-hosted machine you provide the pieces and point the
+runner at them with a small env contract — the same contract the hosted image sets, so the code
+path is identical:
+
+| Variable                        | Meaning                                                                                                                                                                  |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `BOARDWALK_BROWSER_TIER=1`      | Enable the per-run browser-session manager. Unset (the default) means `computer.openBrowser()` fails with a clear "not available on this runner".                        |
+| `BOARDWALK_BROWSER_CHROME_PATH` | Path to a Chromium/Chrome binary the run launches with a CDP endpoint (headful, so it renders on a display).                                                             |
+| `BOARDWALK_BROWSER_MCP_COMMAND` | Command to launch [Playwright MCP](https://github.com/microsoft/playwright-mcp) (e.g. a `playwright-mcp` bin, or `npx`). The runner attaches it to the browser over CDP. |
+| `DISPLAY`                       | The X display the browser renders on (e.g. a headless `Xvfb :0`).                                                                                                        |
+
+So a self-hosted machine that wants the browser tier installs Chromium + Playwright MCP, runs a
+display (e.g. `Xvfb`), and sets those variables. Nothing else changes; a machine without them
+runs every non-browser workflow exactly as before.
+
 ## Security model
 
 This part of the contract is settled, even though the client isn't built yet:
