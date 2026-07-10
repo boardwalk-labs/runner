@@ -71,7 +71,7 @@ describe("streamDirectTurn", () => {
     const out = await streamDirectTurn(
       { registry: [VLLM], resolveSecret, fetchImpl },
       VLLM,
-      { model: "qwen3", messages: [{ role: "user", text: "hi" }], tools: [] },
+      { model: "qwen3", messages: [{ role: "user", content: "hi" }], tools: [] },
       (t) => deltas.push(t),
     );
     expect(resolveSecret).toHaveBeenCalledWith("VLLM_KEY");
@@ -97,7 +97,7 @@ describe("streamDirectTurn", () => {
       streamDirectTurn(
         { registry: [VLLM], resolveSecret, fetchImpl },
         VLLM,
-        { model: "qwen3", messages: [{ role: "user", text: "hi" }], tools: [] },
+        { model: "qwen3", messages: [{ role: "user", content: "hi" }], tools: [] },
         undefined,
         (v) => registered.push(v),
       ),
@@ -119,7 +119,7 @@ describe("streamDirectTurn", () => {
     await streamDirectTurn(
       { registry: [entry], resolveSecret, fetchImpl },
       entry,
-      { model: "m", messages: [{ role: "user", text: "hi" }], tools: [] },
+      { model: "m", messages: [{ role: "user", content: "hi" }], tools: [] },
       undefined,
     );
     expect(resolveSecret).not.toHaveBeenCalled();

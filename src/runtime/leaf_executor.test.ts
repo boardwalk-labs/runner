@@ -273,8 +273,8 @@ describe("EngineLeafExecutor.run — secret redaction", () => {
     if (userMessage?.role === "user") {
       // The invariant is that the secret VALUE never reaches the model — the engine Redactor
       // substitutes its own placeholder, so assert the value is gone (not the placeholder text).
-      expect(userMessage.text).not.toContain("sk-live-abc123def");
-      expect(userMessage.text).toContain("use the key");
+      expect(userMessage.content).not.toContain("sk-live-abc123def");
+      expect(userMessage.content).toContain("use the key");
     }
   });
 
@@ -284,7 +284,7 @@ describe("EngineLeafExecutor.run — secret redaction", () => {
     const userMessage = requests[0]?.messages[0];
     // The prompt rides verbatim (no Redactor mangling); the engine also prepends its ambient
     // <env> date block to the same first message, so assert containment rather than equality.
-    expect(userMessage?.role === "user" && userMessage.text).toContain(
+    expect(userMessage?.role === "user" && userMessage.content).toContain(
       "a perfectly ordinary prompt",
     );
   });
@@ -303,9 +303,9 @@ describe("EngineLeafExecutor.run — bundled skills (agent({ skills }))", () => 
     });
     await exec.run("handle this", { model: "anthropic/claude-sonnet-4.5", skills: ["triage"] });
     const userMessage = requests[0]?.messages[0];
-    expect(userMessage?.role === "user" && userMessage.text).toContain("Triage incoming issues");
-    expect(userMessage?.role === "user" && userMessage.text).toContain("<skills>");
-    expect(userMessage?.role === "user" && userMessage.text).toContain("handle this");
+    expect(userMessage?.role === "user" && userMessage.content).toContain("Triage incoming issues");
+    expect(userMessage?.role === "user" && userMessage.content).toContain("<skills>");
+    expect(userMessage?.role === "user" && userMessage.content).toContain("handle this");
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -331,10 +331,10 @@ describe("EngineLeafExecutor.run — bundled AGENTS.md (capabilities.programDir)
     });
     await exec.run("do the task", { model: "anthropic/claude-sonnet-4.5" });
     const userMessage = requests[0]?.messages[0];
-    expect(userMessage?.role === "user" && userMessage.text).toContain(
+    expect(userMessage?.role === "user" && userMessage.content).toContain(
       '<AGENTS.md source="workflow"',
     );
-    expect(userMessage?.role === "user" && userMessage.text).toContain(
+    expect(userMessage?.role === "user" && userMessage.content).toContain(
       "BUNDLED-RULE: always run the linter.",
     );
     rmSync(root, { recursive: true, force: true });
@@ -345,8 +345,8 @@ describe("EngineLeafExecutor.run — bundled AGENTS.md (capabilities.programDir)
     const { exec, requests } = makeExecutor({ scripts: [finalTurn("ok")], programDir: () => root });
     await exec.run("plain prompt", { model: "anthropic/claude-sonnet-4.5" });
     const userMessage = requests[0]?.messages[0];
-    expect(userMessage?.role === "user" && userMessage.text).not.toContain("AGENTS.md");
-    expect(userMessage?.role === "user" && userMessage.text).toContain("plain prompt");
+    expect(userMessage?.role === "user" && userMessage.content).not.toContain("AGENTS.md");
+    expect(userMessage?.role === "user" && userMessage.content).toContain("plain prompt");
     rmSync(root, { recursive: true, force: true });
   });
 });

@@ -629,7 +629,7 @@ describe("RunnerControlClient.streamInference", () => {
       client(fetchImpl).streamInference({
         model: "anthropic/claude-sonnet-4.5",
         provider: "boardwalk",
-        messages: [{ role: "user", text: "hello" }],
+        messages: [{ role: "user", content: "hello" }],
         tools: [],
       }),
     );
@@ -645,7 +645,7 @@ describe("RunnerControlClient.streamInference", () => {
     expect(JSON.parse(call?.body ?? "{}")).toEqual({
       model: "anthropic/claude-sonnet-4.5",
       provider: "boardwalk",
-      messages: [{ role: "user", text: "hello" }],
+      messages: [{ role: "user", content: "hello" }],
       tools: [],
     });
   });

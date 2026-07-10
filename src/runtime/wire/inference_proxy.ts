@@ -74,8 +74,9 @@ export type InferenceFrame =
 
 // ---- request serialize / parse ----
 
-/** Serialize the request body. (Binary message content — multimodal image/doc bytes — is not yet
- *  supported on this path; v0 agent flows are text + JSON tool results.) */
+/** Serialize the request body. Multimodal image content rides transparently: message content parts
+ *  (incl. `{ type: "image" }`) are plain JSON here — the broker's engine adapters render them per
+ *  provider (@boardwalk-labs/engine ≥ 0.1.32). */
 export function serializeInferenceRequest(req: InferenceProxyRequest): string {
   return JSON.stringify(req);
 }
