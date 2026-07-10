@@ -251,8 +251,8 @@ export class RunnerControlClient {
   }
 
   /** Report a token-usage delta for incremental in-run metering (the usage flusher → broker). The
-   *  broker gates on the run's per-connection `billed_by_boardwalk` server-side + meters usage to the
-   *  platform; `identifier` makes a retried/duplicate flush idempotent. Satisfies {@link TokenUsageReporter}. */
+   *  broker determines whether usage is platform-metered; `identifier` makes a retried/duplicate
+   *  flush idempotent. Satisfies {@link TokenUsageReporter}. */
   async meterTokens(input: {
     inputTokens: number;
     outputTokens: number;

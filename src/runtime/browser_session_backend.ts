@@ -13,9 +13,8 @@
 //   - The agent's + the program's MCP URL MUST use `localhost` (not 127.0.0.1): the `/mcp` endpoint
 //     enforces a literal `localhost` Host as DNS-rebinding protection, and `--allowed-hosts '*'`
 //     does NOT lift it. So `mcpUrl` is built with `localhost`; the engine binds the same ref.
-//   - `capabilities:['core']` does NOT drop `browser_evaluate` / `browser_run_code_unsafe` — they
-//     are core tools. Excluding them from the AGENT (they stay available to the trusted program's
-//     `eval()`) is an engine-level `excludeTools` follow-up, tracked in COMPUTER_USE_SESSION.md.
+//   - Agent-facing refs exclude arbitrary-JS tools, while the trusted program retains its direct
+//     MCP channel for `session.eval()`.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
@@ -39,7 +38,7 @@ import { AppError, ErrorCode, createLogger } from "./support/index.js";
 const log = createLogger("browser_backend");
 
 /**
- * The guest-image contract for the browser tier — the values the runner-images rootfs sets so this
+ * The guest-image contract for the browser tier — the values the runner image sets so this
  * backend can launch Chromium + Playwright MCP without any network fetch (the run's egress is proxied,
  * so a runtime `npx` download would fail). All but `chromePath` have safe defaults.
  */

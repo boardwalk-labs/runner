@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+message_file=${1:?"commit message file is required"}
+temporary_file="${message_file}.public"
+trap 'rm -f "$temporary_file"' EXIT HUP INT TERM
+
+sed '/^[[:space:]]*[[:alpha:]][[:alnum:]_-]*-Session[[:space:]]*:/d' "$message_file" > "$temporary_file"
+cat "$temporary_file" > "$message_file"

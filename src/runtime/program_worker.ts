@@ -327,9 +327,9 @@ export async function runProgramWorker(
   // Restore the workflow's persistent /workspace before the program runs (no-op when not opted-in /
   // self-hosted, or on a first run). Best-effort — never fails the run.
   if (workspace !== undefined) await workspace.hydrate();
-  // Token metering is PER-LEAF: each agent() leaf reports its own tokens + model to the broker, which
-  // decides `billed_by_boardwalk` per model + meters usage to the platform (see leaf_executor `meterUsage`). A
-  // workflow has no run-level model, so there is no run-level token metering here.
+  // Token metering is PER-LEAF: each agent() leaf reports its own usage to the broker, which
+  // determines whether it is platform-metered. A workflow has no run-level model, so there is no
+  // run-level token metering here.
   // Mid-run credit watching: when the org runs out of credit, abort the run cooperatively.
   const credit = deps.startCreditWatch?.({
     run: claimed,

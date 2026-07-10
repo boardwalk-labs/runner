@@ -97,7 +97,7 @@ export interface EngineLeafExecutorDeps {
    *  omitted ⇒ no bundled tier (only the workspace AGENTS.md applies). */
   programDir?: () => string | null;
   /** Per-leaf token metering seam (fire-and-forget). Reports THIS leaf's tokens + its model to the
-   *  broker, which decides `billed_by_boardwalk` per model + meters usage to the platform. Omitted in tests. */
+   *  broker, which determines whether usage is platform-metered. Omitted in tests. */
   meterUsage?: (input: MeterUsageInput) => void;
   /** Backend for the engine's host-backed built-in tools (`webfetch` / `web_search` / `artifacts`):
    *  set as the leaf's `capabilities.host` so the engine registers them. Broker-backed on hosted runs
