@@ -118,6 +118,38 @@ describe("assembleWorkerDeps", () => {
     expect(built.lsp).toBeDefined();
     await expect(built.lsp?.close()).resolves.toBeUndefined();
   });
+
+  it("buildHost constructs screen capture when the image ships it, honoring the recording opt-out", async () => {
+    // A stub capture backend so the image "has a desktop"; buildHost only CONSTRUCTS the capture (never
+    // calls start), so the stub methods aren't exercised here.
+    const captureBackend: WorkerRuntime["captureBackend"] = {
+      width: 1280,
+      height: 800,
+      liveFrameIntervalMs: 1000,
+      wantedPollIntervalMs: 3000,
+      start: () => {
+        throw new Error("not started in buildHost");
+      },
+    };
+    const deps = assembleWorkerDeps({ ...runtime(), captureBackend });
+    const base = { slug: "demo", triggers: [{ kind: "manual" }] };
+
+    // Default (no opt-out) → capture is wired.
+    const on = await deps.buildHost(
+      sampleRun(),
+      workflowManifestSchema.parse(base),
+      new AbortController().signal,
+    );
+    expect(on.capture).toBeDefined();
+
+    // `recording: false` → capture is gated OFF even though the image has a desktop.
+    const off = await deps.buildHost(
+      sampleRun(),
+      workflowManifestSchema.parse({ ...base, recording: false }),
+      new AbortController().signal,
+    );
+    expect(off.capture).toBeUndefined();
+  });
 });
 
 describe("assembleWorkerDeps — Runner Control API (the Runner Credential Broker model)", () => {

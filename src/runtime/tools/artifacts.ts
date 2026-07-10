@@ -114,6 +114,10 @@ export interface ArtifactPresignInput {
   name: string;
   contentType: string;
   sizeBytes: number;
+  /** Passed through so the broker can decide storage-quota exemption + the retention tag at presign
+   *  time (e.g. session-recording segments are quota-exempt and get a shorter retention). The catalog
+   *  row's metadata is still set from the commit call; this is only for the presign-time decisions. */
+  metadata?: Record<string, unknown>;
 }
 
 /** The broker's presign response: where + how to PUT the bytes, and the chosen `s3Key` the worker

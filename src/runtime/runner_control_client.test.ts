@@ -175,6 +175,35 @@ describe("RunnerControlClient.reportUsage", () => {
   });
 });
 
+describe("RunnerControlClient live-view", () => {
+  it("publishLiveView POSTs frames to /liveview and resolves on 204", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response(null, { status: 204 }));
+    await client(fetchImpl).publishLiveView(["frameA", "frameB"]);
+    const call = calls[0];
+    expect(call?.url).toBe("https://api.boardwalk.sh/runner/v1/runs/run_1/liveview");
+    expect(call?.method).toBe("POST");
+    expect(JSON.parse(call?.body ?? "{}")).toEqual({ frames: ["frameA", "frameB"] });
+  });
+
+  it("publishLiveView throws on a non-204 status", async () => {
+    const { fetchImpl } = fakeFetch(() => json(500, {}));
+    await expect(client(fetchImpl).publishLiveView(["x"])).rejects.toThrow(/liveview failed: 500/);
+  });
+
+  it("liveViewWanted GETs /liveview/wanted and returns the wanted flag", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => json(200, { wanted: true }));
+    const wanted = await client(fetchImpl).liveViewWanted();
+    expect(calls[0]?.url).toBe("https://api.boardwalk.sh/runner/v1/runs/run_1/liveview/wanted");
+    expect(calls[0]?.method).toBe("GET");
+    expect(wanted).toBe(true);
+  });
+
+  it("liveViewWanted returns false when no viewer is present", async () => {
+    const { fetchImpl } = fakeFetch(() => json(200, { wanted: false }));
+    expect(await client(fetchImpl).liveViewWanted()).toBe(false);
+  });
+});
+
 describe("RunnerControlClient.meterTokens", () => {
   it("POSTs the token delta + model + identifier to /usage/tokens and resolves on 204", async () => {
     const { fetchImpl, calls } = fakeFetch(() => new Response(null, { status: 204 }));

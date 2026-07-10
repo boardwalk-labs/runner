@@ -47,6 +47,10 @@ export class BrokerArtifactStore implements ArtifactStore {
       name: input.name,
       contentType: input.contentType,
       sizeBytes: bytes.length,
+      // Thread metadata to presign too (not only commit) so the broker can apply quota exemption +
+      // the retention tag at presign time — needed for large recording segments (a near-full org's
+      // recording must not be rejected by the storage ceiling).
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
     });
     await this.broker.uploadBytes(presign.uploadUrl, presign.uploadHeaders, bytes);
     return this.broker.commitArtifact({

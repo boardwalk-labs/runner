@@ -56,6 +56,8 @@ import {
   makeGuestBrowserBackend,
   connectSessionMcp,
 } from "./browser_session_backend.js";
+import { ScreenCapture, type CaptureBackend } from "./screen_capture.js";
+import { loadCaptureConfig, makeCaptureBackend } from "./screen_capture_backend.js";
 import {
   runProgramWorker,
   type ProgramWorkerDeps,
@@ -109,6 +111,9 @@ export interface WorkerRuntime {
    *  (Chromium + a pre-installed Playwright MCP + an X display; gated by BOARDWALK_BROWSER_TIER).
    *  When absent, `computer.openBrowser()` fails with a clear "not available on this runner image". */
   browserBackend?: BrowserBackend;
+  /** Screen-capture backend (session recording + live-view frames), present ONLY when the runner IMAGE
+   *  ships the desktop stack (ffmpeg + an X display) and recording isn't disabled. Absent ⇒ no capture. */
+  captureBackend?: CaptureBackend;
 }
 
 /** Durable events are deferred (durable event storage) — live fan-out via the broker only. */
@@ -267,6 +272,25 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
                 })
                 .then((res) => ({ id: res.id, name: res.name, url: res.signedUrl })),
             nextId: () => newId(),
+          })
+        : undefined;
+    // Screen capture (session recording + live-view). Present only when the image ships the desktop
+    // stack (runtime.captureBackend set) AND the workflow hasn't opted out (`recording: false` in the
+    // manifest — SCREEN_CAPTURE §4.5; default on). Segments upload through the SAME broker artifact store
+    // as a `recording-segment` artifact (quota-exempt, 30-day retention — the broker applies that
+    // server-side off the metadata kind); live frames push up the broker's live-view channel while a
+    // viewer watches. (Live-view rides the same capture, so opting out of recording also stops live-view.)
+    const capture =
+      runtime.captureBackend !== undefined && manifest.recording !== false
+        ? new ScreenCapture({
+            backend: runtime.captureBackend,
+            writeArtifact: (name, contentType, base64, metadata) =>
+              artifactStore
+                .write({ name, contentType, body: base64, encoding: "base64", metadata })
+                .then((res) => ({ id: res.id })),
+            publishLiveFrames: (frames) => broker.publishLiveView(frames),
+            liveViewWanted: () => broker.liveViewWanted(),
+            now: () => Date.now(),
           })
         : undefined;
     // Backend for the engine's host-backed built-in tools (webfetch/web_search/artifacts): web_search
@@ -449,6 +473,9 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
           freezeWallMs = Date.now();
           await activeFlusher?.flushNow();
           await workspaceStore?.persist();
+          // The recorder never spans a snapshot: finalize + upload the in-flight segment before the
+          // freeze (SCREEN_CAPTURE §4.3). Bounded internally, so a slow upload delays, not blocks, it.
+          await capture?.stopAndFlush();
         },
         // On wake: reseed the userspace CSPRNG (clause 3 — a suspend snapshot restored more than
         // once, e.g. a re-dispatch retry, would otherwise repeat its post-wake `crypto.*` draws),
@@ -465,6 +492,8 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
             redactor.record(wake.api_token);
           }
           activeFlusher?.excludeIdle(wake.wall_clock_ms - freezeWallMs);
+          // Resume capture in a fresh segment epoch (a suspend/resume boundary is a segment boundary).
+          void capture?.startFresh();
         },
       });
     }
@@ -495,6 +524,8 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // The orchestrator reaps every still-open browser session on terminal (kill Chromium + its
       // Playwright MCP) so no browser process leaks past the run.
       ...(browserSessions !== undefined ? { browserSessions } : {}),
+      // The orchestrator starts capture before the program runs and flushes it on terminal.
+      ...(capture !== undefined ? { capture } : {}),
     });
   };
 
@@ -723,6 +754,10 @@ export async function main(): Promise<void> {
   const guestBrowserConfig = loadGuestBrowserConfig(process.env);
   const browserBackend =
     guestBrowserConfig !== null ? makeGuestBrowserBackend(guestBrowserConfig) : undefined;
+  // Screen capture (recording + live-view): present only when the image ships the desktop stack
+  // (ffmpeg + a display) and recording isn't disabled. Read here so env-reading stays out of the wiring.
+  const captureConfig = loadCaptureConfig(process.env);
+  const captureBackend = captureConfig !== null ? makeCaptureBackend(captureConfig) : undefined;
 
   const deps = assembleWorkerDeps({
     workerId: process.env.WORKER_ID ?? `worker-${runId}`,
@@ -733,6 +768,7 @@ export async function main(): Promise<void> {
     ...(byoProviders.length > 0 ? { byoProviders } : {}),
     ...(freezeRelay !== undefined ? { freezeRelay } : {}),
     ...(browserBackend !== undefined ? { browserBackend } : {}),
+    ...(captureBackend !== undefined ? { captureBackend } : {}),
   });
 
   // The only thing to drain is the batched telemetry buffer — the runner opens no database, cache, or queue.

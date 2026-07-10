@@ -377,6 +377,30 @@ export class RunnerControlClient {
     if (res.status !== 204) throw await brokerError(res, "telemetry");
   }
 
+  /** Push a batch of encoded desktop frames (base64 JPEG) for the live-view surface — the broker
+   *  republishes them to the run's live-view channel server-side (never durably stored; the session
+   *  recording is the durable copy). See docs/SCREEN_CAPTURE.md §5. */
+  async publishLiveView(frames: string[]): Promise<void> {
+    const res = await this.controlFetch(this.url("liveview"), {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify({ frames }),
+    });
+    if (res.status !== 204) throw await brokerError(res, "liveview");
+  }
+
+  /** Is a browser currently watching this run's live-view? The capture loop polls this so it only
+   *  captures + pushes frames while someone is attached (capture costs guest CPU + metered egress). */
+  async liveViewWanted(): Promise<boolean> {
+    const res = await this.controlFetch(this.url("liveview/wanted"), {
+      method: "GET",
+      headers: this.headers(false),
+    });
+    if (res.status !== 200) throw await brokerError(res, "liveview/wanted");
+    const body = (await res.json()) as { wanted?: unknown };
+    return body.wanted === true;
+  }
+
   /** Store a run artifact through the broker (which holds the S3 credential + neutralizes the served
    *  content type server-side). Returns the catalog id + a signed download URL. */
   async writeArtifact(input: ArtifactWriteInput): Promise<ArtifactWriteResult> {

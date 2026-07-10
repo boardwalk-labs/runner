@@ -148,6 +148,10 @@ export type ProgramHostBuilder = (
    *  on EVERY terminal path so no Chromium / Playwright MCP process leaks past the run. `closeAll` is
    *  best-effort + never throws. Absent on images without the browser stack. */
   browserSessions?: { closeAll(): Promise<void> };
+  /** Session recording + live-view capture (docs/SCREEN_CAPTURE.md). The orchestrator starts it before
+   *  the program runs and flushes it on EVERY terminal path. Best-effort; absent without the desktop
+   *  stack. */
+  capture?: { start(): Promise<void>; stopAndFlush(): Promise<void> };
 }>;
 
 /** Handle to a running per-session loop (metering or credit watch); `stop()` ends + drains it. */
@@ -311,6 +315,7 @@ export async function runProgramWorker(
   }
   const { host, redactor, workspace, phases, activity, setProgramDir, lsp, suspendSignal } = built;
   const browserSessions = built.browserSessions;
+  const capture = built.capture;
   // Guarantee the /workspace sandbox dir exists for EVERY run (persist or not) so a program can write
   // to /workspace without a defensive mkdir. Runs before hydrate (whose extract targets the dir).
   // Best-effort — the image pre-creates the dir; a failure here would resurface at the program's write.
@@ -327,6 +332,16 @@ export async function runProgramWorker(
   // Restore the workflow's persistent /workspace before the program runs (no-op when not opted-in /
   // self-hosted, or on a first run). Best-effort — never fails the run.
   if (workspace !== undefined) await workspace.hydrate();
+  // Start desktop capture (recording + live-view) once the run has identity + a workspace, before the
+  // program runs. Best-effort — a capture failure must never fail the run.
+  if (capture !== undefined) {
+    await capture.start().catch((err: unknown) => {
+      log.warn("screen_capture_start_failed", {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
   // Token metering is PER-LEAF: each agent() leaf reports its own tokens + model to the broker, which
   // decides `billed_by_boardwalk` per model + meters usage to the platform (see leaf_executor `meterUsage`). A
   // workflow has no run-level model, so there is no run-level token metering here.
@@ -408,6 +423,16 @@ export async function runProgramWorker(
     if (browserSessions !== undefined) {
       await browserSessions.closeAll().catch((err: unknown) => {
         log.warn("browser_sessions_close_failed", {
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+    // Stop capture + flush the final recording segment on EVERY terminal path, before the workspace
+    // snapshot. Best-effort — a capture failure must not mask the run's outcome.
+    if (capture !== undefined) {
+      await capture.stopAndFlush().catch((err: unknown) => {
+        log.warn("screen_capture_flush_failed", {
           runId,
           error: err instanceof Error ? err.message : String(err),
         });

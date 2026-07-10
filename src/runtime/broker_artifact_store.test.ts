@@ -133,6 +133,21 @@ describe("BrokerArtifactStore", () => {
     expect(r.signedUrl).toBe("https://cdn/big");
   });
 
+  it("threads metadata into BOTH presign and commit on the large path (recording-segment carve-out)", async () => {
+    const { t, presigns, commits } = transport();
+    const metadata = { kind: "recording-segment", segment_index: 2 };
+    await new BrokerArtifactStore(t).write({
+      name: "recording-00002.mp4",
+      contentType: "video/mp4",
+      body: "a".repeat(ARTIFACT_PROXY_MAX_BYTES + 1),
+      metadata,
+    });
+    // Presign needs the metadata so the broker can apply the quota exemption + retention tag.
+    expect(presigns[0]?.metadata).toEqual(metadata);
+    // Commit still carries it for the catalog row.
+    expect(commits[0]?.metadata).toEqual(metadata);
+  });
+
   it("does NOT commit (no dangling row) when the S3 upload fails", async () => {
     const { t, commits, order } = transport();
     // Make the direct S3 PUT fail (still record that the upload was attempted).
