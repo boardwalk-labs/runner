@@ -32,6 +32,15 @@ pnpm build
 All gates must pass; CI runs exactly these. Every contract change ships with valid + invalid
 fixtures in the same PR.
 
+Before committing, enable the repository's commit-message hook:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+Keep public commit messages free of AI session URLs and non-public repository, host, or environment
+names. The hook removes tool-specific session trailers as a backstop.
+
 ## Reporting
 
 Bugs and proposals via GitHub issues (templates provided). Security reports: see

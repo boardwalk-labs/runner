@@ -308,8 +308,8 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // exactly the two-tier case the engine's AGENTS.md loader is built for.
       programDir: () => programDir,
       // Per-leaf, per-model token metering — reported THROUGH the broker (the worker holds no billing
-      // credential); the broker decides `billed_by_boardwalk` per model + meters usage to the platform
-      // (BYO models no-op there). Fire-and-forget: a metering hiccup must never fail the run.
+      // credential); the broker determines whether usage is platform-metered. Fire-and-forget: a
+      // metering hiccup must never fail the run.
       meterUsage: ({
         model,
         inputTokens,
