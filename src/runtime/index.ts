@@ -48,6 +48,7 @@ import {
 } from "./identity_relay.js";
 import { FreezeCoordinator } from "./freeze_coordinator.js";
 import { reseedUserspaceCsprng } from "./uniqueness_reseed.js";
+import { resetHttpConnectionPool } from "./http_pool_reset.js";
 import type { ByoInferenceProvider } from "../contract.js";
 import { WorkerWorkflowHost, type RuntimeContext } from "./workflow_host.js";
 import { BrowserSessionManager, type BrowserBackend } from "./browser_session.js";
@@ -485,6 +486,10 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
         // BEFORE the seam resolves, so no woken author code draws from the stale (pre-suspend) DRBG.
         onAfterWake: (wake): void => {
           reseedUserspaceCsprng();
+          // Keep-alive sockets (to the egress proxy + through it to the broker) do NOT survive the
+          // freeze; discard the connection pool so the first post-wake broker call (finalize) opens a
+          // fresh socket instead of hanging on a stale one until its 30s timeout crashes the run.
+          resetHttpConnectionPool();
           broker.swapRunToken(wake.run_token);
           redactor.record(wake.run_token);
           if (wake.api_token !== undefined && wake.api_token !== "") {
