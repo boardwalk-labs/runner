@@ -209,7 +209,12 @@ export function makeGuestBrowserBackend(cfg: GuestBrowserConfig): BrowserBackend
         mcp.once("error", (err) => {
           log.error("browser_mcp_spawn_error", { error: err.message });
         });
-        await waitForHttp(`http://127.0.0.1:${String(mcpPort)}/mcp`, cfg.readyTimeoutMs);
+        // Probe the EXACT url the program's client will connect to (the `localhost` form), not a
+        // `127.0.0.1` stand-in: if `localhost` doesn't resolve in the guest, connectSessionMcp would
+        // otherwise throw a bare `TypeError: fetch failed` while this readiness check passed on a
+        // different address (masking the fault). Probing mcpUrl turns that into a diagnosable
+        // `browser_backend_timeout`. (The guest ships /etc/hosts mapping localhost → 127.0.0.1.)
+        await waitForHttp(mcpUrl, cfg.readyTimeoutMs);
 
         let killed = false;
         return {
