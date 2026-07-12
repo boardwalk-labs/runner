@@ -26,12 +26,17 @@ export interface RunEventEmitterOptions {
   resumeAfterCursor?: number;
   /** Injected clock for deterministic tests. Defaults to Date.now. */
   now?: () => number;
+  /** Optional local mirror of every (already-redacted) event — used to surface the run's output in an
+   *  on-screen terminal in the ambient desktop (docs/SCREEN_CAPTURE.md). Best-effort: a sink throw never
+   *  affects the run or the broker publish. Only fed events that already passed the run's redactor. */
+  localSink?: (event: RunEvent) => void;
 }
 
 export class WorkerRunEventEmitter {
   private readonly runId: string;
   private readonly publisher: RedisPublisher;
   private readonly now: () => number;
+  private readonly localSink: ((event: RunEvent) => void) | undefined;
   private turn: number;
   private seq: number;
 
@@ -39,6 +44,7 @@ export class WorkerRunEventEmitter {
     this.runId = opts.runId;
     this.publisher = opts.publisher;
     this.now = opts.now ?? Date.now;
+    this.localSink = opts.localSink;
     const max = opts.resumeAfterCursor ?? 0;
     this.turn = max > 0 ? Math.floor(max / TURN_CURSOR_STRIDE) + 1 : 0;
     this.seq = 0;
@@ -58,6 +64,13 @@ export class WorkerRunEventEmitter {
     this.publisher
       .publish(`run:${this.runId}`, JSON.stringify({ cursor, event }))
       .catch(() => undefined); // best-effort; the publisher logs its own failures
+    if (this.localSink !== undefined) {
+      try {
+        this.localSink(event); // best-effort on-screen mirror; must never affect the run
+      } catch {
+        /* ignore */
+      }
+    }
     return event;
   }
 

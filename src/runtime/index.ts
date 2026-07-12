@@ -69,6 +69,7 @@ import type { SuspendSignal } from "./suspension.js";
 import { BrokerChildDispatcher } from "./broker_child_dispatcher.js";
 import { BrokerEventPublisher } from "./broker_event_publisher.js";
 import { createProgramLogSink } from "./program_log_capture.js";
+import { makeRunLogFileSink } from "./run_log_file_sink.js";
 import { BrokerArtifactStore } from "./broker_artifact_store.js";
 import { buildBrokerToolHost } from "./broker_tool_host.js";
 import { CreditWatcher } from "./credit_watcher.js";
@@ -197,7 +198,19 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
   // declared output, and every agent turn stamp through this emitter, so cursors are run-globally
   // monotonic with no separate program band. Frames publish as `{cursor, event}` rows via the
   // broker telemetry path. The claim wrapper below bumps it past a previous session's frames.
-  const runEvents = new WorkerRunEventEmitter({ runId: runtime.runId, publisher: eventPublisher });
+  // Optional on-screen mirror: append the (already-redacted) event stream to a local file an xterm in
+  // the ambient desktop tails, so the live-view/recording shows the run working. Opt-in via the env the
+  // desktop guest image sets (BOARDWALK_RUN_LOG_FILE); absent everywhere else, so no cost off-desktop.
+  const runLogFilePath = process.env.BOARDWALK_RUN_LOG_FILE?.trim();
+  const runLogLocalSink =
+    runLogFilePath !== undefined && runLogFilePath !== ""
+      ? makeRunLogFileSink(runLogFilePath)
+      : undefined;
+  const runEvents = new WorkerRunEventEmitter({
+    runId: runtime.runId,
+    publisher: eventPublisher,
+    ...(runLogLocalSink !== undefined ? { localSink: runLogLocalSink } : {}),
+  });
   const phaseTracker = new PhaseTracker({ sink: runEvents });
   // The run's public-API credential (was BOARDWALK_API_KEY). It is NO LONGER in process.env — the
   // bootstrap captured + scrubbed it (capturePlatformContext) so the agent's bash / subprocesses
