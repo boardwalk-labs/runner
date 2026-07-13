@@ -7,7 +7,9 @@
 //
 // Thin + injectable (fetch is overridable) so it's unit-tested without a live server. Status mapping
 // mirrors the broker handlers: claim 409 ⇒ "claim lost" (null), version 404 ⇒ missing (null); any
-// other non-success status throws so the worker fails loud (→ restart, lease reclaimed).
+// other non-success status throws so the worker fails loud (→ restart, lease reclaimed). TRANSIENT
+// failures (thrown network errors, LB 502/503/504 — a control-plane deploy rollover) are retried
+// with backoff first, so a blip heals in place instead of crashing the run.
 
 import { createLogger } from "./support/index.js";
 import type { McpTokenResult } from "@boardwalk-labs/engine/core";
@@ -52,7 +54,23 @@ export interface RunnerControlClientConfig {
   controlTimeoutMs?: number;
   /** Per-call ceiling for bulk artifact/workspace transfers (default 5 min). */
   bulkTimeoutMs?: number;
+  /** Backoff schedule for transient-failure retries (length = extra attempts after the first;
+   *  see {@link RETRYABLE_STATUSES}). Injectable for tests; [] disables retries. */
+  retryDelaysMs?: number[];
 }
+
+/**
+ * Transient statuses worth retrying: the load-balancer answers during a control-plane deploy
+ * rollover (no healthy target / draining target / gateway timeout). Anything else — including a
+ * 500 — is treated as a real answer from a live handler and surfaces immediately: retrying a
+ * handler error could duplicate a side effect for no healing value.
+ */
+const RETRYABLE_STATUSES = new Set([502, 503, 504]);
+
+/** Default backoff (ms) between attempts — ~17.5s of spread, sized to ride out the target-group
+ *  rotation window of an api-server rolling deploy (the observed killer: guests died hard
+ *  mid-suspend/finalize during TWO deploys, 2026-07-13, and only crash-reclaim saved the runs). */
+const DEFAULT_RETRY_DELAYS_MS = [500, 2_000, 5_000, 10_000];
 
 /** The pinned program's download reference (the worker fetches + verifies + extracts it). */
 export interface BrokerProgram {
@@ -92,6 +110,7 @@ export class RunnerControlClient {
   private runToken: string;
   private readonly controlTimeoutMs: number;
   private readonly bulkTimeoutMs: number;
+  private readonly retryDelaysMs: readonly number[];
 
   constructor(private readonly cfg: RunnerControlClientConfig) {
     this.base = cfg.baseUrl.replace(/\/+$/, "");
@@ -99,6 +118,7 @@ export class RunnerControlClient {
     this.runToken = cfg.runToken;
     this.controlTimeoutMs = cfg.controlTimeoutMs ?? 30_000;
     this.bulkTimeoutMs = cfg.bulkTimeoutMs ?? 300_000;
+    this.retryDelaysMs = cfg.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
   }
 
   /** Swap the bearer for a fresh run token (the wake path). Every subsequent call uses it. */
@@ -116,13 +136,54 @@ export class RunnerControlClient {
    * streaming inference call is the ONE exception (long-lived NDJSON) and bypasses this.
    */
   private controlFetch(url: string, init: RequestInit): Promise<Response> {
-    return this.fetchImpl(url, { ...init, signal: AbortSignal.timeout(this.controlTimeoutMs) });
+    return this.retryingFetch(url, init, this.controlTimeoutMs);
   }
 
   /** Bulk transfers (artifact + workspace up/download over presigned S3) — a much larger ceiling
    *  than a control call, but still bounded so a dead socket can't hang the run. */
   private bulkFetch(url: string, init: RequestInit): Promise<Response> {
-    return this.fetchImpl(url, { ...init, signal: AbortSignal.timeout(this.bulkTimeoutMs) });
+    return this.retryingFetch(url, init, this.bulkTimeoutMs);
+  }
+
+  /**
+   * One attempt per entry in the backoff schedule (+1): retry thrown network failures (connection
+   * reset/refused mid-rollover, our own per-attempt timeout on a dead socket) and the
+   * load-balancer's {@link RETRYABLE_STATUSES}. Safe to re-send because every caller's body is a
+   * reusable string/byte-array (the streaming inference call bypasses this entirely), and the
+   * broker's mutating endpoints are idempotent per worker/identifier (journal seq, usage
+   * identifier, lease per workerId). Before this, ONE blip during an api-server deploy rollover
+   * crashed the worker hard mid-suspend/finalize and only crash-reclaim recovered the run.
+   */
+  private async retryingFetch(
+    url: string,
+    init: RequestInit,
+    timeoutMs: number,
+  ): Promise<Response> {
+    for (let attempt = 0; ; attempt += 1) {
+      const last = attempt >= this.retryDelaysMs.length;
+      try {
+        const res = await this.fetchImpl(url, {
+          ...init,
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (last || !RETRYABLE_STATUSES.has(res.status)) return res;
+        // Drop the unused body so the socket is released before the retry.
+        await res.body?.cancel().catch(() => {});
+        log.warn("broker_call_retry", {
+          status: res.status,
+          attempt: attempt + 1,
+          delayMs: this.retryDelaysMs[attempt],
+        });
+      } catch (err) {
+        if (last) throw err;
+        log.warn("broker_call_retry", {
+          error: err instanceof Error ? err.name : "unknown",
+          attempt: attempt + 1,
+          delayMs: this.retryDelaysMs[attempt],
+        });
+      }
+      await sleep(this.retryDelaysMs[attempt] ?? 0);
+    }
   }
 
   /** Claim the run's lease. Returns the run on success, or null when it isn't claimable (409 —
@@ -593,6 +654,10 @@ export class RunnerControlClient {
     if (json) h["content-type"] = "application/json";
     return h;
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Yield complete newline-delimited lines from a streaming response body (NDJSON inference frames),

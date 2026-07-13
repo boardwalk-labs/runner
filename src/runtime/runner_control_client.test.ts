@@ -830,6 +830,7 @@ describe("control-call timeout (freeze-mid-poll safety)", () => {
       runId: "run_1",
       fetchImpl,
       controlTimeoutMs: 40, // tiny so the test is fast
+      retryDelaysMs: [], // retries off: this test isolates the per-attempt timeout
     });
     const start = Date.now();
     await expect(c.checkCancelled()).rejects.toBeTruthy();
@@ -869,5 +870,99 @@ describe("register-without-release (held HITL gates)", () => {
     const answers = await c.pollInputAnswers(3);
     expect(answers).toEqual({ approve: { value: "yes" } });
     expect(calls[0]?.url).toMatch(/\/runner\/v1\/runs\/run_1\/inputs\/3$/);
+  });
+});
+
+describe("transient-failure retry (control-plane deploy rollovers)", () => {
+  // Zero-delay schedule: exercises the retry LOOP without real backoff waits.
+  function retryClient(fetchImpl: typeof fetch, retryDelaysMs: number[]): RunnerControlClient {
+    return new RunnerControlClient({
+      baseUrl: "https://api.boardwalk.sh",
+      runToken: "rt_token",
+      runId: "run_1",
+      fetchImpl,
+      retryDelaysMs,
+    });
+  }
+
+  it("retries an LB 503 and succeeds on a later attempt", async () => {
+    let n = 0;
+    const { fetchImpl, calls } = fakeFetch(() => {
+      n += 1;
+      return n < 3 ? json(503, { error: "no healthy target" }) : json(200, { funded: true });
+    });
+    const c = retryClient(fetchImpl, [0, 0, 0]);
+    await expect(c.checkCredit()).resolves.toBe(true);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("retries a thrown network error (connection reset mid-rollover)", async () => {
+    let n = 0;
+    const { fetchImpl, calls } = fakeFetch(() => {
+      n += 1;
+      if (n === 1) throw new TypeError("fetch failed");
+      return json(200, { cancelRequested: false });
+    });
+    const c = retryClient(fetchImpl, [0, 0]);
+    await expect(c.checkCancelled()).resolves.toBe(false);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("exhausts the schedule and surfaces the last 5xx as the usual broker error", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => json(503, { error: "still rolling" }));
+    const c = retryClient(fetchImpl, [0, 0]);
+    await expect(c.checkCredit()).rejects.toThrow(/503/);
+    expect(calls).toHaveLength(3); // first attempt + two retries
+  });
+
+  it("exhausts the schedule and rethrows a persistent network error", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => {
+      throw new TypeError("fetch failed");
+    });
+    const c = retryClient(fetchImpl, [0]);
+    await expect(c.checkCredit()).rejects.toThrow(/fetch failed/);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("does NOT retry a real answer (409 claim-lost stays single-shot)", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => json(409, { error: "claimed" }));
+    const c = retryClient(fetchImpl, [0, 0, 0]);
+    await expect(c.claim("w1", 60)).resolves.toBeNull();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does NOT retry a 500 (a live handler's answer — retrying could duplicate a side effect)", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => json(500, { error: "boom" }));
+    const c = retryClient(fetchImpl, [0, 0]);
+    await expect(c.checkCredit()).rejects.toThrow(/500/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("bulk transfers (presigned S3) retry too", async () => {
+    let n = 0;
+    const { fetchImpl, calls } = fakeFetch(() => {
+      n += 1;
+      return n === 1 ? json(503, {}) : new Response(new Uint8Array([1, 2]), { status: 200 });
+    });
+    const c = retryClient(fetchImpl, [0]);
+    const bytes = await c.downloadBytes("https://s3.example/presigned");
+    expect(bytes).toEqual(new Uint8Array([1, 2]));
+    expect(calls).toHaveLength(2);
+  });
+
+  it("streaming inference is exempt (single-shot; its stream is not replayable)", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => json(503, { error: { message: "rolling" } }));
+    const c = retryClient(fetchImpl, [0, 0, 0]);
+    await expect(async () => {
+      for await (const f of c.streamInference({
+        model: "a",
+        provider: "b",
+        messages: [],
+        tools: [],
+      })) {
+        void f;
+      }
+    }).rejects.toThrow();
+    expect(calls).toHaveLength(1);
   });
 });
