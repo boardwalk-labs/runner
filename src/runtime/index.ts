@@ -418,6 +418,15 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
         }
         return Promise.resolve(runApiKey);
       },
+      // OIDC id-token for cloud federation: minted per call by the broker with the CURRENT run
+      // token (so post-resume calls just work — no captured value to swap on wake). Recorded in
+      // the redactor like every run credential; the broker 403s (naming permissions.id_token)
+      // when the pinned manifest doesn't grant it.
+      idToken: async (audience) => {
+        const { token } = await broker.requestOidcToken(audience);
+        redactor.record(token);
+        return token;
+      },
     };
     const host = new WorkerWorkflowHost({
       leaf,

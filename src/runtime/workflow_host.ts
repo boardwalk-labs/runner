@@ -193,6 +193,11 @@ export interface RuntimeContext {
   apiUrl: string;
   /** A short-lived, manifest-scoped bearer for the public API / MCP / CLI. */
   apiToken(): Promise<string>;
+  /** A short-lived OIDC id-token asserting this run's identity for `audience`, for federation into
+   *  the org's OWN cloud (AWS `AssumeRoleWithWebIdentity` / GCP / Azure). Minted per call by the
+   *  broker (gated server-side on `permissions.id_token: "write"`) with the CURRENT run token, so it
+   *  needs no swap handling across suspend/resume — unlike the captured `apiToken` bearer. */
+  idToken(audience: string): Promise<string>;
 }
 
 export interface WorkerWorkflowHostDeps {

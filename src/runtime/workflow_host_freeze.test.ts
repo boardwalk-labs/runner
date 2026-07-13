@@ -53,6 +53,7 @@ function makeFrozenHost(
       orgId: "org_test",
       apiUrl: "https://api.test",
       apiToken: () => Promise.resolve("api-token-test"),
+      idToken: () => Promise.resolve("id-token-test"),
     },
     sleeper: {
       hold: (ms) => {
@@ -202,6 +203,7 @@ describe("WorkerWorkflowHost freeze mode", () => {
         orgId: "org_test",
         apiUrl: "https://api.test",
         apiToken: () => Promise.resolve("t"),
+        idToken: () => Promise.resolve("id-token-test"),
       },
       journal: { get: () => Promise.resolve(null), put: () => Promise.resolve() },
       freeze,

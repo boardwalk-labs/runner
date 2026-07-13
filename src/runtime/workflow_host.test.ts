@@ -76,6 +76,7 @@ function makeHost(
       orgId: "org_test",
       apiUrl: "https://api.test",
       apiToken: () => Promise.resolve("api-token-test"),
+      idToken: () => Promise.resolve("id-token-test"),
     },
     sleeper,
     ...(over.writeArtifact ? { writeArtifact: over.writeArtifact } : {}),

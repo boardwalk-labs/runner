@@ -340,6 +340,27 @@ describe("RunnerControlClient.requestOidcToken", () => {
       /oidc\/token failed: 403/,
     );
   });
+
+  it("mints with the CURRENT run token after a wake swap (post-resume idToken)", async () => {
+    // idToken is fetched per call, so a post-resume mint must ride the fresh bearer the wake
+    // swapped in — not the frozen one that expired while suspended.
+    const { fetchImpl, calls } = fakeFetch(() =>
+      json(200, { token: "eyJ.signed.jws", expiresIn: 900 }),
+    );
+    const c = new RunnerControlClient({
+      baseUrl: "https://api.boardwalk.sh",
+      runToken: "boot-token",
+      runId: "run_1",
+      fetchImpl,
+    });
+    await c.requestOidcToken("sts.amazonaws.com");
+    c.swapRunToken("fresh-token");
+    await c.requestOidcToken("sts.amazonaws.com");
+    expect(calls.map((r) => r.headers.authorization)).toEqual([
+      "Bearer boot-token",
+      "Bearer fresh-token",
+    ]);
+  });
 });
 
 describe("RunnerControlClient.resolveSecret", () => {

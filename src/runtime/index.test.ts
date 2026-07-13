@@ -353,6 +353,10 @@ describe("publicApiOrigin", () => {
 });
 
 describe("buildHost — the runtime accessor (import { runtime })", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("exposes run ids + a redacted on-demand apiToken, never via process.env", async () => {
     const deps = assembleWorkerDeps(runtime());
     const manifest = workflowManifestSchema.parse({ slug: "demo", triggers: [{ kind: "manual" }] });
@@ -377,6 +381,49 @@ describe("buildHost — the runtime accessor (import { runtime })", () => {
     const { host } = await deps.buildHost(sampleRun(), manifest, new AbortController().signal);
     if (!(host instanceof WorkerWorkflowHost)) throw new Error("expected a WorkerWorkflowHost");
     await expect(host.runtime.apiToken()).rejects.toThrow(/not provisioned a public-API token/);
+  });
+
+  it("idToken mints via the broker per call and records the JWT in the redactor", async () => {
+    const jwt = `eyJhbGciOiJSUzI1NiJ9.${"c".repeat(48)}.sig`;
+    const seen: { url: string; body: string | undefined }[] = [];
+    const fetchStub = vi.fn(
+      (
+        input: Parameters<typeof fetch>[0],
+        init?: Parameters<typeof fetch>[1],
+      ): Promise<Response> => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        seen.push({ url, body: init?.body as string | undefined });
+        return Promise.resolve(
+          new Response(JSON.stringify({ token: jwt, expiresIn: 900 }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", fetchStub);
+
+    const deps = assembleWorkerDeps(runtime());
+    const manifest = workflowManifestSchema.parse({
+      slug: "demo",
+      triggers: [{ kind: "manual" }],
+      permissions: { id_token: "write" },
+    });
+    const { host, redactor } = await deps.buildHost(
+      sampleRun(),
+      manifest,
+      new AbortController().signal,
+    );
+    if (!(host instanceof WorkerWorkflowHost)) throw new Error("expected a WorkerWorkflowHost");
+
+    await expect(host.runtime.idToken("sts.amazonaws.com")).resolves.toBe(jwt);
+    expect(seen.map((s) => s.url)).toEqual([
+      "https://api.boardwalk.sh/runner/v1/runs/run-test/oidc/token",
+    ]);
+    expect(JSON.parse(seen[0]?.body ?? "{}")).toEqual({ audience: "sts.amazonaws.com" });
+    // The minted JWT is a run credential: recorded so LLM-bound content scrubs it.
+    expect(redactor.values).toContain(jwt);
   });
 });
 
