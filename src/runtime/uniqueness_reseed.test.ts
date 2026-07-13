@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { reseedUserspaceCsprng } from "./uniqueness_reseed.js";
 
-// The real reseed's effect — divergence across snapshot CLONES — can only be proven on the KVM
-// substrate (two microVMs restored from one base), so it lives in the box E2E
-// (boardwalk-substrate/test/reseed_divergence.sh), not here. These tests pin the JS contract: the
+// The real reseed's effect — divergence across snapshot CLONES — can only be proven on a KVM
+// substrate (two microVMs restored from one base), so it lives in the hosting platform's own
+// end-to-end harness, not here. These tests pin the JS contract: the
 // entry point never throws, and it degrades to a no-op on a platform with no prebuilt addon
 // (e.g. this test host, or the ARM64 Fargate worker where there is no snapshot to reseed).
 
