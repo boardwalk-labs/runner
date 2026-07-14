@@ -67,9 +67,8 @@ export interface RunnerControlClientConfig {
  */
 const RETRYABLE_STATUSES = new Set([502, 503, 504]);
 
-/** Default backoff (ms) between attempts — ~17.5s of spread, sized to ride out the target-group
- *  rotation window of an api-server rolling deploy (the observed killer: guests died hard
- *  mid-suspend/finalize during TWO deploys, 2026-07-13, and only crash-reclaim saved the runs). */
+/** Default backoff (ms) between attempts — ~17.5s of spread, sized to ride out a control-plane
+ *  deploy rollover. */
 const DEFAULT_RETRY_DELAYS_MS = [500, 2_000, 5_000, 10_000];
 
 /** The pinned program's download reference (the worker fetches + verifies + extracts it). */
