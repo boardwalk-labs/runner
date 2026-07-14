@@ -384,6 +384,7 @@ describe("buildHost — the runtime accessor (import { runtime })", () => {
   });
 
   it("idToken mints via the broker per call and records the JWT in the redactor", async () => {
+    const brokerBaseUrl = "http://localhost:3000";
     const jwt = `eyJhbGciOiJSUzI1NiJ9.${"c".repeat(48)}.sig`;
     const seen: { url: string; body: string | undefined }[] = [];
     const fetchStub = vi.fn(
@@ -404,7 +405,10 @@ describe("buildHost — the runtime accessor (import { runtime })", () => {
     );
     vi.stubGlobal("fetch", fetchStub);
 
-    const deps = assembleWorkerDeps(runtime());
+    const deps = assembleWorkerDeps({
+      ...runtime(),
+      controlPlane: { ...runtime().controlPlane, baseUrl: brokerBaseUrl },
+    });
     const manifest = workflowManifestSchema.parse({
       slug: "demo",
       triggers: [{ kind: "manual" }],
@@ -418,9 +422,7 @@ describe("buildHost — the runtime accessor (import { runtime })", () => {
     if (!(host instanceof WorkerWorkflowHost)) throw new Error("expected a WorkerWorkflowHost");
 
     await expect(host.runtime.idToken("sts.amazonaws.com")).resolves.toBe(jwt);
-    expect(seen.map((s) => s.url)).toEqual([
-      "https://api.boardwalk.sh/runner/v1/runs/run-test/oidc/token",
-    ]);
+    expect(seen.map((s) => s.url)).toEqual([`${brokerBaseUrl}/runner/v1/runs/run-test/oidc/token`]);
     expect(JSON.parse(seen[0]?.body ?? "{}")).toEqual({ audience: "sts.amazonaws.com" });
     // The minted JWT is a run credential: recorded so LLM-bound content scrubs it.
     expect(redactor.values).toContain(jwt);
