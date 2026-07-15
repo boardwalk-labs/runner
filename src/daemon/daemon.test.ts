@@ -19,6 +19,8 @@ const OFFER: AssignmentOffer = {
 const CLAIM: ClaimResponse = {
   lease_id: "01H_assignment",
   run_id: "01H_run",
+  workflow_id: "01H_workflow",
+  environment_id: null,
   lease_expires_at: 300_000,
   control_plane: {
     base_url: "https://api.example",
@@ -58,7 +60,11 @@ async function tmpWorkDir(): Promise<string> {
 
 describe("runProcessEnv", () => {
   it("platform contract keys always win over the claim env", () => {
-    const env = runProcessEnv(CLAIM, { runnerId: "r1", workspaceRoot: "/w" });
+    const env = runProcessEnv(CLAIM, {
+      runnerId: "r1",
+      workspaceRoot: "/w",
+      persistScopeDir: "/p",
+    });
     expect(env.RUN_ID).toBe("01H_run"); // the claim env tried to spoof it
     expect(env.REGION).toBe("us-east-1");
     expect(env.BOARDWALK_RUN_TOKEN).toBe("run-token");
@@ -69,7 +75,11 @@ describe("runProcessEnv", () => {
   });
 
   it("does NOT stamp BOARDWALK_TASK_CPU_UNITS — self-hosted compute is unbilled (D5), runtime meters wall-clock", () => {
-    const env = runProcessEnv(CLAIM, { runnerId: "r1", workspaceRoot: "/w" });
+    const env = runProcessEnv(CLAIM, {
+      runnerId: "r1",
+      workspaceRoot: "/w",
+      persistScopeDir: "/p",
+    });
     expect(env.BOARDWALK_TASK_CPU_UNITS).toBeUndefined();
   });
 });

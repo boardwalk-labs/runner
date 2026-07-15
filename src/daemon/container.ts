@@ -62,6 +62,9 @@ export function containerEnv(runEnv: Record<string, string>): Record<string, str
     WORKSPACE_ROOT: "/workspace",
     HOME: "/workspace",
     TMPDIR: "/tmp",
+    // The host's per-scope durable dir is bind-mounted at /persist (buildContainerArgs), so the
+    // in-container path replaces the host one — which is meaningless inside the container.
+    ...(runEnv.PERSIST_SCOPE_DIR !== undefined ? { PERSIST_SCOPE_DIR: "/persist" } : {}),
   };
   return env;
 }
@@ -84,8 +87,9 @@ export function runIdFromCwd(cwd: string): string {
 
 /**
  * Build the `docker run` argv. PURE + exported so the isolation guarantees are unit-asserted:
- *  - the ONLY bind mount is the per-run workspace (+ any explicit user mounts) — the identity dir,
- *    the user's home, and the rest of the host FS are never mounted;
+ *  - the only bind mounts are the per-run workspace, this run's OWN persistence scope (+ any explicit
+ *    user mounts) — the identity dir, the user's home, OTHER workflows' persisted workspaces, and the
+ *    rest of the host FS are never mounted;
  *  - per-run credentials are passed by NAME (`-e BOARDWALK_RUN_TOKEN`), so their VALUES come from the
  *    docker client's env and never appear in the argv (which `ps` exposes);
  *  - `--rm` (no leftover container), `--init` (proper signal handling / zombie reaping).
@@ -108,6 +112,15 @@ export function buildContainerArgs(
     "-w",
     "/workspace",
   ];
+  // This run's durable workspace, when the daemon resolved one. THIS RUN'S SCOPE ONLY — never the
+  // whole persist root: the run's program is arbitrary code with raw fs access, so mounting the root
+  // would let any workflow read every other workflow's persisted state on this machine. Hosted
+  // isolates per workflow via the token-derived S3 key; self-hosted must not be weaker
+  // (docs/WORKSPACE_PERSISTENCE.md I3). The daemon pre-creates it, so docker can't make it root-owned.
+  const persistScopeDir = opts.env.PERSIST_SCOPE_DIR;
+  if (persistScopeDir !== undefined) {
+    args.push("-v", `${persistScopeDir}:/persist`);
+  }
   // Run as the invoking host user (Linux) so the bind-mounted workspace is writable — the image's
   // `node` (uid 1000) otherwise can't write a host dir it doesn't own.
   if (cfg.user !== undefined) {

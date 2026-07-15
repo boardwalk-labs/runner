@@ -18,6 +18,11 @@ const ENV = {
   BOARDWALK_API_KEY: "bwk_super_secret_api_token",
 };
 
+/** The `-v` values from a docker argv. */
+function mountsOf(args: string[]): string[] {
+  return args.filter((_, i) => args[i - 1] === "-v");
+}
+
 describe("buildContainerArgs — isolation guarantees", () => {
   const args = buildContainerArgs(CFG, { env: ENV, cwd: CWD });
   const joined = args.join(" ");
@@ -28,6 +33,38 @@ describe("buildContainerArgs — isolation guarantees", () => {
     // Nothing resembling the identity dir / home / host root is ever mounted.
     expect(joined).not.toContain(".boardwalk/runner/main-api"); // identity file dir
     expect(mounts.some((m) => m.startsWith("/:") || m.startsWith("/home/nick:"))).toBe(false);
+  });
+
+  // Persistent workspaces on a self-hosted runner live on the runner's own disk (I3). The daemon
+  // resolves the scope and binds THAT ONE DIR — the mount is the isolation boundary here, because a
+  // run's program is arbitrary code with raw fs access.
+  describe("the persistent-workspace mount", () => {
+    const PERSIST_SCOPE = "/home/nick/.boardwalk/runner/work/persist/wf_1/_base";
+    const withPersist = buildContainerArgs(CFG, {
+      env: { ...ENV, PERSIST_SCOPE_DIR: PERSIST_SCOPE },
+      cwd: CWD,
+    });
+    const mounts = withPersist.filter((_, i) => withPersist[i - 1] === "-v");
+
+    it("mounts THIS run's scope only — never the persist root, never another workflow's", () => {
+      expect(mounts).toEqual([`${CWD}:/workspace`, `${PERSIST_SCOPE}:/persist`]);
+      // The root would expose every workflow's persisted state on the machine to every run. Hosted
+      // isolates per workflow via the token-derived S3 key; self-hosted must not be weaker.
+      expect(mounts).not.toContain("/home/nick/.boardwalk/runner/work/persist:/persist");
+    });
+
+    it("rewrites the in-container path (the host path is meaningless inside)", () => {
+      expect(containerEnv({ ...ENV, PERSIST_SCOPE_DIR: PERSIST_SCOPE }).PERSIST_SCOPE_DIR).toBe(
+        "/persist",
+      );
+    });
+
+    it("adds no mount and no path when the daemon resolved no scope", () => {
+      expect(mountsOf(buildContainerArgs(CFG, { env: ENV, cwd: CWD }))).toEqual([
+        `${CWD}:/workspace`,
+      ]);
+      expect(containerEnv(ENV).PERSIST_SCOPE_DIR).toBeUndefined();
+    });
   });
 
   it("never puts a credential VALUE in the argv (passes env by NAME only)", () => {

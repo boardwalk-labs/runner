@@ -82,7 +82,9 @@ import {
   TarWorkspaceArchiver,
   NodeWorkspaceFs,
   resolvePersistSelection,
+  type PersistSelection,
 } from "./workspace_store.js";
+import { LocalWorkspaceStore } from "./local_workspace_store.js";
 import { PhaseTracker } from "./phase_tracker.js";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -103,6 +105,14 @@ export interface WorkerRuntime {
    *  bundle inside the workspace rides into every pre-sleep snapshot and, because each run's dir is
    *  uniquely named, accumulates there forever. */
   programRoot: string;
+  /** This run's durable workspace directory — its (workflow, environment) scope, ALREADY RESOLVED by
+   *  the daemon (PERSIST_SCOPE_DIR). Set only by a SELF-HOSTED runner, which owns a disk that
+   *  outlives a run. Present ⇒ persistence is a plain directory tree here (never our S3: a
+   *  self-hosted workspace is the customer's data on the customer's disk). Absent ⇒ the hosted lane,
+   *  which has no disk outliving the VM and persists through the broker. The daemon resolves the
+   *  scope because it owns the disk and, under container isolation, binds this exact dir as a mount.
+   *  See docs/WORKSPACE_PERSISTENCE.md I3. */
+  persistScopeDir?: string;
   /** The run this worker task is executing (RUN_ID) — binds the Runner Control API client. */
   runId: string;
   /** The org's BYO inference providers (claim-delivered, BOARDWALK_BYO_PROVIDERS) for the
@@ -414,13 +424,28 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     // URLs), and snapshots are keyed per workflow + environment and scoped by the run token — so even
     // the untrusted in-process program can't reach another tenant's, or another environment's, data.
     const memoryDirs = new Set<string>();
-    const workspaceStore = new WorkspaceStore({
-      broker,
-      archiver: new TarWorkspaceArchiver(),
-      fs: new NodeWorkspaceFs(),
-      workspaceRoot: runtime.workspaceRoot,
-      selection: () => resolvePersistSelection(manifest.workspace?.persist, memoryDirs),
-    });
+    const selection = (): PersistSelection =>
+      resolvePersistSelection(manifest.workspace?.persist, memoryDirs);
+    // TWO stores, ONE contract (WORKSPACE_PERSISTENCE.md I3): `runs_on` decides WHERE the bytes live,
+    // never WHETHER persistence happens. A runner with its OWN durable root (a self-hosted daemon,
+    // which sets PERSIST_ROOT) keeps state on the customer's disk and never touches our S3 — the
+    // broker returns null URLs for self-hosted runs by design. Hosted runners have no local disk that
+    // outlives the VM, so they push a tarball through the broker. Before this, "don't upload it" was
+    // implemented as "don't persist it", so self-hosted runs silently forgot everything.
+    const workspaceStore =
+      runtime.persistScopeDir !== undefined
+        ? new LocalWorkspaceStore({
+            scopeDir: runtime.persistScopeDir,
+            workspaceRoot: runtime.workspaceRoot,
+            selection,
+          })
+        : new WorkspaceStore({
+            broker,
+            archiver: new TarWorkspaceArchiver(),
+            fs: new NodeWorkspaceFs(),
+            workspaceRoot: runtime.workspaceRoot,
+            selection,
+          });
     // The run's identity + on-demand public-API bearer, surfaced to the program via `import { runtime }`.
     // ids come from the claimed run; the bearer is the captured (scrubbed-from-env) api token, already
     // recorded in this run's redactor above — so threading it into an MCP header keeps it out of LLM
@@ -815,6 +840,10 @@ export async function main(): Promise<void> {
     // honors TMPDIR, which the self-hosted daemon points at the per-run dir — so concurrent daemons on
     // one machine don't collide, and the hosted lanes get the VM's own /tmp.
     programRoot: process.env.PROGRAM_ROOT ?? join(tmpdir(), "bw-programs"),
+    // Set by the self-hosted daemon only (both isolation lanes); hosted images never set it.
+    ...(process.env.PERSIST_SCOPE_DIR !== undefined
+      ? { persistScopeDir: process.env.PERSIST_SCOPE_DIR }
+      : {}),
     runId,
     controlPlane: platform.controlPlane,
     vcpus: platform.vcpus,

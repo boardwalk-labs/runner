@@ -25,6 +25,8 @@ const OFFER = {
 const CLAIM = {
   lease_id: "01H_assignment",
   run_id: "01H_run",
+  workflow_id: "01H_workflow",
+  environment_id: null,
   lease_expires_at: 1_700_000_300_000,
   control_plane: {
     base_url: "https://api.boardwalk.sh",
@@ -114,6 +116,21 @@ describe("assignment offer + poll", () => {
 describe("claim", () => {
   it("round-trips — the ONLY payload carrying per-run credentials", () => {
     expect(claimResponseSchema.parse(CLAIM)).toEqual(CLAIM);
+  });
+
+  it("carries the run's persistence SCOPE — the daemon lays out its disk from it", () => {
+    // (workflow, environment) keys a self-hosted runner's durable workspace exactly as it keys the
+    // hosted S3 key (docs/WORKSPACE_PERSISTENCE.md I3/§4). The daemon needs it BEFORE the run starts,
+    // because under container isolation the scope dir is a bind mount chosen at `docker run` time.
+    const scoped = claimResponseSchema.parse({ ...CLAIM, environment_id: "01H_env" });
+    expect(scoped.workflow_id).toBe("01H_workflow");
+    expect(scoped.environment_id).toBe("01H_env");
+    // A run with no environment is the BASE scope, not an error.
+    expect(claimResponseSchema.parse(CLAIM).environment_id).toBeNull();
+    // Absent entirely = an older control plane; the runner cannot key a scope it wasn't told.
+    const withoutScope: Record<string, unknown> = { ...CLAIM };
+    delete withoutScope.workflow_id;
+    expect(claimResponseSchema.safeParse(withoutScope).success).toBe(false);
   });
 
   it("requires all three control-plane credentials", () => {

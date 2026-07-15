@@ -147,6 +147,20 @@ export type ByoInferenceProvider = z.infer<typeof byoInferenceProviderSchema>;
 export const claimResponseSchema = z.strictObject({
   lease_id: id,
   run_id: id,
+  /**
+   * The run's persistence SCOPE — the daemon needs it to lay out its own disk BEFORE the run starts.
+   *
+   * A self-hosted runner keeps persistent workspaces on its own disk (never our S3), keyed per
+   * (workflow, environment) exactly like the hosted S3 key — one workflow program runs against N
+   * environments (docs/WORKSPACE_PERSISTENCE.md §4/I3). The daemon must know the scope up front,
+   * because in container isolation the scope dir is a BIND MOUNT chosen at `docker run` time: mount
+   * only this run's scope, and a program can't read another workflow's state; mount the whole persist
+   * root and it can. `run_id` alone can't express that, which is why these ride the claim.
+   *
+   * `environment_id` is null for a run with no environment — the BASE scope.
+   */
+  workflow_id: id,
+  environment_id: id.nullable(),
   /** Heartbeat before this or the lease expires and the run is recovered elsewhere. */
   lease_expires_at: epochMs,
   /**

@@ -10,6 +10,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import * as path from "node:path";
 import type { AssignmentOffer, ClaimResponse } from "../contract.js";
+import { localScopeDir } from "../runtime/local_workspace_store.js";
 import { createLogger, type Logger } from "../runtime/support/index.js";
 import type { PoolClient } from "./pool_client.js";
 
@@ -60,7 +61,7 @@ const defaultSleep = (ms: number): Promise<void> =>
 /** Env for one run process: the platform contract + the claim's resolved non-secret vars. */
 export function runProcessEnv(
   claim: ClaimResponse,
-  opts: { runnerId: string; workspaceRoot: string },
+  opts: { runnerId: string; workspaceRoot: string; persistScopeDir: string },
 ): Record<string, string> {
   return {
     // The claim's resolved non-secret env FIRST — the platform contract keys always win.
@@ -78,6 +79,15 @@ export function runProcessEnv(
     BOARDWALK_BYO_PROVIDERS: JSON.stringify(claim.byo_providers),
     WORKER_ID: opts.runnerId,
     WORKSPACE_ROOT: opts.workspaceRoot,
+    // This run's durable workspace directory — its (workflow, environment) SCOPE, already resolved
+    // (docs/WORKSPACE_PERSISTENCE.md I3). A self-hosted runner owns a disk that outlives a run, so
+    // `workspace.persist` and `agent({ memory })` compound HERE, never in our S3 (which never sees a
+    // self-hosted workspace). Without it the runtime has no durable root and falls back to the
+    // broker, which correctly refuses self-hosted runs — so persistence was a silent no-op.
+    //
+    // The DAEMON resolves the scope, not the runtime: it owns this disk, and in container isolation
+    // the scope dir is a bind mount chosen before the container starts. One owner, one layout.
+    PERSIST_SCOPE_DIR: opts.persistScopeDir,
     // The machine's own PATH/HOME etc. deliberately do NOT flow here: the run gets exactly the
     // resolved env + platform contract, mirroring the hosted container. The spawner overlays the
     // minimal process necessities (PATH, HOME=workspace).
@@ -93,9 +103,18 @@ export function startDaemon(deps: DaemonDeps): DaemonController {
     const runDir = path.join(deps.workDir, "runs", claim.run_id);
     const workspaceRoot = path.join(runDir, "workspace");
     await mkdir(workspaceRoot, { recursive: true });
+    // This run's durable workspace, keyed per (workflow, environment) and living OUTSIDE the per-run
+    // dir (which is scratch, removed with the run). Created up front because the container lane binds
+    // it as a mount, and docker would otherwise create it root-owned.
+    const persistScopeDir = localScopeDir(
+      path.join(deps.workDir, "persist"),
+      claim.workflow_id,
+      claim.environment_id,
+    );
+    await mkdir(persistScopeDir, { recursive: true });
     const child = deps.spawn({
       entry: deps.runtimeEntry,
-      env: runProcessEnv(claim, { runnerId: deps.runnerId, workspaceRoot }),
+      env: runProcessEnv(claim, { runnerId: deps.runnerId, workspaceRoot, persistScopeDir }),
       cwd: workspaceRoot,
     });
     log.info("run_started", { runId: claim.run_id, assignmentId: offer.assignment_id });
