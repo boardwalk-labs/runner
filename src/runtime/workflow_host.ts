@@ -27,6 +27,7 @@ import type {
 import type { BrowserSessionManager } from "./browser_session.js";
 import { LeafParked, type LeafResume } from "@boardwalk-labs/engine/core";
 import { normalizeHumanInputResult } from "./wire/human_input.js";
+import { BUDGET_GATE_KEY } from "./budget_gate.js";
 import { SuspensionCounter, SUSPEND_THRESHOLD_MS, type SuspendSignal } from "./suspension.js";
 import type { FreezeCoordinator, FreezeOutcome, WakeValue } from "./freeze_coordinator.js";
 import { throwIfAborted } from "./run_abort.js";
@@ -520,6 +521,41 @@ export class WorkerWorkflowHost implements WorkflowHost {
       return await this.freezeHumanInput(freeze, signal, key);
     }
     // Hold path: register the gate and poll until a person answers.
+    return normalizeHumanInputResult(await this.holdForAnswer(seq, signal.humanInput));
+  }
+
+  /**
+   * Park the run at a BUDGET gate and resolve with the responder's answer (docs/SUSPEND_POLICY.md
+   * Decision 3). Called by the leaf executor's `streamModel` seam when the run's `max_usd` cap is
+   * breached, i.e. from INSIDE an in-flight `agent()` — which drives two deliberate differences from
+   * {@link humanInputSeam}:
+   *
+   *  - **No `guarded()` wrapper.** The enclosing `agent()` seam already counted this leaf as work via
+   *    `trackWork`. Wrapping again would double-count it, and the extra count would never be released
+   *    — quiescence would never be reached and the freeze would hang forever. `freezeHumanInput` →
+   *    `freezeWait` does the right thing here: it `endWork`s for the duration of the park (this leaf
+   *    is waiting, not working, which is exactly what lets the run reach quiescence and freeze) and
+   *    rejoins on resume.
+   *  - **Abort is not re-checked up front.** `streamModel` has just done it; a park is not a new
+   *    entry point.
+   *
+   * The gate itself is an ordinary {@link HumanInputGate} keyed `budget`, so it persists, surfaces in
+   * the inbox, and is answered by the same machinery as any other gate. No timeout: an unanswered
+   * budget gate is aged out by the control plane's inactive-cancel reaper, not by a wake we schedule.
+   */
+  async budgetClearance(gate: { prompt: string; inputSpec: unknown }): Promise<HumanInputResult> {
+    const seq = this.seq.next();
+    const key = BUDGET_GATE_KEY;
+    const signal: SuspendSignal = {
+      reason: "budget",
+      seq,
+      humanInput: { key, prompt: gate.prompt, inputSpec: gate.inputSpec },
+    };
+    const freeze = this.deps.freeze;
+    if (freeze !== undefined) {
+      return await this.freezeHumanInput(freeze, signal, key);
+    }
+    // No freeze substrate (self-hosted runner / local dev): hold the live process until answered.
     return normalizeHumanInputResult(await this.holdForAnswer(seq, signal.humanInput));
   }
 

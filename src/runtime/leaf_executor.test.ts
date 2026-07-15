@@ -95,6 +95,7 @@ function makeExecutor(args: {
   workspaceRoot?: string;
   toolHost?: ToolHost;
   lspService?: LspService;
+  budgetGate?: { clear(): Promise<void> };
 }): { exec: EngineLeafExecutor; requests: InferenceProxyRequest[] } {
   const { transport, requests } = fakeTransport(args.scripts);
   const sink = args.sink ?? new RecordingSink();
@@ -111,6 +112,7 @@ function makeExecutor(args: {
     ...(args.programDir !== undefined ? { programDir: args.programDir } : {}),
     ...(args.toolHost !== undefined ? { toolHost: args.toolHost } : {}),
     ...(args.lspService !== undefined ? { lspService: args.lspService } : {}),
+    ...(args.budgetGate !== undefined ? { budgetGate: args.budgetGate } : {}),
   });
   return { exec, requests };
 }
@@ -247,6 +249,33 @@ describe("EngineLeafExecutor.run — budget + metering", () => {
     expect(budget.snapshot().totalUsd).toBeCloseTo(0.2, 6);
     // Tokens still accumulate (they drive the max_tokens cap + the display aggregate).
     expect(budget.snapshot().inputTokens).toBe(1_000_000);
+  });
+
+  it("awaits budget clearance BEFORE each model call, so a breached run parks instead of spending", async () => {
+    const order: string[] = [];
+    const { exec, requests } = makeExecutor({
+      scripts: [finalTurn("done", { inputTokens: 10, outputTokens: 5 })],
+      budgetGate: {
+        clear: () => {
+          // The gate must run before the transport is touched — that ordering IS the feature.
+          order.push(`clear:${String(requests.length)}`);
+          return Promise.resolve();
+        },
+      },
+    });
+    expect(await exec.run("x", OPTS)).toBe("done");
+    // Cleared once, with zero requests dispatched at the time (i.e. before the spend).
+    expect(order).toEqual(["clear:0"]);
+    expect(requests).toHaveLength(1);
+  });
+
+  it("propagates a gate rejection (the responder cancelled) instead of dispatching the call", async () => {
+    const { exec, requests } = makeExecutor({
+      scripts: [finalTurn("never reached", { inputTokens: 1, outputTokens: 1 })],
+      budgetGate: { clear: () => Promise.reject(new Error("Run cancelled at the budget gate.")) },
+    });
+    await expect(exec.run("x", OPTS)).rejects.toThrow(/cancelled at the budget gate/);
+    expect(requests).toHaveLength(0); // never spent
   });
 
   it("falls back to the representative-rate estimate when the frame carries no upstream cost", async () => {

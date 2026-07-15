@@ -22,8 +22,14 @@ import type { LeafCheckpoint } from "@boardwalk-labs/engine/core";
  */
 export const SUSPEND_THRESHOLD_MS = 30_000;
 
-/** Why a seam suspended the run. */
-export type SuspendReason = "human_input" | "sleep" | "workflow_call";
+/**
+ * Why a seam suspended the run. `budget` is the odd one out: it is NOT a seam the program called but
+ * an involuntary park — the run hit its `max_usd` cap and is waiting for a person to approve more
+ * spend (docs/SUSPEND_POLICY.md Decision 3). It still carries a `humanInput` gate (key `budget`), so
+ * the control plane persists, surfaces, and answers it exactly like any other gate; only the reason
+ * differs, which is what lets the UI say "budget" instead of "waiting on a human".
+ */
+export type SuspendReason = "human_input" | "sleep" | "workflow_call" | "budget";
 
 /** A human-in-the-loop gate carried out of a suspending seam (program-level or the in-leaf tool). */
 export interface HumanInputGate {

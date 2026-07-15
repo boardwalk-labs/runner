@@ -76,6 +76,19 @@ export interface EngineLeafExecutorDeps {
    *  reports usage after EVERY model call via `reportUsage`; we feed it here and throw on a cap
    *  breach so the loop terminates mid-flight (the budget authority). */
   budget: BudgetMeter;
+  /**
+   * Budget clearance, awaited before EVERY model call (docs/SUSPEND_POLICY.md Decision 3). When the
+   * run's `max_usd` cap is breached this PARKS the run at a gate — the engine just sees a model call
+   * that took a long time, because the VM froze and resumed underneath it — and resolves once a
+   * responder raises the cap. Rejects with `BudgetGateCancelled` if they decline.
+   *
+   * Why here and not at the `reportUsage` breach check below: that callback is synchronous and fires
+   * mid-turn, and per SUSPEND_POLICY Decision 1 a partial turn is never discarded. The model-call
+   * boundary is the first safe place to park, which bounds overrun at one in-flight turn per leaf.
+   *
+   * Absent ⇒ the legacy behavior: a breach fails the run at `reportUsage`.
+   */
+  budgetGate?: { clear(): Promise<void> };
   /** RUN-level redactor (shared with the secret resolver): every resolved secret value is recorded
    *  here. We seed a fresh engine `Redactor` from it per leaf so the loop scrubs known values out of
    *  the prompt, tool args/results, and transcript before they reach the model. */
@@ -213,6 +226,12 @@ export class EngineLeafExecutor implements LeafExecutor {
         req: ModelTurnRequest,
         providerIo: ProviderIo,
       ): Promise<ModelTurnResult> => {
+        throwIfAborted(signal);
+        // Budget clearance BEFORE the spend, not after: if the cap is already breached this parks
+        // the run (freeing the host on the snapshot fleet) until someone approves more. No-op on the
+        // overwhelming majority of calls. Re-check abort afterwards — a park can span a long wait,
+        // and the run may have been cancelled while frozen.
+        await this.deps.budgetGate?.clear();
         throwIfAborted(signal);
         return this.streamModel(req, providerIo, signal, redactor, (costMicros) => {
           pendingCostMicros = (pendingCostMicros ?? 0) + costMicros;

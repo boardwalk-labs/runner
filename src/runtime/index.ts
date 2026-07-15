@@ -38,6 +38,7 @@ import type { Run } from "./wire/run.js";
 import type { WorkflowManifest } from "./wire/manifest.js";
 import { RecordingSecretResolver } from "./recording_secret_resolver.js";
 import { EngineLeafExecutor } from "./leaf_executor.js";
+import { BudgetGate, type BudgetClearancePort } from "./budget_gate.js";
 import { parseByoProviders } from "./direct_inference.js";
 import {
   applyIdentityToEnv,
@@ -312,6 +313,22 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     // it). Workspace-rooted at the same `/workspace` the leaf + tools use. Closed on the run's teardown
     // (returned below as `lsp` → program_worker's finally) so no language-server process leaks.
     const lspService = new LspService({ workspaceDir: runtime.workspaceRoot });
+    // Budget gate (docs/SUSPEND_POLICY.md Decision 3): a `max_usd` breach PARKS the run for approval
+    // instead of failing it. The gate needs the HOST (to park) but the host is constructed below with
+    // `leaf` — a genuine cycle, broken with a late-bound ref: `clear()` only ever runs mid-run, long
+    // after both exist. Wired to `budgetHost` immediately after the host is built.
+    let budgetHost: BudgetClearancePort | null = null;
+    const budgetGate = new BudgetGate(budget, {
+      budgetClearance: (gate) => {
+        if (budgetHost === null) {
+          // Unreachable in a real run; a loud error beats parking against a null host.
+          return Promise.reject(
+            new Error("budget gate reached before the workflow host was wired"),
+          );
+        }
+        return budgetHost.budgetClearance(gate);
+      },
+    });
     const leaf = new EngineLeafExecutor({
       inference: broker,
       // Direct BYO (D7): the claim's registry + the run's RECORDING resolver, so a provider key
@@ -325,6 +342,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
           }
         : {}),
       budget,
+      budgetGate,
       redactor,
       toolHost,
       lspService,
@@ -460,6 +478,8 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       ...(browserSessions !== undefined ? { browserSessions } : {}),
       phases: phaseTracker,
     });
+    // Close the budget gate's cycle: the leaf (built above) parks THROUGH the host (built just now).
+    budgetHost = host;
     // Late-bind the coordinator's per-run hooks now that the run-scoped objects exist.
     if (freeze !== undefined) {
       const coordinator = freeze;

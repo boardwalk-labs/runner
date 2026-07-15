@@ -311,6 +311,14 @@ export class FreezeCoordinator {
           kind: "human_input",
           ...(signal.humanInput !== undefined ? { request_keys: [signal.humanInput.key] } : {}),
         };
+      // A budget park waits on the same gate machinery as human_input, but reports its own kind so
+      // the control plane can say "paused on budget" rather than "waiting on a human" — a different
+      // thing to a person triaging the run list (SUSPEND_POLICY Decision 3).
+      case "budget":
+        return {
+          kind: "budget",
+          ...(signal.humanInput !== undefined ? { request_keys: [signal.humanInput.key] } : {}),
+        };
       case "workflow_call":
         return {
           kind: "workflow_call",

@@ -91,7 +91,10 @@ export interface BudgetSnapshot {
 }
 
 export class BudgetMeter {
-  private readonly budget: Budget | undefined;
+  /** NOT readonly: a budget gate (docs/SUSPEND_POLICY.md Decision 3) raises `max_usd` in place when a
+   *  responder approves more spend. The meter lives in the frozen heap, so the wake mutates this
+   *  instance and the blocked model call proceeds against the new cap. */
+  private budget: Budget | undefined;
   private readonly rate: ModelRate;
   private readonly startedAt: number;
   private readonly deadlineStartedAt: number | null;
@@ -224,6 +227,26 @@ export class BudgetMeter {
    * inline (e.g., the sleep tool rejects a sleep that would breach the
    * duration cap). Returns the first breach reason or null.
    */
+  /**
+   * Raise the `max_usd` cap to `usd` — the budget gate's approval path (docs/SUSPEND_POLICY.md
+   * Decision 3). Only ever RAISES: a value at or below the current cap is ignored, so an approval
+   * can't silently tighten a cap and re-park the run on the very next call. A no-op when the
+   * workflow declared no budget (nothing to breach). Returns the cap now in force, or null when
+   * there is no budget.
+   */
+  raiseUsdCap(usd: number): number | null {
+    if (this.budget === undefined) return null;
+    const current = this.budget.max_usd;
+    if (current !== undefined && usd <= current) return current;
+    this.budget = { ...this.budget, max_usd: usd };
+    return usd;
+  }
+
+  /** The `max_usd` cap in force, or null when unset. The gate prompt reports it alongside spend. */
+  usdCap(): number | null {
+    return this.budget?.max_usd ?? null;
+  }
+
   capBreachReason(): "tokens" | "usd" | "duration" | "deadline" | null {
     try {
       this.assertWithinCaps();
