@@ -1,4 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { WorkflowHost } from "@boardwalk-labs/workflow/runtime";
 import type { Run } from "./wire/run.js";
 import { SecretRedactor } from "./agent/secret_redactor.js";
@@ -12,6 +15,19 @@ import {
 } from "./program_worker.js";
 import { buildSingleFileArtifact } from "./testing_artifact_build.js";
 import { extract as tarExtract } from "tar";
+
+/** Real per-run filesystem coordinates: the worker runs a REAL program, which now chdirs into the
+ *  workspace (WORKSPACE_PERSISTENCE.md I1), so the workspace has to actually exist. `realpathSync`
+ *  because macOS `tmpdir()` is a symlink and `process.cwd()` reports the resolved path. */
+const tmpRoots: string[] = [];
+function tmpRoot(prefix: string): string {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  tmpRoots.push(dir);
+  return dir;
+}
+afterEach(() => {
+  for (const dir of tmpRoots.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 function fakeRun(over: Partial<Run> = {}): Run {
   return {
@@ -170,6 +186,8 @@ function harness(
     deps: {
       runs,
       versions,
+      workspaceRoot: tmpRoot("bw-ws-"),
+      programRoot: tmpRoot("bw-prog-"),
       fetchProgram: () =>
         Promise.resolve(over.corruptDownload ? new Uint8Array([0, 1, 2]) : artifact.tarball),
       extractArchive: async (tgzPath, destDir) => {

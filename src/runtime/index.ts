@@ -77,10 +77,16 @@ import { CancelWatcher } from "./cancel_watcher.js";
 import { LeaseRenewer } from "./lease_renewer.js";
 import { RuntimeFlusher } from "./runtime_flusher.js";
 
-import { WorkspaceStore, TarWorkspaceArchiver, NodeWorkspaceFs } from "./workspace_store.js";
+import {
+  WorkspaceStore,
+  TarWorkspaceArchiver,
+  NodeWorkspaceFs,
+  resolvePersistSelection,
+} from "./workspace_store.js";
 import { PhaseTracker } from "./phase_tracker.js";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const log = createLogger("worker_entrypoint");
 
@@ -90,8 +96,13 @@ const log = createLogger("worker_entrypoint");
 export interface WorkerRuntime {
   /** Stable worker identity stamped onto the lease (task ARN / hostname / run-derived). */
   workerId: string;
-  /** Sandbox workspace root for filesystem/shell/git tools. */
+  /** Sandbox workspace root for filesystem/shell/git tools — and the working directory + HOME for
+   *  author code (docs/WORKSPACE_PERSISTENCE.md I1). */
   workspaceRoot: string;
+  /** Where the program artifact is extracted. Deliberately OUTSIDE {@link workspaceRoot} (I2): a
+   *  bundle inside the workspace rides into every pre-sleep snapshot and, because each run's dir is
+   *  uniquely named, accumulates there forever. */
+  programRoot: string;
   /** The run this worker task is executing (RUN_ID) — binds the Runner Control API client. */
   runId: string;
   /** The org's BYO inference providers (claim-delivered, BOARDWALK_BYO_PROVIDERS) for the
@@ -347,6 +358,9 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       toolHost,
       lspService,
       workspaceRoot: runtime.workspaceRoot,
+      // Register every memory dir the run uses, so the workspace store persists it with no manifest
+      // declaration (WORKSPACE_PERSISTENCE.md §3). Read back by the store's `selection` thunk.
+      onMemoryUsed: (dir: string) => memoryDirs.add(dir),
       // Resolve this run's deployed `skills/` dir for `agent({ skills })` — the engine reads
       // `<skillsDir>/<name>.md`, so it's the `skills` subdir of the extracted program tree (filled
       // once the artifact extracts). Null until then / when no program dir is known.
@@ -391,18 +405,22 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // comes from the org's connection vault via the Runner Control API — never stored on the worker.
       brokerMcpToken: (serverUrl, invalidateToken) => broker.mcpToken(serverUrl, invalidateToken),
     });
-    // Per-workflow persistent /workspace: only when the manifest opts in. The BROKER additionally
-    // gates on hosted (self-hosted runs get null URLs), and snapshots are keyed per-workflow + scoped
-    // by the run token — so even the untrusted in-process program can't reach another tenant's data.
-    const workspaceStore =
-      manifest.workspace?.persist === true
-        ? new WorkspaceStore({
-            broker,
-            archiver: new TarWorkspaceArchiver(),
-            fs: new NodeWorkspaceFs(),
-            workspaceRoot: runtime.workspaceRoot,
-          })
-        : undefined;
+    // Per-workflow persistent /workspace (docs/WORKSPACE_PERSISTENCE.md §3). Constructed on EVERY
+    // run, NOT gated on the manifest: `agent({ memory })` persists with no declaration at all, and a
+    // memory dir is only known once the run has made the call — so a construction-time manifest gate
+    // (the old `persist === true`) silently dropped BOTH the list form and every memory dir. What to
+    // write is decided at persist time by `resolvePersistSelection`; a run that selects nothing does
+    // no fs or broker work. The BROKER still gates eligibility (hosted-only; self-hosted gets null
+    // URLs), and snapshots are keyed per workflow + environment and scoped by the run token — so even
+    // the untrusted in-process program can't reach another tenant's, or another environment's, data.
+    const memoryDirs = new Set<string>();
+    const workspaceStore = new WorkspaceStore({
+      broker,
+      archiver: new TarWorkspaceArchiver(),
+      fs: new NodeWorkspaceFs(),
+      workspaceRoot: runtime.workspaceRoot,
+      selection: () => resolvePersistSelection(manifest.workspace?.persist, memoryDirs),
+    });
     // The run's identity + on-demand public-API bearer, surfaced to the program via `import { runtime }`.
     // ids come from the claimed run; the bearer is the captured (scrubbed-from-env) api token, already
     // recorded in this run's redactor above — so threading it into an MCP header keeps it out of LLM
@@ -457,13 +475,9 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       signal,
       // Snapshot the workspace before a long sleep (crash-during-hold recovery). The byte count
       // is only logged by the store itself.
-      ...(workspaceStore !== undefined
-        ? {
-            onBeforeSleep: async (): Promise<void> => {
-              await workspaceStore.persist();
-            },
-          }
-        : {}),
+      onBeforeSleep: async (): Promise<void> => {
+        await workspaceStore.persist();
+      },
       // Snapshot-substrate suspension: seams freeze in place under the quiescence gate. Absent
       // (a self-hosted daemon / the Fargate break-glass), waiting seams HOLD the live process.
       ...(freeze !== undefined ? { freeze } : {}),
@@ -491,7 +505,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
         onBeforeFreeze: async (): Promise<void> => {
           freezeWallMs = Date.now();
           await activeFlusher?.flushNow();
-          await workspaceStore?.persist();
+          await workspaceStore.persist();
           // The recorder never spans a snapshot: finalize + upload the in-flight segment before the
           // freeze (SCREEN_CAPTURE §4.3). Bounded internally, so a slow upload delays, not blocks, it.
           await capture?.stopAndFlush();
@@ -553,7 +567,10 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       setProgramDir: (dir: string) => {
         programDir = dir;
       },
-      ...(workspaceStore !== undefined ? { workspace: workspaceStore } : {}),
+      // Always present now: hydrate must run BEFORE the program, but whether anything compounds
+      // isn't known until the run's agent() calls have registered their memory dirs. A run that
+      // selects nothing persists nothing and pays for nothing (WorkspaceStore.persist returns early).
+      workspace: workspaceStore,
       // The orchestrator reaps every still-open browser session on terminal (kill Chromium + its
       // Playwright MCP) so no browser process leaks past the run.
       ...(browserSessions !== undefined ? { browserSessions } : {}),
@@ -563,6 +580,13 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
   };
 
   return {
+    // The two filesystem coordinates, both explicit (docs/WORKSPACE_PERSISTENCE.md I1/I2). The
+    // workspace is cwd + HOME for author code; the program extracts OUTSIDE it, so no snapshot ever
+    // captures the bundle. Neither is `process.cwd()` — deriving them from it is exactly how the
+    // hosted lanes drifted (the fleet boots bwinit as PID 1 with cwd `/`; Fargate's image left cwd
+    // at `/app`), and how a bundle would land inside a persisted workspace on the lanes that hadn't.
+    workspaceRoot: runtime.workspaceRoot,
+    programRoot: runtime.programRoot,
     runs: {
       // The broker owns the lease duration server-side; convert the absolute lease back to seconds.
       claimForWorker: async (_runId, workerId, leaseUntil, nowMs) => {
@@ -787,6 +811,10 @@ export async function main(): Promise<void> {
   const deps = assembleWorkerDeps({
     workerId: process.env.WORKER_ID ?? `worker-${runId}`,
     workspaceRoot: process.env.WORKSPACE_ROOT ?? "/workspace",
+    // Never inside the workspace, and never `process.cwd()` (WORKSPACE_PERSISTENCE.md I2). `tmpdir()`
+    // honors TMPDIR, which the self-hosted daemon points at the per-run dir — so concurrent daemons on
+    // one machine don't collide, and the hosted lanes get the VM's own /tmp.
+    programRoot: process.env.PROGRAM_ROOT ?? join(tmpdir(), "bw-programs"),
     runId,
     controlPlane: platform.controlPlane,
     vcpus: platform.vcpus,

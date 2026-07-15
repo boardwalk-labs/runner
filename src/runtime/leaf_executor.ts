@@ -98,6 +98,11 @@ export interface EngineLeafExecutorDeps {
   makeEventSink: EventSinkFactory;
   /** The run's persistent `/workspace` root — memory dirs (`agent({ memory })`) are relative to it. */
   workspaceRoot: string;
+  /** Register a memory dir the run actually used, so the workspace store persists it (§3 of
+   *  docs/WORKSPACE_PERSISTENCE.md). Memory is undeclared by design, so this callback is the ONLY
+   *  signal that the dir must compound — without it a `agent({ memory })`-only workflow silently
+   *  persists nothing, which is exactly what shipped. Optional: absent ⇒ validation only. */
+  onMemoryUsed?: (dir: string) => void;
   /** Resolves the directory holding this run's bundled files (the extracted program tree, where a
    *  skill lives at `skills/<name>.md`). Known only once the artifact is extracted (mid-run), so it's
    *  a thunk. Null / omitted ⇒ a leaf that names `skills` fails loud. */
@@ -283,15 +288,18 @@ export class EngineLeafExecutor implements LeafExecutor {
         });
       },
 
-      // A memory dir (`agent({ memory })`) is workspace-relative; the run's whole `/workspace` is
-      // already persisted by the worker when the manifest opts in (workspace.persist), so this only
-      // needs to validate the dir is inside the workspace (defense-in-depth) — there is no separate
-      // per-dir snapshot to register. The engine's buildToolSet already shape-validates the path.
+      // A memory dir (`agent({ memory })`) is workspace-relative and is persisted BECAUSE this hook
+      // registers it — memory carries no manifest declaration (`sdk/src/types.ts`), so this is the
+      // only signal the workspace store gets. It used to only validate, on the assumption that the
+      // whole workspace was persisted "when the manifest opts in": true for `persist: true`, and
+      // false for every other case, so memory silently evaporated on hosted runs. Validate first
+      // (defense-in-depth; the engine's buildToolSet already shape-validates), then register.
       memoryUsed: (dir: string): void => {
         const abs = join(this.deps.workspaceRoot, dir);
         if (abs !== this.deps.workspaceRoot && !abs.startsWith(this.deps.workspaceRoot + "/")) {
           throw new EngineError("VALIDATION", `agent() memory dir "${dir}" escapes the workspace.`);
         }
+        this.deps.onMemoryUsed?.(dir);
       },
 
       // OAuth bearer brokering for a hosted MCP server. Called REACTIVELY by the engine — only after a

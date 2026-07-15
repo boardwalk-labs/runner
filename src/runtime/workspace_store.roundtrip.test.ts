@@ -8,12 +8,15 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   WorkspaceStore,
   TarWorkspaceArchiver,
   NodeWorkspaceFs,
+  resolvePersistSelection,
+  type PersistSelection,
   type WorkspaceBrokerTransport,
 } from "./workspace_store.js";
 
@@ -37,13 +40,19 @@ function memoryBroker(): WorkspaceBrokerTransport & { peek(): Uint8Array | null 
   };
 }
 
-function makeStore(broker: WorkspaceBrokerTransport, workspaceRoot: string, tmpPath: string) {
+function makeStore(
+  broker: WorkspaceBrokerTransport,
+  workspaceRoot: string,
+  tmpPath: string,
+  selection: PersistSelection = true,
+) {
   return new WorkspaceStore({
     broker,
     archiver: new TarWorkspaceArchiver(),
     fs: new NodeWorkspaceFs(),
     workspaceRoot,
     tmpPath,
+    selection: () => selection,
   });
 }
 
@@ -112,5 +121,85 @@ describe("workspace persistence round-trip (real tar + fs)", () => {
     await mkdir(c, { recursive: true });
     await makeStore(broker, c, join(scratch, "tc.tgz")).hydrate();
     expect(await readFile(join(c, "state.txt"), "utf8")).toBe("v2");
+  });
+});
+
+// The list + memory forms, end to end through REAL tar. Before this, `persist: ["state"]` and
+// `agent({ memory })` persisted NOTHING on hosted, silently — the SDK validated the list, the docs
+// promised it, the engine implemented it, and the runner dropped it at a `=== true` gate. A
+// round-trip is the only test that can catch that, because the control-flow tests mock the archiver.
+describe("workspace persistence — selective persist (real tar + fs)", () => {
+  let scratch: string;
+  beforeEach(async () => {
+    scratch = await mkdtemp(join(tmpdir(), "bw-ws-sel-"));
+  });
+  afterEach(async () => {
+    await rm(scratch, { recursive: true, force: true });
+  });
+
+  it("carries ONLY the declared dirs across runs, leaving scratch behind", async () => {
+    const broker = memoryBroker();
+    const run1Ws = join(scratch, "run1");
+    const run2Ws = join(scratch, "run2");
+
+    await mkdir(join(run1Ws, "state"), { recursive: true });
+    await mkdir(join(run1Ws, "node_modules", "left-pad"), { recursive: true });
+    await writeFile(join(run1Ws, "state", "x.json"), '{"seen":3}');
+    await writeFile(join(run1Ws, "node_modules", "left-pad", "index.js"), "// huge scratch");
+    await writeFile(join(run1Ws, "scratch.txt"), "discard me");
+
+    await makeStore(broker, run1Ws, join(scratch, "t1.tgz"), ["state"]).persist();
+
+    await mkdir(run2Ws, { recursive: true });
+    await makeStore(broker, run2Ws, join(scratch, "t2.tgz"), ["state"]).hydrate();
+
+    // The declared dir compounds...
+    expect(await readFile(join(run2Ws, "state", "x.json"), "utf8")).toBe('{"seen":3}');
+    // ...and the rest of the workspace stayed scratch, which is the whole point of the list form:
+    // a `persist: true` workflow would have tarred node_modules to S3 on every run.
+    expect(existsSync(join(run2Ws, "scratch.txt"))).toBe(false);
+    expect(existsSync(join(run2Ws, "node_modules"))).toBe(false);
+  });
+
+  it("carries an agent({ memory }) dir across runs with NO manifest declaration", async () => {
+    const broker = memoryBroker();
+    const run1Ws = join(scratch, "run1");
+    const run2Ws = join(scratch, "run2");
+
+    // What the engine's memory tools write, and what the runner's `memoryUsed` hook registers.
+    await mkdir(join(run1Ws, "triager"), { recursive: true });
+    await writeFile(join(run1Ws, "triager", "notes.md"), "# what I learned");
+
+    // resolvePersistSelection(undefined, {"triager"}) — the manifest declared nothing at all.
+    const selection = resolvePersistSelection(undefined, new Set(["triager"]));
+    await makeStore(broker, run1Ws, join(scratch, "t1.tgz"), selection).persist();
+
+    await mkdir(run2Ws, { recursive: true });
+    await makeStore(broker, run2Ws, join(scratch, "t2.tgz"), selection).hydrate();
+
+    expect(await readFile(join(run2Ws, "triager", "notes.md"), "utf8")).toBe("# what I learned");
+  });
+
+  it("persists a nested dir path (`memory/triager`) in place", async () => {
+    const broker = memoryBroker();
+    const run1Ws = join(scratch, "run1");
+    const run2Ws = join(scratch, "run2");
+    await mkdir(join(run1Ws, "memory", "triager"), { recursive: true });
+    await writeFile(join(run1Ws, "memory", "triager", "seen.json"), "[1,2]");
+
+    await makeStore(broker, run1Ws, join(scratch, "t1.tgz"), ["memory/triager"]).persist();
+    await mkdir(run2Ws, { recursive: true });
+    await makeStore(broker, run2Ws, join(scratch, "t2.tgz"), ["memory/triager"]).hydrate();
+
+    expect(await readFile(join(run2Ws, "memory", "triager", "seen.json"), "utf8")).toBe("[1,2]");
+  });
+
+  it("uploads nothing when the selection is empty (the no-persistence common case)", async () => {
+    const broker = memoryBroker();
+    const ws = join(scratch, "run1");
+    await mkdir(ws, { recursive: true });
+    await writeFile(join(ws, "scratch.txt"), "x");
+    expect(await makeStore(broker, ws, join(scratch, "t1.tgz"), []).persist()).toBe(0);
+    expect(broker.peek()).toBeNull();
   });
 });

@@ -31,10 +31,36 @@ const exec = promisify(execFile);
  *  purely a guardrail, like the run budget's `max_usd`. */
 export const WORKSPACE_SNAPSHOT_MAX_BYTES = 512 * 1024 * 1024;
 
+/** What a run persists: the WHOLE workspace, or exactly these workspace-relative dirs (possibly none). */
+export type PersistSelection = true | readonly string[];
+
+/**
+ * Resolve what this run persists (docs/WORKSPACE_PERSISTENCE.md §3): the manifest's declaration
+ * UNIONED with every `agent({ memory })` dir the run actually used.
+ *
+ * The union is why this is resolved at PERSIST time, not construction time: memory dirs are
+ * undeclared by design (`sdk/src/types.ts` — "`mcp` servers, `skills`, and `memory` — the manifest
+ * declares none of them"), so they are only known once the run has made the agent calls. A workflow
+ * whose manifest says nothing at all still persists, iff it used memory.
+ *
+ * `true` swallows the list: the whole workspace already contains every memory dir. An empty array
+ * means persist nothing, which is the common case and must stay cheap.
+ */
+export function resolvePersistSelection(
+  declared: boolean | readonly string[] | undefined,
+  memoryDirs: ReadonlySet<string>,
+): PersistSelection {
+  if (declared === true) return true;
+  const list = declared === undefined || declared === false ? [] : declared;
+  return [...new Set([...list, ...memoryDirs])];
+}
+
 /** tar+gzip a directory to a file / extract one. Shells out to `tar` in production; injected in tests. */
 export interface WorkspaceArchiver {
-  /** Create a gzipped tar of `dir`'s CONTENTS at `destPath`; resolve to the archive's byte size. */
-  archive(dir: string, destPath: string): Promise<number>;
+  /** Create a gzipped tar of `dir`'s CONTENTS at `destPath`; resolve to the archive's byte size.
+   *  `paths` (workspace-relative, already filtered to those that exist) narrows the archive to
+   *  exactly those entries — the `persist: [...]` form. Omitted ⇒ the whole tree (`persist: true`). */
+  archive(dir: string, destPath: string, paths?: readonly string[]): Promise<number>;
   /** Extract a gzipped tar `srcPath` into `dir` (created if absent). */
   extract(srcPath: string, dir: string): Promise<void>;
 }
@@ -54,6 +80,10 @@ export interface WorkspaceFs {
   readFile(path: string): Promise<Uint8Array>;
   writeFile(path: string, data: Uint8Array): Promise<void>;
   rm(path: string): Promise<void>;
+  /** Does this path exist? Used to narrow a `persist: [...]` selection to the dirs the run actually
+   *  created — `tar` fails the whole archive on one missing member, and a declared-but-unused dir is
+   *  normal (a workflow declares `["cache", "index"]` and only writes `cache` on its first run). */
+  exists(path: string): Promise<boolean>;
 }
 
 export interface WorkspaceStoreDeps {
@@ -62,6 +92,9 @@ export interface WorkspaceStoreDeps {
   fs: WorkspaceFs;
   /** The `/workspace` root to snapshot/restore. */
   workspaceRoot: string;
+  /** What to persist, read AT PERSIST TIME (see {@link resolvePersistSelection}) — the run's memory
+   *  dirs aren't known until its agent calls have run, so this cannot be a construction-time value. */
+  selection: () => PersistSelection;
   /** Scratch path for the in-flight tarball. */
   tmpPath?: string;
   /** Snapshot tarballs larger than this are skipped (logged). Defaults to {@link WORKSPACE_SNAPSHOT_MAX_BYTES}. */
@@ -109,8 +142,15 @@ export class WorkspaceStore {
    *  only redundant archive is a self-hosted+persist run, where the broker returns a null URL. */
   async persist(): Promise<number> {
     try {
+      // What this run actually compounds: the manifest's declaration ∪ the memory dirs it used.
+      // Nothing selected is the common case (a workflow that opted into neither) — return before any
+      // fs or broker work, so persistence costs a run that doesn't use it precisely nothing.
+      const selection = this.deps.selection();
+      const paths = selection === true ? undefined : await this.presentPaths(selection);
+      if (paths !== undefined && paths.length === 0) return 0;
+
       await mkdir(dirname(this.tmpPath), { recursive: true }); // per-run TMPDIR may not exist yet
-      const size = await this.deps.archiver.archive(this.deps.workspaceRoot, this.tmpPath);
+      const size = await this.deps.archiver.archive(this.deps.workspaceRoot, this.tmpPath, paths);
       // Guardrail: an oversized snapshot is dropped (logged), never read into memory or uploaded — the
       // workflow re-does filesystem work next run, as it would without persistence. Checked on the
       // on-disk archive size so the big tarball never hits the worker's heap.
@@ -139,13 +179,29 @@ export class WorkspaceStore {
       return 0;
     }
   }
+
+  /** Narrow a selection to the dirs that exist: `tar` fails the whole archive on one missing member,
+   *  and declaring a dir the run hasn't written yet is ordinary (first run of `persist: ["cache"]`). */
+  private async presentPaths(selection: readonly string[]): Promise<string[]> {
+    const checked = await Promise.all(
+      selection.map(async (p) =>
+        (await this.deps.fs.exists(join(this.deps.workspaceRoot, p))) ? p : null,
+      ),
+    );
+    return checked.filter((p): p is string => p !== null);
+  }
 }
 
 /** Production archiver — shells out to the runner image's `tar` (the runner has full shell tooling). */
 export class TarWorkspaceArchiver implements WorkspaceArchiver {
-  async archive(dir: string, destPath: string): Promise<number> {
-    // `-C dir .` archives the CONTENTS of dir (not the dir itself), so extract restores it in place.
-    await exec("tar", ["czf", destPath, "-C", dir, "."]);
+  async archive(dir: string, destPath: string, paths?: readonly string[]): Promise<number> {
+    // `-C dir <members>` archives relative to dir, so extract restores in place either way: `.` for
+    // the whole tree (`persist: true`), or exactly the named dirs (`persist: [...]` ∪ memory dirs).
+    // Members are workspace-relative and schema-validated (no `..`, no absolute, no backslashes —
+    // sdk/src/manifest.ts `persistPath`) and pre-filtered to those that exist; `--` keeps a name
+    // that starts with `-` from being read as a flag.
+    const members = paths === undefined ? ["."] : [...paths];
+    await exec("tar", ["czf", destPath, "-C", dir, "--", ...members]);
     return (await stat(destPath)).size;
   }
 
@@ -171,6 +227,9 @@ export class NodeWorkspaceFs implements WorkspaceFs {
   }
   rm(path: string): Promise<void> {
     return rm(path, { force: true });
+  }
+  async exists(path: string): Promise<boolean> {
+    return (await stat(path).catch(() => null)) !== null;
   }
 }
 

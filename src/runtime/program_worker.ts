@@ -165,6 +165,11 @@ export type LeaseWatchStarter = (args: { run: Run; onLost: () => void }) => RunS
 export interface ProgramWorkerDeps {
   runs: RunClaimer;
   versions: ProgramVersionReader;
+  /** The run's `/workspace` — cwd + HOME for author code (docs/WORKSPACE_PERSISTENCE.md I1), and the
+   *  tree `workspace.persist` archives. Passed through to the program runner. */
+  workspaceRoot: string;
+  /** Where the program artifact extracts — OUTSIDE the workspace (I2). Passed through to the runner. */
+  programRoot: string;
   /** Download the program artifact bytes from the broker's presigned URL (broker.downloadBytes). */
   fetchProgram: (downloadUrl: string) => Promise<Uint8Array>;
   /** Extract a gzipped tar into a dir (system `tar`); passed through to the program runner. */
@@ -376,6 +381,8 @@ export async function runProgramWorker(
       // onOutput emits the `output` activity entry into the run's log when the program declared one.
       {
         host,
+        workspaceRoot: deps.workspaceRoot,
+        programRoot: deps.programRoot,
         redactText: (text) => redactor.redactText(text),
         extract: deps.extractArchive,
         ...(setProgramDir !== undefined ? { onExtracted: setProgramDir } : {}),

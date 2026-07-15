@@ -57,6 +57,7 @@ function runtime(): WorkerRuntime {
   return {
     workerId: "task-arn-123",
     workspaceRoot: "/workspace",
+    programRoot: "/tmp/bw-programs",
     runId: "run-test",
     controlPlane: {
       baseUrl: "https://api.boardwalk.sh",

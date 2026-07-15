@@ -3,8 +3,8 @@
 // A run is the execution of a built program ARTIFACT: the worker is handed the VERIFIED tarball
 // (its sha256 already checked against the pinned digest by the orchestrator) plus the entry module
 // name. This module is the mechanism: it installs the host adapter + trigger payload onto the
-// `@boardwalk-labs/workflow` singleton, extracts the artifact into a unique temp dir under a
-// node_modules-reachable root, and dynamic-imports the entry so the program's body runs. The
+// `@boardwalk-labs/workflow` singleton, extracts the artifact into a unique temp dir under the
+// program root, chdirs to the workspace, and dynamic-imports the entry so the program's body runs. The
 // program's `import { agent, sleep, … } from "@boardwalk-labs/workflow"` resolves to the SAME package
 // instance the host was installed on (one instance per process), so the hooks reach our adapter.
 //
@@ -13,16 +13,20 @@
 // `@boardwalk-labs/workflow` is left external in the bundle, so the imported program resolves it to the SDK
 // package present in the worker image (giving up its own copy would break the dual-adapter).
 //
-// Why a temp dir under a node_modules-reachable root (not os.tmpdir): the program imports the bare
-// specifier `@boardwalk-labs/workflow`, which Node resolves by walking up from the module's location to
-// `node_modules`. The extracted tree must therefore live inside the app tree (/app/.bw-runs/*).
+// Two places, both explicit, neither derived from `process.cwd()` (docs/WORKSPACE_PERSISTENCE.md I1/I2):
+//   - `workspaceRoot` — the run's `/workspace`. The working directory + HOME for AUTHOR code, so a
+//     relative write is the correct write and lands in what `workspace.persist` archives.
+//   - `programRoot`   — where the artifact extracts (`<programRoot>/.bw-runs/<runId>-<uuid>`). Must be
+//     OUTSIDE the workspace, or the bundle rides into every snapshot and accumulates across runs.
+// The extracted tree needs no node_modules-reachable ancestor: `ensureSdkLink` (below) links the SDK
+// into the exec dir, so the bare `@boardwalk-labs/workflow` import resolves from any root.
 //
 // Durability: the body runs once, in-process. `sleep`/`workflows.call` hold in-process via the host
 // (no checkpoint, no exit). A crash mid-run restarts the run from the top (handled by the
 // worker/scheduler-sweep, not here). Output capture is deferred (v0 returns null).
 
 import { mkdir, writeFile, rm, symlink, lstat } from "node:fs/promises";
-import { dirname, join, isAbsolute, relative, sep } from "node:path";
+import { dirname, join, isAbsolute, relative, resolve, sep } from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -42,13 +46,15 @@ const log = createLogger("ProgramRunner");
 const RUN_DIR = ".bw-runs";
 
 /**
- * Link THIS runtime's `@boardwalk-labs/workflow` into the exec dir's `node_modules` so the
- * program's bare import resolves anywhere (a self-hosted daemon workspace has no ancestor
- * `node_modules`; hosted images do, making the link a harmless no-op there). A symlink — not a
- * copy — is load-bearing: Node resolves it to the REAL path, so the program gets the same
- * module instance the host adapter was installed on (the singleton contract). `junction` covers
- * Windows without elevation; a failed link is only logged, since a resolvable ancestor may
- * still exist.
+ * Link THIS runtime's `@boardwalk-labs/workflow` into the exec dir's `node_modules` so the program's
+ * bare import resolves from ANY program root — this link, not an ancestor `node_modules`, is what
+ * makes resolution work. (Worth stating plainly: a stale comment claiming the extraction dir had to
+ * sit under `/app` so the import could walk up to `/app/node_modules` outlived this function by
+ * several versions and sent a later reader chasing a dependency that no longer exists. The live
+ * fleet has no `/app` at all and resolves fine.) A symlink — not a copy — is load-bearing: Node
+ * resolves it to the REAL path, so the program gets the same module instance the host adapter was
+ * installed on (the singleton contract). `junction` covers Windows without elevation; a failed link
+ * is only logged, since a resolvable ancestor may still exist.
  */
 export async function ensureSdkLink(execDir: string): Promise<void> {
   // A program tarball that ships its own `node_modules/@boardwalk-labs/workflow` would shadow the
@@ -103,6 +109,25 @@ export function resolveEntryPath(dir: string, entry: string): string {
 /** Scratch filename for the in-flight artifact tarball inside a run's dir. */
 const ARTIFACT_FILE = "__program.tgz";
 
+/**
+ * Enforce I2: the extracted program must not live inside the run's workspace. Incidental separation
+ * is what broke before — the extraction root used to be `process.cwd()`, so it landed inside the
+ * workspace on exactly the lanes whose cwd was already correct. Compares RESOLVED paths, and treats
+ * "the workspace itself" as inside.
+ */
+export function assertProgramRootOutsideWorkspace(
+  programRoot: string,
+  workspaceRoot: string,
+): void {
+  const rel = relative(resolve(workspaceRoot), resolve(programRoot));
+  if (rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel))) {
+    throw new AppError(
+      ErrorCode.VALIDATION_FAILED,
+      `The program root "${programRoot}" is inside the workspace "${workspaceRoot}"; the extracted program must live outside it.`,
+    );
+  }
+}
+
 export interface RunProgramArgs {
   /** Run id — used for the temp dir path + correlation. */
   runId: string;
@@ -121,6 +146,18 @@ export interface ProgramRunnerDeps {
   /** The host adapter the program's hooks delegate to (agent leaf, sleep hold, child calls, secrets). */
   host: WorkflowHost;
   /**
+   * The run's `/workspace` — the working directory AND `HOME` for author code (I1). Must already
+   * exist (the orchestrator's `ensureWorkspace` guarantees it); a missing workspace fails the run
+   * loudly rather than silently running from wherever the process happened to start.
+   */
+  workspaceRoot: string;
+  /**
+   * Root the program artifact extracts under. MUST be outside {@link workspaceRoot} (I2) — enforced,
+   * because a bundle inside the workspace is tarred into every pre-sleep snapshot and, since each
+   * run's dir name is unique, accumulates there forever.
+   */
+  programRoot: string;
+  /**
    * Extract a gzipped tar file into a directory (created already). System `tar` in production
    * (matches WorkspaceArchiver); injected in tests. The artifact's relative layout is preserved so
    * on-disk assets (markdown skills, templates) sit where the program expects them.
@@ -132,12 +169,6 @@ export interface ProgramRunnerDeps {
    * (`<dir>/skills/<name>.md`). Optional — the local/test path may omit it.
    */
   onExtracted?: (programDir: string) => void;
-  /**
-   * Root whose tree can resolve `@boardwalk-labs/workflow` (has `node_modules` reachable). The extracted
-   * program lives under here so its bare SDK import resolves to the same package instance the host
-   * was installed on. Defaults to `process.cwd()`.
-   */
-  workRoot?: string;
   /**
    * Scrubs known secret values out of a string (the run's `SecretRedactor.redactText`). Applied to a
    * top-level throw's message before it is logged AND before it is returned to the worker — a program
@@ -171,14 +202,14 @@ export async function runWorkflowProgram(
   args: RunProgramArgs,
   deps: ProgramRunnerDeps,
 ): Promise<ProgramResult> {
-  const workRoot = deps.workRoot ?? process.cwd();
-  const dir = join(workRoot, RUN_DIR, `${args.runId}-${randomUUID()}`);
+  const dir = join(deps.programRoot, RUN_DIR, `${args.runId}-${randomUUID()}`);
 
   installHost(deps.host);
   installInput(args.input);
   // The run row's config is arbitrary JSON (jsonb); it IS valid JSON, so narrow to the SDK's JsonValue.
   installConfig(args.config as Record<string, JsonValue>);
   try {
+    assertProgramRootOutsideWorkspace(deps.programRoot, deps.workspaceRoot);
     await mkdir(dir, { recursive: true });
     const tgzPath = join(dir, ARTIFACT_FILE);
     await writeFile(tgzPath, args.tarball);
@@ -229,13 +260,43 @@ export async function runWorkflowProgram(
  * result; a program failure THROWS and is handled by the caller. A unique dir per run gives a
  * fresh URL so the module cache never returns an already-run program; `@vite-ignore` keeps
  * vitest/vite from statically analyzing the runtime URL.
+ *
+ * The chdir to the workspace (I1) happens HERE, at the boundary where author code starts, and only
+ * after the artifact is extracted from {@link ProgramRunnerDeps.programRoot} — so the program's
+ * files land in the workspace while the bundle stays out of it. Module resolution is unaffected:
+ * Node resolves file-relative (the entry is imported by absolute URL, the SDK via `ensureSdkLink`),
+ * never cwd-relative. The engine's local path has run exactly this shape since dev-on-engine
+ * (`boardwalk/src/run/child.ts`), and the self-hosted daemon spawns with the same cwd.
  */
 async function runProgramBody(entryPath: string, deps: ProgramRunnerDeps): Promise<ProgramResult> {
-  await import(/* @vite-ignore */ pathToFileURL(entryPath).href);
-  // The program declares its result via `output(value)` (top-level code can't `return`); null when it
-  // never called it. This becomes the run's persisted output + a `workflows.call` parent's value, and
-  // (when actually declared) an `output` entry in the run's activity log.
-  const declared = takeDeclaredOutput();
-  if (declared !== null) deps.onOutput?.(declared.value);
-  return { kind: "completed", output: declared !== null ? declared.value : null };
+  const callerCwd = process.cwd();
+  try {
+    process.chdir(deps.workspaceRoot);
+  } catch (err) {
+    // Fail loud. Running author code from an arbitrary cwd is what silently threw writes away.
+    throw new AppError(
+      ErrorCode.VALIDATION_FAILED,
+      `The run's workspace "${deps.workspaceRoot}" is not usable as the working directory: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  try {
+    await import(/* @vite-ignore */ pathToFileURL(entryPath).href);
+    // The program declares its result via `output(value)` (top-level code can't `return`); null when it
+    // never called it. This becomes the run's persisted output + a `workflows.call` parent's value, and
+    // (when actually declared) an `output` entry in the run's activity log.
+    const declared = takeDeclaredOutput();
+    if (declared !== null) deps.onOutput?.(declared.value);
+    return { kind: "completed", output: declared !== null ? declared.value : null };
+  } finally {
+    // One run per process in production, so this matters for tests + the local/dev path — but a
+    // function that permanently moves its caller's cwd is a trap either way. Best-effort: the caller's
+    // dir may itself be gone, and that must not mask the run's real outcome.
+    try {
+      process.chdir(callerCwd);
+    } catch {
+      /* the caller's cwd vanished mid-run; nothing useful to do */
+    }
+  }
 }

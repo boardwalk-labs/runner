@@ -8,6 +8,8 @@ import {
   WorkspaceStore,
   WORKSPACE_SNAPSHOT_MAX_BYTES,
   TarWorkspaceArchiver,
+  resolvePersistSelection,
+  type PersistSelection,
   type WorkspaceArchiver,
   type WorkspaceBrokerTransport,
   type WorkspaceFs,
@@ -20,7 +22,7 @@ interface Recorder {
   uploads: { url: string; headers: Record<string, string>; bytes: number }[];
   downloads: string[];
   extracts: { src: string; dir: string }[];
-  archives: { dir: string; dest: string }[];
+  archives: { dir: string; dest: string; paths?: readonly string[] | undefined }[];
   writes: { path: string; bytes: number }[];
   rms: string[];
 }
@@ -32,6 +34,8 @@ function recorder(
     persistUrl?: { url: string; contentType: string } | null;
     archiveThrows?: boolean;
     archiveSize?: number;
+    /** Workspace-relative paths the fake fs reports as ABSENT (a declared-but-never-written dir). */
+    absentPaths?: readonly string[];
   } = {},
 ): Recorder {
   const uploads: Recorder["uploads"] = [];
@@ -61,9 +65,9 @@ function recorder(
     },
   };
   const archiver: WorkspaceArchiver = {
-    archive: (dir, dest) => {
+    archive: (dir, dest, paths) => {
       if (over.archiveThrows === true) return Promise.reject(new Error("tar failed"));
-      archives.push({ dir, dest });
+      archives.push({ dir, dest, paths });
       return Promise.resolve(over.archiveSize ?? 42);
     },
     extract: (src, dir) => {
@@ -81,17 +85,22 @@ function recorder(
       rms.push(path);
       return Promise.resolve();
     },
+    // Every declared dir exists unless a test says otherwise.
+    exists: (path) => Promise.resolve(!(over.absentPaths ?? []).some((p) => path.endsWith(p))),
   };
   return { broker, archiver, fs, uploads, downloads, extracts, archives, writes, rms };
 }
 
-function store(r: Recorder): WorkspaceStore {
+/** `selection` defaults to `true` (persist the whole workspace) — the form these tests predate the
+ *  list for, and the only one the store used to support. */
+function store(r: Recorder, selection: PersistSelection = true): WorkspaceStore {
   return new WorkspaceStore({
     broker: r.broker,
     archiver: r.archiver,
     fs: r.fs,
     workspaceRoot: "/workspace",
     tmpPath: "/tmp/ws.tgz",
+    selection: () => selection,
   });
 }
 
@@ -170,6 +179,7 @@ describe("WorkspaceStore.persist", () => {
       workspaceRoot: "/workspace",
       tmpPath: "/tmp/ws.tgz",
       maxSnapshotBytes: 50,
+      selection: () => true,
     });
     expect(await s.persist()).toBe(0);
     expect(r.uploads).toEqual([]);
@@ -184,6 +194,7 @@ describe("WorkspaceStore default scratch path", () => {
       archiver: r.archiver,
       fs: r.fs,
       workspaceRoot: "/workspace",
+      selection: () => true,
       // no tmpPath → default
     });
     await s.persist();
@@ -233,5 +244,74 @@ describe("TarWorkspaceArchiver (real tar) — extraction hardening", () => {
     await rm(stage, { recursive: true, force: true });
     await rm(parent, { recursive: true, force: true });
     await rm(tgz, { force: true });
+  });
+});
+
+// The selection is the half of the contract the hosted runner never implemented: the SDK validates
+// and documents `persist: ["cache"]`, the engine honors it, and the runner dropped it on the floor
+// at a `=== true` construction gate — so a workflow that declared a list persisted NOTHING, silently.
+// Memory dirs are the same defect from the other side: undeclared by design, so a manifest-shaped
+// gate could never see them. See docs/WORKSPACE_PERSISTENCE.md §3 + §8.
+describe("resolvePersistSelection", () => {
+  it("persists nothing when nothing is declared and no memory was used", () => {
+    expect(resolvePersistSelection(undefined, new Set())).toEqual([]);
+    expect(resolvePersistSelection(false, new Set())).toEqual([]);
+  });
+
+  it("persists the declared list", () => {
+    expect(resolvePersistSelection(["cache", "index"], new Set())).toEqual(["cache", "index"]);
+  });
+
+  it("persists a memory dir with NO declaration at all (memory is undeclared by design)", () => {
+    expect(resolvePersistSelection(undefined, new Set(["triager"]))).toEqual(["triager"]);
+  });
+
+  it("unions the declared list with the run's memory dirs, deduplicated", () => {
+    expect(resolvePersistSelection(["cache", "triager"], new Set(["triager", "notes"]))).toEqual([
+      "cache",
+      "triager",
+      "notes",
+    ]);
+  });
+
+  it("lets `true` swallow the list — the whole workspace already contains every memory dir", () => {
+    expect(resolvePersistSelection(true, new Set(["triager"]))).toBe(true);
+  });
+});
+
+describe("WorkspaceStore.persist — honoring the selection", () => {
+  it("archives the WHOLE workspace for `true` (no member list)", async () => {
+    const r = recorder();
+    await store(r, true).persist();
+    expect(r.archives).toEqual([{ dir: "/workspace", dest: "/tmp/ws.tgz", paths: undefined }]);
+  });
+
+  it("archives ONLY the selected dirs for a list", async () => {
+    const r = recorder();
+    await store(r, ["cache", "memory/triager"]).persist();
+    expect(r.archives[0]?.paths).toEqual(["cache", "memory/triager"]);
+  });
+
+  it("does no fs, tar, or broker work at all when nothing is selected", async () => {
+    const r = recorder();
+    expect(await store(r, []).persist()).toBe(0);
+    expect(r.archives).toEqual([]);
+    expect(r.uploads).toEqual([]);
+    // The common case (a workflow using no persistence) must cost a run precisely nothing.
+    expect(r.writes).toEqual([]);
+  });
+
+  it("drops a declared-but-never-written dir rather than failing the whole archive", async () => {
+    // `tar` fails the entire archive on one missing member, and declaring `["cache", "index"]` while
+    // only ever writing `cache` is ordinary — so the absent member is filtered, not fatal.
+    const r = recorder({ absentPaths: ["index"] });
+    await store(r, ["cache", "index"]).persist();
+    expect(r.archives[0]?.paths).toEqual(["cache"]);
+  });
+
+  it("skips the upload when every selected dir is absent", async () => {
+    const r = recorder({ absentPaths: ["cache"] });
+    expect(await store(r, ["cache"]).persist()).toBe(0);
+    expect(r.uploads).toEqual([]);
   });
 });

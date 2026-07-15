@@ -73,24 +73,120 @@ function recordingHost(overrides: Partial<WorkflowHost> = {}): Recorder {
   return rec;
 }
 
-/** Build `source` into a real artifact, then run it through the runner with a real `tar` extractor. */
+/** Temp dirs made by {@link runSource}, removed after each test. */
+const tmpDirs: string[] = [];
+async function mkTmp(prefix: string): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  tmpDirs.push(dir);
+  // macOS `os.tmpdir()` is a symlink (/var → /private/var) and `process.cwd()` reports the REAL
+  // path, so resolve here or every cwd assertion compares a symlink to its target.
+  return fs.realpath(dir);
+}
+afterEach(async () => {
+  await Promise.all(tmpDirs.splice(0).map((d) => fs.rm(d, { recursive: true, force: true })));
+});
+
+/** Build `source` into a real artifact, then run it through the runner with a real `tar` extractor.
+ *  A real workspace + program root are created per run unless the test pins its own — so EVERY test
+ *  here exercises the real chdir contract (WORKSPACE_PERSISTENCE.md I1), not just the ones asserting it. */
 async function runSource(
   runId: string,
   source: string,
   input: unknown,
-  deps: Omit<ProgramRunnerDeps, "extract">,
+  deps: Omit<ProgramRunnerDeps, "extract" | "workspaceRoot" | "programRoot"> &
+    Partial<Pick<ProgramRunnerDeps, "workspaceRoot" | "programRoot">>,
 ) {
   const built = buildSingleFileArtifact(source);
+  const workspaceRoot = deps.workspaceRoot ?? (await mkTmp("bw-ws-"));
+  const programRoot = deps.programRoot ?? (await mkTmp("bw-prog-"));
   return runWorkflowProgram(
     { runId, tarball: built.tarball, entry: built.entry, input, config: {} },
     {
       ...deps,
+      workspaceRoot,
+      programRoot,
       extract: async (tgzPath, destDir) => {
         await tarExtract({ file: tgzPath, cwd: destDir });
       },
     },
   );
 }
+
+// The contract that had to exist and didn't: `/workspace` is the working directory for author code,
+// and the program bundle lives OUTSIDE it. Nothing asserted either, which is how the hosted lanes
+// silently drifted (fleet cwd `/`, Fargate cwd `/app`) while dev + self-hosted stayed correct, and how
+// a documented contract turned into silent data loss. See docs/WORKSPACE_PERSISTENCE.md §2 + §8.
+describe("runWorkflowProgram — the workspace IS the working directory (WORKSPACE_PERSISTENCE.md I1/I2)", () => {
+  it("runs author code with cwd === workspaceRoot", async () => {
+    const workspaceRoot = await mkTmp("bw-ws-");
+    const source = `
+      import { output } from "@boardwalk-labs/workflow";
+      output(process.cwd());
+    `;
+    const res = await runSource("run_cwd", source, null, {
+      host: recordingHost().host,
+      workspaceRoot,
+    });
+    expect(outputOf(res)).toBe(workspaceRoot);
+  });
+
+  it("lands a program's RELATIVE write in the workspace (the silent-data-loss path)", async () => {
+    const workspaceRoot = await mkTmp("bw-ws-");
+    const source = `
+      import { writeFileSync, mkdirSync } from "node:fs";
+      mkdirSync("state", { recursive: true });
+      writeFileSync("state/x.json", JSON.stringify({ ok: true }));
+    `;
+    const res = await runSource("run_rel", source, null, {
+      host: recordingHost().host,
+      workspaceRoot,
+    });
+
+    expect(res.kind).toBe("completed");
+    // The whole bug in one assertion: this file used to land at `/state/x.json` on the fleet and
+    // `/app/state/x.json` on Fargate, so `workspace.persist` archived nothing and the write was lost.
+    expect(existsSync(join(workspaceRoot, "state", "x.json"))).toBe(true);
+  });
+
+  it("keeps the extracted program OUT of the workspace, so no snapshot can capture it (I2)", async () => {
+    const workspaceRoot = await mkTmp("bw-ws-");
+    const source = `
+      import { writeFileSync } from "node:fs";
+      writeFileSync("only.txt", "x");
+    `;
+    await runSource("run_iso", source, null, { host: recordingHost().host, workspaceRoot });
+
+    // Only the program's own write. No `.bw-runs`, no `node_modules` SDK link. A workspace that
+    // contained the bundle would tar it into every pre-sleep snapshot and accumulate it forever.
+    expect(await fs.readdir(workspaceRoot)).toEqual(["only.txt"]);
+  });
+
+  it("restores the caller's cwd after the run, whatever the outcome", async () => {
+    const before = process.cwd();
+    await runSource("run_restore", `throw new Error("boom");`, null, {
+      host: recordingHost().host,
+    });
+    expect(process.cwd()).toBe(before);
+  });
+
+  it("refuses a program root inside the workspace (I2 is enforced, not incidental)", async () => {
+    const workspaceRoot = await mkTmp("bw-ws-");
+    const res = await runSource("run_nested", `const x = 1; void x;`, null, {
+      host: recordingHost().host,
+      workspaceRoot,
+      programRoot: join(workspaceRoot, "programs"),
+    });
+    expect(errorOf(res)?.message).toMatch(/program root .* inside the workspace/i);
+  });
+
+  it("fails loudly when the workspace does not exist rather than running from elsewhere", async () => {
+    const res = await runSource("run_nows", `const x = 1; void x;`, null, {
+      host: recordingHost().host,
+      workspaceRoot: join(os.tmpdir(), "bw-definitely-absent-workspace"),
+    });
+    expect(errorOf(res)?.message).toMatch(/workspace/i);
+  });
+});
 
 describe("runWorkflowProgram — the gate: input → agent() → sleep", () => {
   it("runs a program, injecting input and delegating to the host", async () => {
@@ -120,6 +216,8 @@ describe("runWorkflowProgram — the gate: input → agent() → sleep", () => {
       { runId: "run_extract", tarball: built.tarball, entry: built.entry, input: null, config: {} },
       {
         host: rec.host,
+        workspaceRoot: await mkTmp("bw-ws-"),
+        programRoot: await mkTmp("bw-prog-"),
         extract: async (tgzPath, destDir) => {
           await tarExtract({ file: tgzPath, cwd: destDir });
         },
