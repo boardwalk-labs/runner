@@ -751,68 +751,14 @@ describe("RunnerControlClient url building", () => {
   });
 });
 
-describe("RunnerControlClient — durable suspension", () => {
-  it("journalGet parses a hit, returns null on a 404 miss", async () => {
-    const entry = { seq: 2, kind: "agent", fingerprint: "fp", state: "resolved", result: { x: 1 } };
-    const hit = fakeFetch(() => json(200, entry));
-    expect(await client(hit.fetchImpl).journalGet(2)).toEqual(entry);
-    expect(hit.calls[0]?.url).toBe("https://api.boardwalk.sh/runner/v1/runs/run_1/journal/2");
-    expect(hit.calls[0]?.method).toBe("GET");
-
-    const miss = fakeFetch(() => new Response(null, { status: 404 }));
-    expect(await client(miss.fetchImpl).journalGet(9)).toBeNull();
-  });
-
-  it("journalPut POSTs the entry and tolerates 204", async () => {
-    const { fetchImpl, calls } = fakeFetch(() => new Response(null, { status: 204 }));
-    await client(fetchImpl).journalPut({
-      seq: 1,
-      kind: "step",
-      fingerprint: "fp",
-      label: "compute",
-      result: { n: 7 },
-    });
-    expect(calls[0]?.url).toBe("https://api.boardwalk.sh/runner/v1/runs/run_1/journal");
-    expect(JSON.parse(calls[0]?.body ?? "{}")).toMatchObject({
-      seq: 1,
-      kind: "step",
-      label: "compute",
-    });
-  });
-
-  it("suspend POSTs the signal + workerId", async () => {
-    const { fetchImpl, calls } = fakeFetch(() => new Response(null, { status: 204 }));
-    await client(fetchImpl).suspend(
-      { reason: "sleep", seq: 3, fingerprint: "fp", durationMs: 60000 },
-      "worker-7",
+describe("claim", () => {
+  it("returns the run + lastEventCursor (defaulting to 0)", async () => {
+    const withCursor = fakeFetch(() =>
+      json(201, { run: fakeRun, leaseUntil: 1, lastEventCursor: 7 }),
     );
-    expect(calls[0]?.url).toBe("https://api.boardwalk.sh/runner/v1/runs/run_1/suspend");
-    expect(JSON.parse(calls[0]?.body ?? "{}")).toMatchObject({
-      reason: "sleep",
-      seq: 3,
-      durationMs: 60000,
-      workerId: "worker-7",
-    });
-  });
-
-  it("journalSeam() adapts get/put onto the broker methods", async () => {
-    const { fetchImpl } = fakeFetch((rec) =>
-      rec.method === "GET"
-        ? json(200, { seq: 1, kind: "agent", fingerprint: "fp", state: "resolved", result: "ok" })
-        : new Response(null, { status: 204 }),
-    );
-    const seam = client(fetchImpl).journalSeam();
-    expect((await seam.get(1))?.result).toBe("ok");
-    await seam.put({ seq: 1, kind: "agent", fingerprint: "fp", label: "p", result: "ok" });
-  });
-
-  it("claim surfaces lastJournalSeq (replay frontier), defaulting to 0", async () => {
-    const withSeq = fakeFetch(() =>
-      json(201, { run: fakeRun, leaseUntil: 1, lastEventCursor: 0, lastJournalSeq: 5 }),
-    );
-    expect((await client(withSeq.fetchImpl).claim("w", 300))?.lastJournalSeq).toBe(5);
+    expect((await client(withCursor.fetchImpl).claim("w", 300))?.lastEventCursor).toBe(7);
     const without = fakeFetch(() => json(201, { run: fakeRun, leaseUntil: 1 }));
-    expect((await client(without.fetchImpl).claim("w", 300))?.lastJournalSeq).toBe(0);
+    expect((await client(without.fetchImpl).claim("w", 300))?.lastEventCursor).toBe(0);
   });
 });
 

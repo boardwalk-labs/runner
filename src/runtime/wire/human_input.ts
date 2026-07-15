@@ -3,7 +3,7 @@
 // The `HumanInputSpec` is the single source of truth for BOTH the UI form and server-side
 // validation, so a `humanInput()` gate needs no JSON Schema. A responder's raw submission (from
 // REST / MCP / CLI / web) is validated here against the gate's stored spec into a typed
-// `HumanInputResult`, which becomes the seam's memoized journal value. Pure + exhaustively testable.
+// `HumanInputResult`, the value the seam returns to the program. Pure + exhaustively testable.
 //
 // These mirror the SDK's `@boardwalk-labs/workflow` types exactly (the wire contract); we re-derive
 // them as Zod schemas because the stored `input_spec` is `unknown` jsonb that must be parsed at the
@@ -65,7 +65,7 @@ export function parseHumanInputSpec(raw: unknown): ParsedHumanInputSpec {
 
 /** Re-hydrate a stored (jsonb) human-input result into the exact-optional SDK {@link HumanInputResult}
  *  (the host returns it from a resumed `humanInput()` seam). The value was validated on submit, so a
- *  parse failure here is a corrupt journal — surfaced as a clear program error. */
+ *  parse failure here is a corrupt stored answer — surfaced as a clear program error. */
 export function normalizeHumanInputResult(raw: unknown): HumanInputResult {
   const parsed = storedResultSchema.safeParse(raw);
   if (!parsed.success) {

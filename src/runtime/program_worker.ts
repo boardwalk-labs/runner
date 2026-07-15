@@ -32,7 +32,6 @@ import { verifyArtifactDigest } from "./wire/artifact_verify.js";
 import { runWorkflowProgram, type ProgramResult } from "./program_runner.js";
 import { captureConsole, type LogStream } from "./program_log_capture.js";
 import { RunAbortedError, abortReason } from "./run_abort.js";
-import type { SuspendSignal } from "./suspension.js";
 
 const log = createLogger("ProgramWorker");
 
@@ -80,14 +79,6 @@ export type RuntimeMeterStarter = (args: { run: Run; startedAtMs: number }) => R
 /** Marks a run terminal (status + output/error + completedAt + lease release). */
 export interface RunFinalizer {
   finalize(runId: string, status: "completed" | "failed", output: unknown): Promise<void>;
-}
-
-/** Persists a durable SUSPENSION (the durable-suspension design): the broker records the wake condition (a
- *  pending/suspended journal entry + a human-input request row for HITL, or the wake time for a long
- *  sleep), flips the run to its suspended status, and releases the lease — all transactionally. The
- *  run is NOT finalized; a wake (an answer, a child finalize, or a timer) re-dispatches it. */
-export interface RunSuspender {
-  suspend(signal: SuspendSignal, workerId: string): Promise<void>;
 }
 
 /** Restores/snapshots the workflow's persistent `/workspace`. Best-effort — both no-op when the
@@ -140,10 +131,6 @@ export type ProgramHostBuilder = (
    *  leaf can resolve this run's bundled skill files (`<dir>/skills/<name>.md`). The orchestrator wires
    *  it to the runner's `onExtracted`. Optional — absent on paths that don't surface bundled files. */
   setProgramDir?: (dir: string) => void;
-  /** Resolves when a host seam SUSPENDS the run — wired to the host's `onSuspend`, threaded into the
-   *  program runner so a suspend short-circuits the body out of band (the durable-suspension design). Absent ⇒
-   *  no durable suspension on this path (a suspend then surfaces as a thrown SuspendError). */
-  suspendSignal?: Promise<SuspendSignal>;
   /** The run's browser-session manager (browser tier). The orchestrator reaps every still-open session
    *  on EVERY terminal path so no Chromium / Playwright MCP process leaks past the run. `closeAll` is
    *  best-effort + never throws. Absent on images without the browser stack. */
@@ -192,9 +179,6 @@ export interface ProgramWorkerDeps {
   /** Periodic runtime metering (optional — absent disables it, e.g. the local/test path). */
   startRuntimeFlush?: RuntimeMeterStarter;
   finalizer: RunFinalizer;
-  /** Persists a durable suspension (the durable-suspension design). Absent ⇒ no suspension support: a run that
-   *  reaches a suspend fails cleanly rather than stranding (the brokered worker always wires it). */
-  suspender?: RunSuspender;
   buildHost: ProgramHostBuilder;
   /** Starts mid-run credit watching for the session (optional — absent disables it). */
   startCreditWatch?: CreditWatchStarter;
@@ -218,8 +202,7 @@ export interface ProgramWorkerDeps {
 export type ProgramWorkerOutcome =
   | { kind: "claim_lost" }
   | { kind: "completed" }
-  | { kind: "failed"; reason: string }
-  | { kind: "suspended"; reason: string };
+  | { kind: "failed"; reason: string };
 
 export async function runProgramWorker(
   runId: string,
@@ -313,7 +296,7 @@ export async function runProgramWorker(
     log.error("worker_host_build_failed", { runId, error: message });
     return { kind: "failed", reason: "host_build_failed" };
   }
-  const { host, redactor, workspace, phases, activity, setProgramDir, lsp, suspendSignal } = built;
+  const { host, redactor, workspace, phases, activity, setProgramDir, lsp } = built;
   const browserSessions = built.browserSessions;
   const capture = built.capture;
   // Guarantee the /workspace sandbox dir exists for EVERY run (persist or not) so a program can write
@@ -396,7 +379,6 @@ export async function runProgramWorker(
         redactText: (text) => redactor.redactText(text),
         extract: deps.extractArchive,
         ...(setProgramDir !== undefined ? { onExtracted: setProgramDir } : {}),
-        ...(suspendSignal !== undefined ? { suspendSignal } : {}),
         ...(activity !== undefined
           ? {
               onOutput: (value: unknown) => {
@@ -467,25 +449,6 @@ export async function runProgramWorker(
     });
     log.info("worker_run_aborted", { runId, reason });
     return { kind: "failed", reason };
-  }
-
-  // Suspended: a host seam released the task (a long `sleep`, a `humanInput()` gate, or the in-leaf
-  // `human_input` tool). Persist the wake condition through the broker — NO finalize — and exit
-  // cleanly; a wake (an answer or a timer) re-dispatches the run, which restarts from the top and
-  // replays the journal past the already-done seams. The runtime tail for THIS session was booked
-  // above, so idle time while suspended is not billed. Phases stay open (the run is non-terminal).
-  if (result.kind === "suspended") {
-    if (deps.suspender === undefined) {
-      phases?.close("failed");
-      await deps.finalizer.finalize(runId, "failed", {
-        error: { code: "SUSPEND_UNSUPPORTED", message: "This runtime cannot suspend a run." },
-      });
-      log.error("worker_suspend_unsupported", { runId });
-      return { kind: "failed", reason: "suspend_unsupported" };
-    }
-    await deps.suspender.suspend(result.signal, deps.workerId);
-    log.info("worker_suspended", { runId, reason: result.signal.reason });
-    return { kind: "suspended", reason: result.signal.reason };
   }
 
   if (result.kind === "completed") {

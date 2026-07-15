@@ -10,7 +10,6 @@ import {
   type ProgramRef,
   type RunFinalizer,
 } from "./program_worker.js";
-import type { SuspendSignal } from "./suspension.js";
 import { buildSingleFileArtifact } from "./testing_artifact_build.js";
 import { extract as tarExtract } from "tar";
 
@@ -67,8 +66,6 @@ interface Harness {
   ensured: { count: number };
   /** Ordered log of workspace-prep steps ("ensure" then "hydrate") to assert ordering. */
   order: string[];
-  /** Captured suspend signals persisted through the suspender (durable suspension). */
-  suspended: SuspendSignal[];
 }
 
 function harness(
@@ -95,11 +92,6 @@ function harness(
     withBrowser?: boolean;
     /** When true, ensureWorkspace rejects — asserts best-effort (the run still proceeds). */
     ensureWorkspaceThrows?: boolean;
-    /** When true, a host seam SUSPENDS the run: the program holds (the host's sleep never resolves)
-     *  and buildHost resolves `suspendSignal`, so the runner races to a suspended outcome. */
-    suspend?: boolean;
-    /** When true, NO suspender is wired (asserts a suspend without persistence fails cleanly). */
-    noSuspender?: boolean;
   } = {},
 ): Harness {
   const runtimeFlush = { started: 0, stopped: 0, flushedFinal: 0 };
@@ -151,14 +143,11 @@ function harness(
     callWorkflow: () => Promise.resolve(null),
     sleep: (arg) => {
       hostCalls.sleeps.push(arg);
-      // When exercising suspension, the seam HOLDS (never resolves) — the out-of-band suspendSignal
-      // is what short-circuits the runner, exactly as the real onSuspend path does.
-      return over.suspend === true ? new Promise<void>(() => undefined) : Promise.resolve();
+      return Promise.resolve();
     },
     getSecret: () => Promise.resolve("sek"),
   };
 
-  const suspended: SuspendSignal[] = [];
   const redactor = new SecretRedactor();
   const credit = { started: 0, stopped: 0 };
   const cancel = { started: 0, stopped: 0 };
@@ -178,7 +167,6 @@ function harness(
     browser,
     ensured,
     order,
-    suspended,
     deps: {
       runs,
       versions,
@@ -195,30 +183,10 @@ function harness(
           : Promise.resolve();
       },
       finalizer,
-      ...(over.noSuspender === true
-        ? {}
-        : {
-            suspender: {
-              suspend: (signal: SuspendSignal) => {
-                suspended.push(signal);
-                return Promise.resolve();
-              },
-            },
-          }),
       buildHost: () =>
         Promise.resolve({
           host,
           redactor,
-          ...(over.suspend === true
-            ? {
-                suspendSignal: Promise.resolve<SuspendSignal>({
-                  reason: "sleep",
-                  seq: 1,
-                  fingerprint: "fp",
-                  durationMs: 60_000,
-                }),
-              }
-            : {}),
           phases: {
             close: (status: "completed" | "failed" | "cancelled") => {
               if (!phaseActive) return;
@@ -595,50 +563,5 @@ describe("runProgramWorker — program failure (charges, then fails)", () => {
     const serialized = JSON.stringify(h.finalized[0]?.output);
     expect(serialized).not.toContain(secret);
     expect(serialized).toContain("[REDACTED]");
-  });
-});
-
-describe("runProgramWorker — durable suspension", () => {
-  const SLEEP_SOURCE = `import { sleep } from "@boardwalk-labs/workflow"; await sleep(60000);`;
-
-  it("persists the suspend (no finalize) and books this session's runtime tail", async () => {
-    const h = harness({ suspend: true, programSource: SLEEP_SOURCE });
-    const outcome = await runProgramWorker("run_1", h.deps);
-    expect(outcome).toEqual({ kind: "suspended", reason: "sleep" });
-    expect(h.suspended).toHaveLength(1);
-    expect(h.suspended[0]).toMatchObject({ reason: "sleep", durationMs: 60_000 });
-    // NOT finalized — the run is non-terminal and a wake re-dispatches it.
-    expect(h.finalized).toEqual([]);
-    // The session that ran up to the suspend IS billed; idle time while suspended is not.
-    expect(h.runtimeFlush.flushedFinal).toBe(1);
-    // Watchers were stopped on the way out.
-    expect(h.credit).toEqual({ started: 1, stopped: 1 });
-  });
-
-  it("does NOT persist-back the workspace at a suspend's terminal? (it persists for resume hydration)", async () => {
-    const h = harness({ suspend: true, persistWorkspace: true, programSource: SLEEP_SOURCE });
-    await runProgramWorker("run_1", h.deps);
-    // The finally snapshots /workspace on every exit so the resumed session hydrates the latest state.
-    expect(h.workspace.persisted).toBe(1);
-  });
-
-  it("fails cleanly (no strand) when no suspender is wired", async () => {
-    const h = harness({ suspend: true, noSuspender: true, programSource: SLEEP_SOURCE });
-    const outcome = await runProgramWorker("run_1", h.deps);
-    expect(outcome).toEqual({ kind: "failed", reason: "suspend_unsupported" });
-    expect(h.finalized).toHaveLength(1);
-    expect(h.finalized[0]?.status).toBe("failed");
-    expect(h.suspended).toEqual([]);
-  });
-
-  it("a cancel mid-suspend wins: the run finalizes failed, not suspended", async () => {
-    // The user cancels while a seam is suspending: the abort is authoritative (the run is terminal),
-    // so we must NOT persist a suspend that would later re-dispatch a cancelled run.
-    const h = harness({ suspend: true, cancelRun: true, programSource: SLEEP_SOURCE });
-    const outcome = await runProgramWorker("run_1", h.deps);
-    expect(outcome.kind).toBe("failed");
-    expect(h.suspended).toEqual([]);
-    expect(h.finalized).toHaveLength(1);
-    expect(h.finalized[0]?.status).toBe("failed");
   });
 });

@@ -23,14 +23,13 @@ function fakeChannel(): {
 }
 
 function sleepSignal(durationMs = 60_000): SuspendSignal {
-  return { reason: "sleep", seq: 1, fingerprint: "fp", durationMs };
+  return { reason: "sleep", seq: 1, durationMs };
 }
 
 function gateSignal(key = "approve"): SuspendSignal {
   return {
     reason: "human_input",
     seq: 2,
-    fingerprint: "fp",
     humanInput: { key, prompt: "ok?", inputSpec: {} },
   };
 }

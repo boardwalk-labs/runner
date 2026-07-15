@@ -35,7 +35,6 @@ import {
 } from "@boardwalk-labs/workflow/runtime";
 import type { WorkflowHost, JsonValue } from "@boardwalk-labs/workflow/runtime";
 import { AppError, ErrorCode, createLogger } from "./support/index.js";
-import { SuspendError, type SuspendSignal } from "./suspension.js";
 
 const log = createLogger("ProgramRunner");
 
@@ -153,23 +152,15 @@ export interface ProgramRunnerDeps {
    * throw (a telemetry hiccup can't change the run's result). Absent ⇒ no output entry.
    */
   onOutput?: (value: unknown) => void;
-  /**
-   * Resolves when a host seam SUSPENDS the run (the durable-suspension design) — the worker wires it to the
-   * host's `onSuspend` so a suspend is surfaced OUT OF BAND, racing the program body. The program's
-   * own `try/catch` can't swallow a suspend this way (the suspending seam never resolves; this signal
-   * short-circuits at the runner). Absent ⇒ no suspension wired (a seam that suspends throws
-   * {@link SuspendError} instead, which is caught here just the same).
-   */
-  suspendSignal?: Promise<SuspendSignal>;
 }
 
-/** Terminal (or suspended) result of running a workflow program. `output` is what the program
- *  declared via `output(value)` (null when it never did); for a failure it's null and `error` is set;
- *  for a suspension the `signal` carries the wake condition (the worker persists it, no finalize). */
+/** Terminal result of running a workflow program. `output` is what the program declared via
+ *  `output(value)` (null when it never did); for a failure it's null and `error` is set. A waiting
+ *  seam (sleep / humanInput / workflows.call) never surfaces here — it freezes with the VM or
+ *  holds the process, and the body simply continues when the wait is over. */
 export type ProgramResult =
   | { kind: "completed"; output: unknown }
-  | { kind: "failed"; output: null; error: { code: string; message: string } }
-  | { kind: "suspended"; signal: SuspendSignal };
+  | { kind: "failed"; output: null; error: { code: string; message: string } };
 
 /**
  * Run a workflow program to completion. Installs the host + input, extracts the VERIFIED artifact +
@@ -205,24 +196,10 @@ export async function runWorkflowProgram(
     // runner may point at an arbitrary control plane, so refuse an entry that could escape the
     // extraction dir (absolute path or `..` segment) before importing it.
     const entryPath = resolveEntryPath(dir, args.entry);
-    // Run the program body. A SUSPEND is surfaced two ways and both land here as a `suspended`
-    // result: (a) out of band via `suspendSignal` — racing the body, immune to a program's own
-    // try/catch (the suspending seam never resolves); (b) a thrown {@link SuspendError} on the
-    // no-`onSuspend` path. Everything else is the program's natural completion / failure.
-    const body = runProgramBody(entryPath, deps);
-    const result =
-      deps.suspendSignal === undefined
-        ? await body
-        : await Promise.race([
-            body,
-            deps.suspendSignal.then((signal): ProgramResult => ({ kind: "suspended", signal })),
-          ]);
-    // If the suspend won the race, the body promise is abandoned (its suspending seam never settles);
-    // swallow any late settle so it can't surface as an unhandled rejection before the process exits.
-    void body.catch(() => undefined);
-    return result;
+    // Run the program body to its natural completion / failure. A waiting seam freezes with the
+    // VM (snapshot substrate) or holds the process — either way the body's own await continues.
+    return await runProgramBody(entryPath, deps);
   } catch (err) {
-    if (err instanceof SuspendError) return { kind: "suspended", signal: err.signal };
     const redactText = deps.redactText ?? ((s: string): string => s);
     // Redact BEFORE both sinks: the message can carry a secret the program resolved then threw.
     const message = redactText(err instanceof Error ? err.message : String(err));
@@ -249,9 +226,9 @@ export async function runWorkflowProgram(
 
 /**
  * Import (= run) the program entry and capture its declared output. Resolves to a `completed`
- * result; a program failure (or a {@link SuspendError} on the no-`onSuspend` path) THROWS and is
- * handled by the caller. A unique dir per run gives a fresh URL so the module cache never returns an
- * already-run program; `@vite-ignore` keeps vitest/vite from statically analyzing the runtime URL.
+ * result; a program failure THROWS and is handled by the caller. A unique dir per run gives a
+ * fresh URL so the module cache never returns an already-run program; `@vite-ignore` keeps
+ * vitest/vite from statically analyzing the runtime URL.
  */
 async function runProgramBody(entryPath: string, deps: ProgramRunnerDeps): Promise<ProgramResult> {
   await import(/* @vite-ignore */ pathToFileURL(entryPath).href);

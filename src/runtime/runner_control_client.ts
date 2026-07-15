@@ -14,13 +14,6 @@
 import { createLogger } from "./support/index.js";
 import type { McpTokenResult } from "@boardwalk-labs/engine/core";
 import type { Run } from "./wire/run.js";
-import {
-  journalLookupSchema,
-  type JournalKind,
-  type JournalLookup,
-  type JournalSeam,
-  type SuspendSignal,
-} from "./suspension.js";
 import type { WebSearchOutput } from "./tools/web_search.js";
 import type {
   ArtifactCommitInput,
@@ -127,7 +120,7 @@ export class RunnerControlClient {
   }
 
   /**
-   * Every SHORT control call (claim / renew / cancel / credit / journal / …) goes through here so
+   * Every SHORT control call (claim / renew / cancel / credit / inputs / …) goes through here so
    * it carries a hard timeout. Without one, a poll frozen mid-flight on the snapshot substrate
    * hangs FOREVER on restore (the socket is dead but never reset), and since a watcher serializes
    * its ticks, one hung tick wedges that watcher — the dead-connections gotcha for the
@@ -150,7 +143,7 @@ export class RunnerControlClient {
    * reset/refused mid-rollover, our own per-attempt timeout on a dead socket) and the
    * load-balancer's {@link RETRYABLE_STATUSES}. Safe to re-send because every caller's body is a
    * reusable string/byte-array (the streaming inference call bypasses this entirely), and the
-   * broker's mutating endpoints are idempotent per worker/identifier (journal seq, usage
+   * broker's mutating endpoints are idempotent per worker/identifier (gate seq, usage
    * identifier, lease per workerId). Before this, ONE blip during an api-server deploy rollover
    * crashed the worker hard mid-suspend/finalize and only crash-reclaim recovered the run.
    */
@@ -191,7 +184,7 @@ export class RunnerControlClient {
   async claim(
     workerId: string,
     leaseSeconds: number,
-  ): Promise<{ run: Run; lastEventCursor: number; lastJournalSeq: number } | null> {
+  ): Promise<{ run: Run; lastEventCursor: number } | null> {
     const res = await this.controlFetch(this.url("claim"), {
       method: "POST",
       headers: this.headers(true),
@@ -202,14 +195,10 @@ export class RunnerControlClient {
     const body = (await res.json()) as {
       run: Run;
       lastEventCursor?: number;
-      lastJournalSeq?: number;
     };
     return {
       run: body.run,
       lastEventCursor: body.lastEventCursor ?? 0,
-      // The replay frontier for silent replay (the durable-suspension design): the highest journaled seq, so a
-      // resumed run knows which seams already ran (suppress their re-emitted observability).
-      lastJournalSeq: body.lastJournalSeq ?? 0,
     };
   }
 
@@ -238,55 +227,6 @@ export class RunnerControlClient {
       body: JSON.stringify({ status, output, workerId }),
     });
     if (res.status !== 204) throw await brokerError(res, "finalize");
-  }
-
-  /** Look up a durable-seam journal entry by its seq (the durable-suspension design), or null on a replay miss
-   *  (404). The broker joins a parked agent leaf's answers into the result server-side. */
-  async journalGet(seq: number): Promise<JournalLookup | null> {
-    const res = await this.controlFetch(this.url(`journal/${encodeURIComponent(String(seq))}`), {
-      method: "GET",
-      headers: this.headers(false),
-    });
-    if (res.status === 404) return null;
-    if (res.status !== 200) throw await brokerError(res, "journal-get");
-    return journalLookupSchema.parse(await res.json());
-  }
-
-  /** Record a RESOLVED seam result (idempotent on the run + seq server-side; a resolved entry is
-   *  immutable). The broker writes the memoized value the next replay returns. */
-  async journalPut(entry: {
-    seq: number;
-    kind: JournalKind;
-    fingerprint: string;
-    label: string;
-    result: unknown;
-  }): Promise<void> {
-    const res = await this.controlFetch(this.url("journal"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify(entry),
-    });
-    if (res.status !== 204) throw await brokerError(res, "journal-put");
-  }
-
-  /** Persist a durable SUSPENSION: the broker records the wake condition (a pending/suspended journal
-   *  entry + a human-input request row for HITL, or the wake time for a long sleep), flips the run to
-   *  its suspended status, and releases the lease — transactionally. No finalize; a wake re-dispatches. */
-  async suspend(signal: SuspendSignal, workerId: string): Promise<void> {
-    const res = await this.controlFetch(this.url("suspend"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify({ ...signal, workerId }),
-    });
-    if (res.status !== 204) throw await brokerError(res, "suspend");
-  }
-
-  /** The {@link JournalSeam} the worker host reads/writes — a thin adapter over the broker methods. */
-  journalSeam(): JournalSeam {
-    return {
-      get: (seq) => this.journalGet(seq),
-      put: (entry) => this.journalPut(entry),
-    };
   }
 
   /** Fetch the run's pinned manifest + program source, or null when the version is missing (404). */

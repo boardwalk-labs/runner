@@ -65,7 +65,6 @@ import {
   type ProgramHostBuilder,
 } from "./program_worker.js";
 import { RunnerControlClient } from "./runner_control_client.js";
-import type { SuspendSignal } from "./suspension.js";
 import { BrokerChildDispatcher } from "./broker_child_dispatcher.js";
 import { BrokerEventPublisher } from "./broker_event_publisher.js";
 import { createProgramLogSink } from "./program_log_capture.js";
@@ -107,7 +106,7 @@ export interface WorkerRuntime {
   vcpus: number;
   /** The in-guest identity relay, present ONLY on the snapshot-based microVM substrate (relay-mode
    *  boot). When set, the worker suspends by FREEZING — the FreezeCoordinator parks seams over this
-   *  relay's suspend/wake channel — instead of the exit-and-replay path. */
+   *  relay's suspend/wake channel — the whole VM freezes and the wake resolves seams in place. */
   freezeRelay?: IdentityRelay;
   /** The browser tier's process backend, present ONLY when the runner IMAGE ships the browser stack
    *  (Chromium + a pre-installed Playwright MCP + an X display; gated by BOARDWALK_BROWSER_TIER).
@@ -163,11 +162,6 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     runId: runtime.runId,
   });
   log.info("runner_control_enabled", { runId: runtime.runId });
-
-  // The replay frontier (the highest journaled seq at claim) drives SILENT REPLAY (the durable-suspension design):
-  // a resumed run suppresses observability for seams it already ran. Captured at claim, read by
-  // buildHost (which runs right after claim) when constructing the per-run host.
-  let replayFrontier = 0;
 
   // Snapshot-substrate suspension (relay-mode boot only): one coordinator for the process, wired to
   // the relay's suspend/wake channel now; its per-run hooks (token swap, meter rebase, workspace
@@ -391,13 +385,6 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
             workspaceRoot: runtime.workspaceRoot,
           })
         : undefined;
-    // Durable suspension (the durable-suspension design): the host raises a suspend OUT OF BAND (onSuspend +
-    // a never-resolving seam), so a program's own try/catch can't swallow it; the program runner
-    // races `suspendSignal` against the body. One deferred per run — the first seam to suspend wins.
-    let resolveSuspend: (signal: SuspendSignal) => void = () => undefined;
-    const suspendSignal = new Promise<SuspendSignal>((resolve) => {
-      resolveSuspend = resolve;
-    });
     // The run's identity + on-demand public-API bearer, surfaced to the program via `import { runtime }`.
     // ids come from the claimed run; the bearer is the captured (scrubbed-from-env) api token, already
     // recorded in this run's redactor above — so threading it into an MCP header keeps it out of LLM
@@ -433,13 +420,6 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       runtime: runtimeContext,
       // workflows.call → broker /children (resolve + callable_by gate server-side), bound to THIS run.
       children: new BrokerChildDispatcher({ client: broker }),
-      // The durable-seam journal (memoization + replay) over the broker; the replay frontier drives
-      // silent replay; onSuspend resolves the deferred the program runner races.
-      journal: broker.journalSeam(),
-      replayFrontier,
-      onSuspend: (signal) => {
-        resolveSuspend(signal);
-      },
       // The program's secrets.get(name) → the run's fail-closed RECORDING resolver.
       secrets: { get: (name: string) => secretResolver.resolve({ name }) },
       // events.emit → broker /events (fan-out server-side).
@@ -466,19 +446,15 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
             },
           }
         : {}),
-      // Snapshot-substrate suspension: seams freeze in place under the quiescence gate instead of
-      // raising onSuspend (which stays wired as the transitional/local path's fallback).
+      // Snapshot-substrate suspension: seams freeze in place under the quiescence gate. Absent
+      // (a self-hosted daemon / the Fargate break-glass), waiting seams HOLD the live process.
       ...(freeze !== undefined ? { freeze } : {}),
-      // Register-without-release for held HITL gates — only on the
-      // freeze substrate, backed by the broker's inputs endpoints.
-      ...(freeze !== undefined
-        ? {
-            heldInput: {
-              register: (seq: number, gate: unknown) => broker.registerInput(seq, gate),
-              poll: (seq: number) => broker.pollInputAnswers(seq),
-            },
-          }
-        : {}),
+      // Held HITL gates, backed by the broker's inputs endpoints: register-without-release on the
+      // freeze substrate, and the WHOLE gate mechanism (register + poll) on the hold path.
+      heldInput: {
+        register: (seq: number, gate: unknown) => broker.registerInput(seq, gate),
+        poll: (seq: number) => broker.pollInputAnswers(seq),
+      },
       // Browser tier: `computer.openBrowser()` + `agent({ session })` resolve through this manager
       // (absent ⇒ the host throws "not available on this runner image").
       ...(browserSessions !== undefined ? { browserSessions } : {}),
@@ -557,8 +533,6 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       setProgramDir: (dir: string) => {
         programDir = dir;
       },
-      // Resolves when a host seam suspends the run; the program runner races it against the body.
-      suspendSignal,
       ...(workspaceStore !== undefined ? { workspace: workspaceStore } : {}),
       // The orchestrator reaps every still-open browser session on terminal (kill Chromium + its
       // Playwright MCP) so no browser process leaks past the run.
@@ -580,8 +554,6 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
         // Order this session's frames after a previous (crashed) session's, then announce the
         // lifecycle transition the claim IS — the wire's `running` frame.
         runEvents.resumeAfter(claimed.lastEventCursor);
-        // The replay frontier for a resumed run (0 on a fresh run); buildHost reads it next.
-        replayFrontier = claimed.lastJournalSeq;
         runEvents.emit({ kind: "run_status", status: "running" });
         return claimed.run;
       },
@@ -608,12 +580,6 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     },
     finalizer: {
       finalize: (_id, status, output) => broker.finalize(status, output, runtime.workerId),
-    },
-    // Durable suspension (the durable-suspension design): persist the wake condition through the broker (journal
-    // entry + a HITL request row, or the wake time for a long sleep) and release the lease — no
-    // finalize. A wake (an answer or a timer) re-dispatches the run.
-    suspender: {
-      suspend: (signal, workerId) => broker.suspend(signal, workerId),
     },
     // Runtime metering: flush runtime as periodic deltas (+ a terminal tail) through the broker,
     // idempotent per flush, so a long/perpetual run bills as it burns and the credit watcher sees it —

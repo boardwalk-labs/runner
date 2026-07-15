@@ -1,6 +1,6 @@
 // Freeze-mode (snapshot substrate) behavior of WorkerWorkflowHost: suspending seams block on
 // the FreezeCoordinator and resolve IN PLACE from the wake value — no onSuspend, no exit, no
-// journal replay. The coordinator here is real; only the relay channel is scripted, so these
+// exit-and-restart. The coordinator here is real; only the relay channel is scripted, so these
 // tests pin the host↔coordinator contract end to end.
 
 import { describe, it, expect, vi } from "vitest";
@@ -165,17 +165,14 @@ describe("WorkerWorkflowHost freeze mode", () => {
       start: () => Promise.resolve({ childRunId: "child_9", status: "running", output: undefined }),
     });
     const { host, freeze, requests } = makeFrozenHost({ children });
-    // callWorkflow's durable path needs a journal in transitional mode; freeze mode does not —
-    // but the seam only engages its durable branch when a journal exists, so wire a miss-only one.
-    const hostWithJournal = new WorkerWorkflowHost({
+    const frozenHost = new WorkerWorkflowHost({
       leaf: { run: () => Promise.resolve("leaf") },
       children,
       secrets: { get: () => Promise.resolve("sek") },
       runtime: host.runtime,
-      journal: { get: () => Promise.resolve(null), put: () => Promise.resolve() },
       freeze,
     });
-    const call = hostWithJournal.callWorkflow("child-flow", { n: 1 }, undefined);
+    const call = frozenHost.callWorkflow("child-flow", { n: 1 }, undefined);
     await tick();
     const req = requests[0] as { reason: string; wake: { child_run_id: string } };
     expect(req.reason).toBe("workflow_call");
@@ -205,7 +202,6 @@ describe("WorkerWorkflowHost freeze mode", () => {
         apiToken: () => Promise.resolve("t"),
         idToken: () => Promise.resolve("id-token-test"),
       },
-      journal: { get: () => Promise.resolve(null), put: () => Promise.resolve() },
       freeze,
     });
     const call = host.callWorkflow("child-flow", {}, undefined);

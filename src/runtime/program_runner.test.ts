@@ -21,7 +21,6 @@ import {
   type ProgramResult,
   type ProgramRunnerDeps,
 } from "./program_runner.js";
-import { SuspendError, type SuspendSignal } from "./suspension.js";
 import { buildSingleFileArtifact } from "./testing_artifact_build.js";
 
 interface Recorder {
@@ -247,56 +246,6 @@ describe("runWorkflowProgram — failures", () => {
     });
     expect(res.kind).toBe("failed");
     expect(errorOf(res)?.message).toBe("boom [REDACTED] here");
-  });
-});
-
-describe("runWorkflowProgram — durable suspension", () => {
-  const sig = (over: Partial<SuspendSignal> = {}): SuspendSignal => ({
-    reason: "human_input",
-    seq: 1,
-    fingerprint: "fp",
-    ...over,
-  });
-
-  it("maps a thrown SuspendError to a `suspended` result carrying the signal", async () => {
-    const rec = recordingHost({ agent: () => Promise.reject(new SuspendError(sig({ seq: 3 }))) });
-    const source = `
-      import { agent } from "@boardwalk-labs/workflow";
-      await agent("ask a person");
-    `;
-    const res = await runSource("run_susp_throw", source, null, { host: rec.host });
-    expect(res.kind).toBe("suspended");
-    expect(res.kind === "suspended" ? res.signal.seq : null).toBe(3);
-  });
-
-  it("races suspendSignal against the body and suspends even if the body never settles", async () => {
-    // The suspending seam returns a never-resolving promise (the real onSuspend path); the out-of-band
-    // suspendSignal is what short-circuits the runner — proving a program's own try/catch can't swallow it.
-    const rec = recordingHost({ sleep: () => new Promise<void>(() => undefined) });
-    const source = `
-      import { sleep } from "@boardwalk-labs/workflow";
-      try { await sleep(999999); } catch { /* a program can't swallow a suspend */ }
-      throw new Error("should never run after a suspend");
-    `;
-    const built = buildSingleFileArtifact(source);
-    const res = await runWorkflowProgram(
-      {
-        runId: "run_susp_race",
-        tarball: built.tarball,
-        entry: built.entry,
-        input: null,
-        config: {},
-      },
-      {
-        host: rec.host,
-        extract: async (tgzPath, destDir) => {
-          await tarExtract({ file: tgzPath, cwd: destDir });
-        },
-        suspendSignal: Promise.resolve(sig({ reason: "sleep", durationMs: 999999 })),
-      },
-    );
-    expect(res.kind).toBe("suspended");
-    expect(res.kind === "suspended" ? res.signal.reason : null).toBe("sleep");
   });
 });
 

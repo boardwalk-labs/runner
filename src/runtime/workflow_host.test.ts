@@ -16,11 +16,12 @@ import {
   parseTimeoutMs,
   type LeafExecutor,
   type ChildDispatcher,
+  type HeldInputPort,
   type SecretAccessor,
   type SleepController,
   type PhaseController,
 } from "./workflow_host.js";
-import { seamFingerprint, type JournalSeam, type SuspendSignal } from "./suspension.js";
+import { LeafParked } from "@boardwalk-labs/engine/core";
 import { RunAbortedError } from "./run_abort.js";
 
 /** A complete ChildDispatcher fake — fills start/poll (the durable callWorkflow seam) so each test
@@ -53,9 +54,8 @@ function makeHost(
     signal: AbortSignal;
     onBeforeSleep: () => Promise<void>;
     phases: PhaseController;
-    journal: JournalSeam;
-    onSuspend: (signal: SuspendSignal) => void;
-    replayFrontier: number;
+    heldInput: HeldInputPort;
+    heldPollIntervalMs: number;
     browserSessions: BrowserSessionManager;
   }> = {},
 ): { host: WorkerWorkflowHost; held: number[] } {
@@ -84,59 +84,13 @@ function makeHost(
     ...(over.signal ? { signal: over.signal } : {}),
     ...(over.onBeforeSleep ? { onBeforeSleep: over.onBeforeSleep } : {}),
     ...(over.phases ? { phases: over.phases } : {}),
-    ...(over.journal ? { journal: over.journal } : {}),
-    ...(over.onSuspend ? { onSuspend: over.onSuspend } : {}),
-    ...(over.replayFrontier !== undefined ? { replayFrontier: over.replayFrontier } : {}),
+    ...(over.heldInput ? { heldInput: over.heldInput } : {}),
+    ...(over.heldPollIntervalMs !== undefined
+      ? { heldPollIntervalMs: over.heldPollIntervalMs }
+      : {}),
     ...(over.browserSessions ? { browserSessions: over.browserSessions } : {}),
   });
   return { host, held };
-}
-
-/** An in-memory journal seam backed by a Map, seeded with pre-existing entries (replay fixtures). */
-function fakeJournal(
-  seed: Record<number, Parameters<JournalSeam["put"]>[0] & { state?: string }> = {},
-): {
-  journal: JournalSeam;
-  puts: Parameters<JournalSeam["put"]>[0][];
-  store: Map<number, { kind: string; fingerprint: string; state: string; result: unknown }>;
-} {
-  const store = new Map<
-    number,
-    { kind: string; fingerprint: string; state: string; result: unknown }
-  >();
-  for (const [seq, e] of Object.entries(seed)) {
-    store.set(Number(seq), {
-      kind: e.kind,
-      fingerprint: e.fingerprint,
-      state: e.state ?? "resolved",
-      result: e.result ?? null,
-    });
-  }
-  const puts: Parameters<JournalSeam["put"]>[0][] = [];
-  const journal: JournalSeam = {
-    get: (seq) => {
-      const e = store.get(seq);
-      if (e === undefined) return Promise.resolve(null);
-      return Promise.resolve({
-        seq,
-        kind: e.kind as never,
-        fingerprint: e.fingerprint,
-        state: e.state as never,
-        result: e.result,
-      });
-    },
-    put: (entry) => {
-      puts.push(entry);
-      store.set(entry.seq, {
-        kind: entry.kind,
-        fingerprint: entry.fingerprint,
-        state: "resolved",
-        result: entry.result,
-      });
-      return Promise.resolve();
-    },
-  };
-  return { journal, puts, store };
 }
 
 /** A controller pre-aborted with a credit-exhaustion reason. */
@@ -507,175 +461,118 @@ describe("TimerSleepController", () => {
   });
 });
 
-describe("WorkerWorkflowHost — durable suspension", () => {
-  const FP = (parts: readonly unknown[]): string => seamFingerprint(parts);
+describe("WorkerWorkflowHost — hold-in-process waits (no freeze substrate)", () => {
+  /** A HeldInputPort whose poll returns nothing `misses` times, then the given answers. */
+  function fakeHeldInput(
+    answers: Record<string, unknown>,
+    misses = 0,
+  ): { port: HeldInputPort; registered: { seq: number; gate: unknown }[]; polls: () => number } {
+    const registered: { seq: number; gate: unknown }[] = [];
+    let polls = 0;
+    const port: HeldInputPort = {
+      register: (seq, gate) => {
+        registered.push({ seq, gate });
+        return Promise.resolve(undefined);
+      },
+      poll: () => {
+        polls += 1;
+        return Promise.resolve(polls > misses ? answers : {});
+      },
+    };
+    return { port, registered, polls: () => polls };
+  }
 
-  it("agent(): a resolved journal hit returns the memoized result without running the leaf", async () => {
-    const leaf = vi.fn(() => Promise.resolve("fresh"));
-    const fp = FP(["agent", null, "test-model", "do it", null]);
-    const { journal } = fakeJournal({
-      1: { seq: 1, kind: "agent", fingerprint: fp, label: "", result: "memoized" },
-    });
-    const { host } = makeHost({ leaf: { run: leaf }, journal });
-    expect(await host.agent("do it", { model: "test-model" })).toBe("memoized");
-    expect(leaf).not.toHaveBeenCalled();
-  });
-
-  it("agent(): a miss runs the leaf and journals the resolved result", async () => {
-    const { journal, puts } = fakeJournal();
-    const { host } = makeHost({ leaf: { run: () => Promise.resolve("answer") }, journal });
-    expect(await host.agent("prompt", { model: "m" })).toBe("answer");
-    expect(puts).toHaveLength(1);
-    expect(puts[0]).toMatchObject({ seq: 1, kind: "agent", result: "answer" });
-  });
-
-  it("agent(): a fingerprint mismatch on replay is a determinism error", async () => {
-    const { journal } = fakeJournal({
-      1: { seq: 1, kind: "agent", fingerprint: "STALE", label: "", result: "x" },
-    });
-    const { host } = makeHost({ leaf: { run: () => Promise.resolve("y") }, journal });
-    await expect(host.agent("changed prompt", { model: "m" })).rejects.toThrow(
-      /Nondeterministic replay/,
+  it("humanInput(): registers the gate, holds polling, and returns the normalized answer", async () => {
+    const { port, registered } = fakeHeldInput(
+      { approve: { value: "yes", isOther: false } },
+      2, // two empty polls first — proves the seam holds across misses
     );
-  });
-
-  it("agent(): a suspended journal entry resumes the leaf from its checkpoint + answers", async () => {
-    const fp = FP(["agent", null, "m", "ask", null]);
-    let resumeArg: unknown;
-    const checkpoint = { messages: [], iteration: 2, totals: { inputTokens: 1, outputTokens: 1 } };
-    const { journal } = fakeJournal({
-      1: {
-        seq: 1,
-        kind: "agent",
-        fingerprint: fp,
-        label: "",
-        state: "suspended",
-        result: { checkpoint, answers: { tc_1: "yes" } },
-      },
-    });
-    const { host } = makeHost({
-      leaf: {
-        run: (_p, _o, _s, resume) => {
-          resumeArg = resume;
-          return Promise.resolve("done");
-        },
-      },
-      journal,
-    });
-    expect(await host.agent("ask", { model: "m" })).toBe("done");
-    expect(resumeArg).toEqual({ checkpoint, answers: { tc_1: "yes" } });
-  });
-
-  it("humanInput(): suspends with a gate when there is no answer yet (SuspendError path)", async () => {
-    const { journal } = fakeJournal();
-    const { host } = makeHost({ journal });
-    const err = await host
-      .humanInput({
-        prompt: "Ship it?",
-        input: { kind: "choice", options: ["yes", "no"] },
-        key: "approve",
-      })
-      .catch((e: unknown) => e);
-    expect(err).toMatchObject({
-      name: "SuspendError",
-      signal: { reason: "human_input", seq: 1, humanInput: { key: "approve", prompt: "Ship it?" } },
-    });
-  });
-
-  it("humanInput(): a resolved journal entry returns the validated answer (no re-suspend)", async () => {
-    const fp = FP([
-      "human_input",
-      "approve",
-      "Ship it?",
-      { kind: "choice", options: ["yes", "no"] },
-    ]);
-    const { journal } = fakeJournal({
-      1: {
-        seq: 1,
-        kind: "human_input",
-        fingerprint: fp,
-        label: "",
-        result: { value: "yes", isOther: false },
-      },
-    });
-    const { host } = makeHost({ journal });
+    const { host } = makeHost({ heldInput: port, heldPollIntervalMs: 1 });
     const result = await host.humanInput({
       prompt: "Ship it?",
       input: { kind: "choice", options: ["yes", "no"] },
       key: "approve",
     });
     expect(result).toEqual({ value: "yes", isOther: false });
+    expect(registered).toHaveLength(1);
+    expect(registered[0]).toMatchObject({ seq: 1, gate: { key: "approve", prompt: "Ship it?" } });
   });
 
-  it("humanInput(): calls onSuspend (never resolving) when wired, with the timeout expiry", async () => {
-    const { journal } = fakeJournal();
-    let captured: SuspendSignal | undefined;
-    const { host } = makeHost({ journal, now: () => 1000, onSuspend: (s) => (captured = s) });
-    // The seam never resolves with onSuspend wired; flush microtasks and assert on the captured signal.
-    void host.humanInput({ prompt: "Q", input: { kind: "text" }, timeout: "48h" });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(captured?.reason).toBe("human_input");
-    expect(captured?.humanInput?.expiresAt).toBe(1000 + 48 * 3_600_000);
-  });
-
-  it("step(): memoizes its result and skips fn on replay", async () => {
-    const fn = vi.fn(() => Promise.resolve({ n: 7 }));
-    const { journal, puts } = fakeJournal();
-    const { host } = makeHost({ journal });
-    expect(await host.step("compute", fn)).toEqual({ n: 7 });
-    expect(puts[0]).toMatchObject({ seq: 1, kind: "step", label: "compute" });
-
-    // Replay: a resolved hit returns without calling fn.
-    const fp = FP(["step", "compute"]);
-    const replay = fakeJournal({
-      1: { seq: 1, kind: "step", fingerprint: fp, label: "", result: { n: 7 } },
+  it("humanInput(): carries the timeout expiry + onTimeout on the registered gate", async () => {
+    const { port, registered } = fakeHeldInput({ "seam-1": { value: "ok" } });
+    const { host } = makeHost({ heldInput: port, heldPollIntervalMs: 1, now: () => 1000 });
+    await host.humanInput({ prompt: "Q", input: { kind: "text" }, timeout: "48h" });
+    expect(registered[0]?.gate).toMatchObject({
+      expiresAt: 1000 + 48 * 3_600_000,
+      onTimeout: "fail",
     });
-    const fn2 = vi.fn(() => Promise.resolve({ n: 99 }));
-    const { host: host2 } = makeHost({ journal: replay.journal });
-    expect(await host2.step("compute", fn2)).toEqual({ n: 7 });
-    expect(fn2).not.toHaveBeenCalled();
   });
 
-  it("sleep(): suspends above the threshold (release), holds below it", async () => {
-    const { journal } = fakeJournal();
-    const suspends: SuspendSignal[] = [];
-    const { host, held } = makeHost({ journal, onSuspend: (s) => suspends.push(s) });
-    await host.sleep(1000); // below 30s → holds
-    expect(held).toEqual([1000]);
-    void host.sleep(60_000); // above 30s → suspends (never resolves)
-    await new Promise((r) => setTimeout(r, 0));
-    expect(suspends).toHaveLength(1);
-    expect(suspends[0]).toMatchObject({ reason: "sleep", durationMs: 60_000 });
+  it("humanInput(): rejects clearly when neither freeze nor heldInput is wired", async () => {
+    const { host } = makeHost();
+    await expect(host.humanInput({ prompt: "Q", input: { kind: "text" } })).rejects.toThrow(
+      /humanInput is not available/,
+    );
   });
 
-  it("sleep(): a journaled (elapsed) sleep replays past instantly", async () => {
-    const fp = FP(["sleep"]);
-    const { journal } = fakeJournal({
-      1: { seq: 1, kind: "sleep", fingerprint: fp, label: "sleep", result: null },
-    });
-    const { host, held } = makeHost({ journal });
-    await host.sleep(60_000);
-    expect(held).toEqual([]); // neither held nor suspended — already elapsed
-  });
-
-  it("setPhase + isReplaying: suppressed below the replay frontier, live at/after it", async () => {
-    const set = vi.fn();
-    const phases: PhaseController = {
-      set,
-      capture: () => null,
-      runInPhase: (_id, fn) => fn(),
+  it("humanInput(): the poll loop rejects promptly when the run aborts mid-hold", async () => {
+    const registered: { seq: number; gate: unknown }[] = [];
+    const controller = new AbortController();
+    const port: HeldInputPort = {
+      register: (seq, gate) => {
+        registered.push({ seq, gate });
+        return Promise.resolve(undefined);
+      },
+      poll: () => {
+        // Never answered; abort after the first empty poll.
+        controller.abort(new RunAbortedError("cancelled"));
+        return Promise.resolve({});
+      },
     };
-    const { journal } = fakeJournal();
-    // Frontier 2: seam 1 replays (suppressed), seam 2 crosses the frontier (live).
-    const { host } = makeHost({ journal, phases, replayFrontier: 2 });
-    expect(host.isReplaying()).toBe(true);
-    host.setPhase("early", undefined); // replaying → suppressed
-    expect(set).not.toHaveBeenCalled();
-    await host.step("seam-1", () => Promise.resolve(1)); // seq 1
-    await host.step("seam-2", () => Promise.resolve(2)); // seq 2 → crosses frontier → live
-    expect(host.isReplaying()).toBe(false);
-    host.setPhase("late", undefined); // live → emitted
-    expect(set).toHaveBeenCalledWith("late", undefined);
+    const { host } = makeHost({
+      heldInput: port,
+      heldPollIntervalMs: 1,
+      signal: controller.signal,
+    });
+    await expect(host.humanInput({ prompt: "Q", input: { kind: "text" } })).rejects.toThrow(
+      RunAbortedError,
+    );
+  });
+
+  it("agent(): a parked leaf holds for the answer and re-enters with ACCUMULATED answers", async () => {
+    const checkpoint = { messages: [], iteration: 1, totals: { inputTokens: 1, outputTokens: 1 } };
+    const resumes: unknown[] = [];
+    let call = 0;
+    const leaf: LeafExecutor = {
+      run: (_p, _o, _s, resume) => {
+        resumes.push(resume);
+        call += 1;
+        if (call === 1) {
+          const err = new LeafParked({ toolCallId: "tc_1", prompt: "First?", inputSpec: {} });
+          err.checkpoint = checkpoint;
+          return Promise.reject(err);
+        }
+        if (call === 2) {
+          const err = new LeafParked({ toolCallId: "tc_2", prompt: "Second?", inputSpec: {} });
+          err.checkpoint = checkpoint;
+          return Promise.reject(err);
+        }
+        return Promise.resolve("leaf-done");
+      },
+    };
+    const { port, registered } = fakeHeldInput({ tc_1: "yes", tc_2: "no" });
+    const { host } = makeHost({ leaf, heldInput: port, heldPollIntervalMs: 1 });
+    expect(await host.agent("ask", { model: "m" })).toBe("leaf-done");
+    // Both gates registered under the SAME leaf seq; each re-entry saw every earlier answer.
+    expect(registered.map((r) => r.seq)).toEqual([1, 1]);
+    expect(resumes[1]).toMatchObject({ checkpoint, answers: { tc_1: "yes" } });
+    expect(resumes[2]).toMatchObject({ checkpoint, answers: { tc_1: "yes", tc_2: "no" } });
+  });
+
+  it("sleep(): a wait of ANY length holds in-process — no suspend without a freeze substrate", async () => {
+    const { host, held } = makeHost();
+    await host.sleep(60_000); // ≥ the snapshot threshold, still a hold here
+    expect(held).toEqual([60_000]);
   });
 });
 
@@ -693,79 +590,14 @@ describe("parseTimeoutMs", () => {
   });
 });
 
-describe("WorkerWorkflowHost — callWorkflow durable seam", () => {
-  const FP = (parts: readonly unknown[]): string => seamFingerprint(parts);
-
-  it("returns the memoized child output on a resolved journal hit (never re-starts the child)", async () => {
-    const start = vi.fn(() =>
-      Promise.resolve({ childRunId: "c", status: "completed", output: "fresh" }),
-    );
-    const fp = FP(["workflow_call", "child-wf", { a: 1 }, null]);
-    const { journal } = fakeJournal({
-      1: { seq: 1, kind: "workflow_call", fingerprint: fp, label: "", result: "memoized" },
+describe("WorkerWorkflowHost — callWorkflow (hold path)", () => {
+  it("holds in-process via the dispatcher's call() and returns the child's output", async () => {
+    const call = vi.fn(() => Promise.resolve({ said: "child-done" }));
+    const { host } = makeHost({ children: childStub({ call }) });
+    expect(await host.callWorkflow("child-wf", { a: 1 }, undefined)).toEqual({
+      said: "child-done",
     });
-    const { host } = makeHost({ children: childStub({ start }), journal });
-    expect(await host.callWorkflow("child-wf", { a: 1 }, undefined)).toBe("memoized");
-    expect(start).not.toHaveBeenCalled();
-  });
-
-  it("starts the child and returns its output + journals it when already complete", async () => {
-    const { journal, puts } = fakeJournal();
-    const { host } = makeHost({
-      children: childStub({
-        start: () =>
-          Promise.resolve({ childRunId: "c1", status: "completed", output: { done: true } }),
-      }),
-      journal,
-    });
-    expect(await host.callWorkflow("child-wf", {}, undefined)).toEqual({ done: true });
-    expect(puts[0]).toMatchObject({ seq: 1, kind: "workflow_call", result: { done: true } });
-  });
-
-  it("suspends waiting_for_child when the started child isn't terminal", async () => {
-    const { journal } = fakeJournal();
-    const { host } = makeHost({
-      children: childStub({
-        start: () => Promise.resolve({ childRunId: "c1", status: "running", output: null }),
-      }),
-      journal,
-    });
-    const err = await host.callWorkflow("child-wf", {}, undefined).catch((e: unknown) => e);
-    expect(err).toMatchObject({
-      name: "SuspendError",
-      signal: { reason: "workflow_call", seq: 1, childRunId: "c1" },
-    });
-  });
-
-  it("on resume (pending entry) polls the journaled child and returns its output", async () => {
-    const fp = FP(["workflow_call", "child-wf", {}, null]);
-    const poll = vi.fn(() =>
-      Promise.resolve({ childRunId: "c1", status: "completed", output: "child-done" }),
-    );
-    const { journal } = fakeJournal({
-      1: {
-        seq: 1,
-        kind: "workflow_call",
-        fingerprint: fp,
-        label: "",
-        state: "pending",
-        result: "c1",
-      },
-    });
-    const { host } = makeHost({ children: childStub({ poll }), journal });
-    expect(await host.callWorkflow("child-wf", {}, undefined)).toBe("child-done");
-    expect(poll).toHaveBeenCalledWith("c1");
-  });
-
-  it("throws when the child failed", async () => {
-    const { journal } = fakeJournal();
-    const { host } = makeHost({
-      children: childStub({
-        start: () => Promise.resolve({ childRunId: "c1", status: "failed", output: null }),
-      }),
-      journal,
-    });
-    await expect(host.callWorkflow("child-wf", {}, undefined)).rejects.toThrow(/failed/);
+    expect(call).toHaveBeenCalledWith("child-wf", { a: 1 }, undefined, undefined);
   });
 });
 

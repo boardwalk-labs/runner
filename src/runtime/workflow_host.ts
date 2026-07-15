@@ -27,17 +27,7 @@ import type {
 import type { BrowserSessionManager } from "./browser_session.js";
 import { LeafParked, type LeafResume } from "@boardwalk-labs/engine/core";
 import { normalizeHumanInputResult } from "./wire/human_input.js";
-import {
-  SeamSequencer,
-  SuspendError,
-  childRunIdSchema,
-  determinismError,
-  leafResumeSchema,
-  seamFingerprint,
-  SUSPEND_THRESHOLD_MS,
-  type JournalSeam,
-  type SuspendSignal,
-} from "./suspension.js";
+import { SuspensionCounter, SUSPEND_THRESHOLD_MS, type SuspendSignal } from "./suspension.js";
 import type { FreezeCoordinator, FreezeOutcome, WakeValue } from "./freeze_coordinator.js";
 import { throwIfAborted } from "./run_abort.js";
 
@@ -92,10 +82,11 @@ export interface ChildResult {
   output: unknown;
 }
 
-/** Dispatches child runs: `call` holds + returns output (the no-journal path); `start`/`poll` back the
- *  DURABLE callWorkflow seam (start once, suspend `waiting_for_child` on a non-terminal child, poll on
- *  resume); `run` is fire-and-forget → run id; `schedule` provisions a durable future/recurring run →
- *  schedule id. The `signal` lets a hold/start abort promptly when the parent run is cancelled. */
+/** Dispatches child runs: `call` holds in-process + returns the completed child's output (the
+ *  hold path); `start`/`poll` back the snapshot-substrate callWorkflow seam (start once, freeze
+ *  `waiting_for_child` on a non-terminal child); `run` is fire-and-forget → run id; `schedule`
+ *  provisions a durable future/recurring run → schedule id. The `signal` lets a hold/start abort
+ *  promptly when the parent run is cancelled. */
 export interface ChildDispatcher {
   call(
     slug: string,
@@ -121,9 +112,10 @@ export interface SecretAccessor {
   get(name: string): Promise<string>;
 }
 
-/** Register-without-release: register a HELD HITL gate so it is
- *  answerable while the run keeps running, and poll for the answer. Backed by the broker's
- *  `inputs` endpoints. Absent ⇒ a held gate is only answerable once it freezes. */
+/** Register a HELD HITL gate so it is answerable while the run keeps its process, and poll for
+ *  the answer. Backed by the broker's `inputs` endpoints. On the snapshot substrate this is the
+ *  register-without-release half of a freeze; on a no-freeze runtime (a self-hosted daemon) it is
+ *  the WHOLE mechanism — the seam registers, then holds and polls until answered. */
 export interface HeldInputPort {
   register(seq: number, gate: SuspendSignal["humanInput"]): Promise<unknown>;
   poll(seq: number): Promise<Record<string, unknown>>;
@@ -237,38 +229,20 @@ export interface WorkerWorkflowHostDeps {
   /** Override the 7-day hold ceiling (tests). */
   maxSleepMs?: number;
   /**
-   * Durable-suspension journal (the durable-suspension design): the host memoizes each `agent`/`step`/`sleep`/
-   * `humanInput` seam here, so a resumed run replays journaled seams instantly instead of re-running
-   * them. Backed by the broker over the run token on hosted runs. Absent ⇒ no memoization (the
-   * local/test path): seams run live every time and a suspend can't be resumed.
-   */
-  journal?: JournalSeam;
-  /**
-   * Raise a durable suspension: the host calls this from a suspending seam, then returns a
-   * never-resolving promise; the worker races that against the program body and tears the task down
-   * (the program's own `try/catch` can't swallow a suspend this way). Absent ⇒ a suspending seam
-   * rejects with {@link SuspendError} instead (the local/test path).
-   */
-  onSuspend?: (signal: SuspendSignal) => void;
-  /**
    * Snapshot-substrate suspension (the microVM freeze model): when present, a suspending seam
-   * BLOCKS on the coordinator instead of raising `onSuspend` — the platform freezes the whole VM
-   * and a wake resolves the seam in place, heap intact (no exit, no journal replay). Every hook
-   * also runs under the coordinator's quiescence gate: a freeze never captures a live platform
-   * stream, and work arriving while a freeze is pending queues until the wake.
+   * BLOCKS on the coordinator — the platform freezes the whole VM and a wake resolves the seam in
+   * place, heap intact. Every hook also runs under the coordinator's quiescence gate: a freeze
+   * never captures a live platform stream, and work arriving while a freeze is pending queues
+   * until the wake. Absent ⇒ the no-substrate HOLD path: a waiting seam blocks the live process
+   * for the whole wait (self-hosted daemons, the Fargate break-glass, unit tests).
    */
   freeze?: FreezeCoordinator;
-  /** Register-without-release for HELD human-input gates. Only
-   *  meaningful alongside `freeze`; absent ⇒ a held gate is answerable only once it freezes. */
+  /** Register + poll for HELD human-input gates (see {@link HeldInputPort}). Absent alongside
+   *  `freeze` ⇒ a held gate is answerable only once it freezes; absent WITHOUT `freeze` ⇒
+   *  humanInput is unsupported in this runtime and rejects clearly. */
   heldInput?: HeldInputPort;
   /** Poll interval for a held gate's answer (default 3s). */
   heldPollIntervalMs?: number;
-  /**
-   * The highest journaled seq at claim (0 on a fresh run). While re-running seams up to this
-   * frontier on a resume, the host is REPLAYING and observability (phase markers, program logs) is
-   * suppressed — those lines were emitted in the prior segment.
-   */
-  replayFrontier?: number;
 }
 
 export class WorkerWorkflowHost implements WorkflowHost {
@@ -276,8 +250,8 @@ export class WorkerWorkflowHost implements WorkflowHost {
   private readonly now: () => number;
   private readonly maxSleepMs: number;
   private readonly heldPollIntervalMs: number;
-  /** Synchronous durable-seam counter + silent-replay live flag (the durable-suspension design). */
-  private readonly seq: SeamSequencer;
+  /** Monotonic per-run counter keying suspensions + their HITL gate rows. */
+  private readonly seq: SuspensionCounter;
   /** Run context + on-demand public-API bearer the SDK `runtime` accessor reads off the host. */
   readonly runtime: RuntimeContext;
 
@@ -286,25 +260,8 @@ export class WorkerWorkflowHost implements WorkflowHost {
     this.now = deps.now ?? Date.now;
     this.maxSleepMs = deps.maxSleepMs ?? MAX_SLEEP_MS;
     this.heldPollIntervalMs = deps.heldPollIntervalMs ?? 3_000;
-    this.seq = new SeamSequencer(deps.replayFrontier ?? 0);
+    this.seq = new SuspensionCounter();
     this.runtime = deps.runtime;
-  }
-
-  /** True while re-running already-journaled seams on a resume (the worker suppresses program-log +
-   *  phase observability during this window — those lines were emitted in the prior segment). */
-  isReplaying(): boolean {
-    return this.seq.isReplaying();
-  }
-
-  /** Raise a durable suspension. With `onSuspend` wired (the real worker) the host signals out-of-band
-   *  and returns a never-resolving promise, so the program's own try/catch can't swallow it; without
-   *  it (the local/test path) it rejects with {@link SuspendError}. */
-  private suspend(signal: SuspendSignal): Promise<never> {
-    if (this.deps.onSuspend === undefined) return Promise.reject(new SuspendError(signal));
-    this.deps.onSuspend(signal);
-    return new Promise<never>(() => {
-      /* never settles: the worker races this against the body and tears the task down */
-    });
   }
 
   /** Run `fn` only if the run isn't aborted; otherwise REJECT (never throw synchronously) with the
@@ -410,6 +367,34 @@ export class WorkerWorkflowHost implements WorkflowHost {
     }
   }
 
+  /**
+   * The no-freeze HOLD for a human-input gate: register it with the broker (it surfaces in the
+   * inbox/API at once), then poll until the answer arrives — the process stays alive and pays
+   * for the wait. Rejects promptly when the run's abort signal fires (cancel / credit stop),
+   * which is also how a server-side gate expiry that fails the run unwinds this loop.
+   */
+  private async holdForAnswer(seq: number, gate: SuspendSignal["humanInput"]): Promise<unknown> {
+    const held = this.deps.heldInput;
+    if (held === undefined || gate === undefined) {
+      throw new AppError(
+        ErrorCode.VALIDATION_FAILED,
+        "humanInput is not available in this runtime (no control-plane connection to register the gate)",
+        { kind: "human_input_unavailable" },
+      );
+    }
+    await held.register(seq, gate);
+    for (;;) {
+      throwIfAborted(this.deps.signal);
+      try {
+        const answers = await held.poll(seq);
+        if (gate.key in answers) return answers[gate.key];
+      } catch {
+        /* transient — retry next tick */
+      }
+      await this.sleeper.hold(this.heldPollIntervalMs, this.deps.signal);
+    }
+  }
+
   /** Map a froze/aborted freeze outcome to the gate's answer (or throw on an unexpected abort). */
   private resolveFreezeAnswer(outcome: FreezeOutcome, key: string): HumanInputResult {
     if (outcome.kind !== "wake") {
@@ -439,8 +424,6 @@ export class WorkerWorkflowHost implements WorkflowHost {
 
   setPhase(name: string, opts: PhaseOptions | undefined): void {
     throwIfAborted(this.deps.signal);
-    // Suppressed during replay: the marker was already emitted in the prior segment.
-    if (this.seq.isReplaying()) return;
     this.deps.phases?.set(name, opts);
   }
 
@@ -448,64 +431,26 @@ export class WorkerWorkflowHost implements WorkflowHost {
     return this.guarded(() => this.agentSeam(prompt, opts));
   }
 
-  /** The `agent()` durable seam: a journal hit returns the memoized result (never re-runs the LLM); a
-   *  `suspended` hit resumes a parked leaf from its checkpoint + answers; a miss runs the leaf and
-   *  journals the result. A leaf that PARKS (the model called `human_input`) suspends the run. */
+  /** The `agent()` seam: run the leaf to completion. A leaf that PARKS (the model called the
+   *  `human_input` tool) waits for the answer — a freeze on the snapshot substrate, a held poll
+   *  otherwise — and re-enters from its in-memory checkpoint. Nothing is memoized: a crash-restart
+   *  re-runs the leaf (restart-from-top semantics). */
   private async agentSeam(prompt: string, opts: AgentOptions | undefined): Promise<unknown> {
+    // One suspension key for the whole leaf: every gate this leaf raises registers under it, and
+    // a wake joins ALL of its answered rows, so answers accumulate server-side across parks.
     const seq = this.seq.next();
-    const fingerprint = seamFingerprint([
-      "agent",
-      opts?.provider ?? null,
-      opts?.model ?? null,
-      prompt,
-      opts?.schema ?? null,
-    ]);
-    let resume: LeafResume | undefined;
-    if (this.deps.journal !== undefined) {
-      const existing = await this.deps.journal.get(seq);
-      if (existing !== null) {
-        if (existing.fingerprint !== fingerprint)
-          throw determinismError(seq, "agent", existing.kind);
-        if (existing.state === "resolved") return existing.result;
-        // A `suspended` entry is a parked leaf (tool-level human_input): re-enter it from the stored
-        // checkpoint + the answers the broker joined in.
-        resume = leafResumeSchema.parse(existing.result);
-      }
-    }
     // Bind a computer-use session's tools (browser tier ⇒ its in-VM Playwright MCP) if one was passed.
-    // Done AFTER the fingerprint so the injected MCP never perturbs determinism (the fingerprint keys
-    // on provider/model/prompt/schema only — an mcp/session change must not invalidate a journal hit).
     const effectiveOpts = this.bindBrowserSession(opts);
+    // Held-path answers accumulate locally too: a turn with several human_input calls parks once
+    // per unanswered gate, and each re-entry must still see every earlier answer.
+    const heldAnswers: Record<string, unknown> = {};
+    let resume: LeafResume | undefined;
     for (;;) {
       try {
-        const result = await this.deps.leaf.run(prompt, effectiveOpts, this.deps.signal, resume);
-        await this.deps.journal?.put({
-          seq,
-          kind: "agent",
-          fingerprint,
-          label: prompt.slice(0, 120),
-          result,
-        });
-        return result;
+        return await this.deps.leaf.run(prompt, effectiveOpts, this.deps.signal, resume);
       } catch (err) {
         if (!(err instanceof LeafParked)) throw err;
         // The model paused for a person (the in-leaf `human_input` tool).
-        const signal: SuspendSignal = {
-          reason: "human_input",
-          seq,
-          fingerprint,
-          ...(err.checkpoint !== undefined ? { leafCheckpoint: err.checkpoint } : {}),
-          humanInput: {
-            key: err.request.toolCallId,
-            prompt: err.request.prompt,
-            inputSpec: err.request.inputSpec,
-          },
-        };
-        const freeze = this.deps.freeze;
-        if (freeze === undefined) return this.suspend(signal);
-        // Snapshot substrate: freeze in place; the wake carries the answers and the leaf
-        // re-enters from its checkpoint — heap intact, no journal round-trip. A leaf may park
-        // again on a later turn, so this loops.
         if (err.checkpoint === undefined) {
           throw new AppError(
             ErrorCode.INTERNAL_ERROR,
@@ -513,6 +458,26 @@ export class WorkerWorkflowHost implements WorkflowHost {
             { kind: "leaf_parked_no_checkpoint", seq },
           );
         }
+        const signal: SuspendSignal = {
+          reason: "human_input",
+          seq,
+          leafCheckpoint: err.checkpoint,
+          humanInput: {
+            key: err.request.toolCallId,
+            prompt: err.request.prompt,
+            inputSpec: err.request.inputSpec,
+          },
+        };
+        const freeze = this.deps.freeze;
+        if (freeze === undefined) {
+          // Hold path: register the gate and poll until answered; the transcript stays in memory.
+          heldAnswers[err.request.toolCallId] = await this.holdForAnswer(seq, signal.humanInput);
+          resume = { checkpoint: err.checkpoint, answers: { ...heldAnswers } };
+          continue;
+        }
+        // Snapshot substrate: freeze in place; the wake carries the answers and the leaf
+        // re-enters from its checkpoint — heap intact. A leaf may park again on a later turn,
+        // so this loops.
         const outcome = await this.freezeWait(freeze, signal);
         if (outcome.kind !== "wake") {
           throw new AppError(
@@ -529,8 +494,9 @@ export class WorkerWorkflowHost implements WorkflowHost {
     }
   }
 
-  /** Program-level `humanInput()`: suspend the run on a gate, resume with the validated answer. The
-   *  SDK marks this optional; the hosted host always implements it. */
+  /** Program-level `humanInput()`: wait on a gate — a freeze on the snapshot substrate, a held
+   *  poll otherwise — and return the validated answer. The SDK marks this optional; the hosted
+   *  host always implements it. */
   humanInput(opts: HumanInputOptions): Promise<HumanInputResult> {
     return this.guarded(() => this.humanInputSeam(opts));
   }
@@ -538,23 +504,10 @@ export class WorkerWorkflowHost implements WorkflowHost {
   private async humanInputSeam(opts: HumanInputOptions): Promise<HumanInputResult> {
     const seq = this.seq.next();
     const key = opts.key ?? `seam-${String(seq)}`;
-    const fingerprint = seamFingerprint(["human_input", key, opts.prompt, opts.input]);
-    if (this.deps.journal !== undefined) {
-      const existing = await this.deps.journal.get(seq);
-      if (existing !== null) {
-        if (existing.fingerprint !== fingerprint) {
-          throw determinismError(seq, "human_input", existing.kind);
-        }
-        // A resolved entry is the human's validated response; a still-pending entry is a spurious
-        // wake without an answer, so fall through and re-suspend.
-        if (existing.state === "resolved") return normalizeHumanInputResult(existing.result);
-      }
-    }
     const expiresAt = this.timeoutExpiry(opts.timeout);
     const signal: SuspendSignal = {
       reason: "human_input",
       seq,
-      fingerprint,
       humanInput: {
         key,
         prompt: opts.prompt,
@@ -568,7 +521,8 @@ export class WorkerWorkflowHost implements WorkflowHost {
     if (freeze !== undefined) {
       return await this.freezeHumanInput(freeze, signal, key);
     }
-    return this.suspend(signal);
+    // Hold path: register the gate and poll until a person answers.
+    return normalizeHumanInputResult(await this.holdForAnswer(seq, signal.humanInput));
   }
 
   /** Absolute wake time for a `humanInput({ timeout })`, or null when there is none / it's unparseable. */
@@ -577,83 +531,26 @@ export class WorkerWorkflowHost implements WorkflowHost {
     return ms === null ? null : this.now() + ms;
   }
 
-  /** `step.run(name, fn)`: run `fn` exactly once across restarts, memoizing its result in the journal
-   *  (the escape hatch for nondeterministic work on a suspend/resume path). */
-  step(name: string, fn: () => unknown): Promise<unknown> {
-    return this.guarded(() => this.stepSeam(name, fn));
-  }
-
-  private async stepSeam(name: string, fn: () => unknown): Promise<unknown> {
-    const seq = this.seq.next();
-    const fingerprint = seamFingerprint(["step", name]);
-    if (this.deps.journal !== undefined) {
-      const existing = await this.deps.journal.get(seq);
-      if (existing !== null) {
-        if (existing.fingerprint !== fingerprint)
-          throw determinismError(seq, "step", existing.kind);
-        if (existing.state === "resolved") return existing.result;
-      }
-    }
-    const result = await fn();
-    await this.deps.journal?.put({ seq, kind: "step", fingerprint, label: name, result });
-    return result;
-  }
-
   callWorkflow(slug: string, input: unknown, opts: CallOptions | undefined): Promise<unknown> {
     return this.guarded(() => this.callWorkflowSeam(slug, input, opts));
   }
 
-  /** The `workflows.call` durable seam (the durable-suspension design): start the child once + memoize its
-   *  output; a non-terminal child SUSPENDS the parent (`waiting_for_child`, the child's id journaled)
-   *  — the parent releases its task and is woken when the child finalizes. On resume the seam polls
-   *  the journaled child and returns its output (or throws on a failed child). Without a journal (the
-   *  local/test path) it falls back to the in-process hold-and-poll. */
+  /** The `workflows.call` seam: start the child once (idempotently — the child's run row is the
+   *  durable memo, so a crash-restarted parent re-attaches instead of re-spawning). A non-terminal
+   *  child suspends the parent `waiting_for_child` on the snapshot substrate (the wake carries the
+   *  finalized child, heap intact); without one the parent HOLDS in-process and polls. */
   private async callWorkflowSeam(
     slug: string,
     input: unknown,
     opts: CallOptions | undefined,
   ): Promise<unknown> {
-    if (this.deps.journal === undefined) {
+    const freeze = this.deps.freeze;
+    if (freeze === undefined) {
+      // Hold path: the dispatcher's in-process hold-and-poll until the child is terminal.
       return this.deps.children.call(slug, input, opts, this.deps.signal);
     }
-    const seq = this.seq.next();
-    const fingerprint = seamFingerprint([
-      "workflow_call",
-      slug,
-      input ?? null,
-      opts?.idempotencyKey ?? null,
-    ]);
-    let knownChildId: string | undefined;
-    const existing = await this.deps.journal.get(seq);
-    if (existing !== null) {
-      if (existing.fingerprint !== fingerprint) {
-        throw determinismError(seq, "workflow_call", existing.kind);
-      }
-      if (existing.state === "resolved") return existing.result;
-      // A pending entry holds the child run id we suspended waiting on (resume polls it).
-      knownChildId = childRunIdSchema.parse(existing.result);
-    }
-    // First execution starts (idempotently) the child; a resume polls the journaled one.
-    const child =
-      knownChildId === undefined
-        ? await this.deps.children.start(slug, input, opts, this.deps.signal)
-        : await this.deps.children.poll(knownChildId);
-    if (child === null) {
-      throw new AppError(ErrorCode.INTERNAL_ERROR, `Called workflow's child run vanished`, {
-        slug,
-        childRunId: knownChildId,
-      });
-    }
-    if (child.status === "completed") {
-      await this.deps.journal.put({
-        seq,
-        kind: "workflow_call",
-        fingerprint,
-        label: slug,
-        result: child.output,
-      });
-      return child.output;
-    }
+    const child = await this.deps.children.start(slug, input, opts, this.deps.signal);
+    if (child.status === "completed") return child.output;
     if (child.status === "failed" || child.status === "cancelled") {
       throw new AppError(
         ErrorCode.VALIDATION_FAILED,
@@ -661,41 +558,35 @@ export class WorkerWorkflowHost implements WorkflowHost {
         { childRunId: child.childRunId, status: child.status },
       );
     }
-    // Still running → suspend; the child's finalize wakes us.
-    const signal: SuspendSignal = {
+    // Still running → park in place; the wake carries the finalized child directly (the heap
+    // holds this whole frame across the freeze).
+    const seq = this.seq.next();
+    const outcome = await this.freezeWait(freeze, {
       reason: "workflow_call",
       seq,
-      fingerprint,
       childRunId: child.childRunId,
-    };
-    const freeze = this.deps.freeze;
-    if (freeze !== undefined) {
-      // Snapshot substrate: park in place; the wake carries the finalized child directly (no
-      // journal write for the wake-derived value — the heap holds it and nothing replays).
-      const outcome = await this.freezeWait(freeze, signal);
-      if (outcome.kind !== "wake") {
-        throw new AppError(
-          ErrorCode.INTERNAL_ERROR,
-          "Suspend aborted surfaced to a child-wait seam (the coordinator retries these)",
-          { kind: "unexpected_abort", seq },
-        );
-      }
-      const woken = outcome.wake.child;
-      if (outcome.wake.kind !== "workflow_call" || woken === undefined) {
-        throw new AppError(
-          ErrorCode.INTERNAL_ERROR,
-          `Wake value does not carry the awaited child run (got kind "${outcome.wake.kind}")`,
-          { kind: "wake_mismatch", childRunId: child.childRunId },
-        );
-      }
-      if (woken.status === "completed") return woken.output;
+    });
+    if (outcome.kind !== "wake") {
       throw new AppError(
-        ErrorCode.VALIDATION_FAILED,
-        `Called workflow "${slug}" ${woken.status} (run ${woken.run_id})`,
-        { childRunId: woken.run_id, status: woken.status },
+        ErrorCode.INTERNAL_ERROR,
+        "Suspend aborted surfaced to a child-wait seam (the coordinator retries these)",
+        { kind: "unexpected_abort", seq },
       );
     }
-    return this.suspend(signal);
+    const woken = outcome.wake.child;
+    if (outcome.wake.kind !== "workflow_call" || woken === undefined) {
+      throw new AppError(
+        ErrorCode.INTERNAL_ERROR,
+        `Wake value does not carry the awaited child run (got kind "${outcome.wake.kind}")`,
+        { kind: "wake_mismatch", childRunId: child.childRunId },
+      );
+    }
+    if (woken.status === "completed") return woken.output;
+    throw new AppError(
+      ErrorCode.VALIDATION_FAILED,
+      `Called workflow "${slug}" ${woken.status} (run ${woken.run_id})`,
+      { childRunId: woken.run_id, status: woken.status },
+    );
   }
 
   /** Fire-and-forget trigger of another workflow; resolves to the new run's id (no hold/poll). */
@@ -742,7 +633,7 @@ export class WorkerWorkflowHost implements WorkflowHost {
 
   /** `computer.openBrowser()`: open a program-owned, in-VM browser session (the browser tier of
    *  computer use). Not a durable seam — a session is a live resource, reaped at run end, never
-   *  journaled/replayed. Absent backend ⇒ a clear "not available" error. */
+   *  persisted. Absent backend ⇒ a clear "not available" error. */
   openBrowserSession(opts: BrowserSessionOptions | undefined): Promise<BrowserSession> {
     return this.guarded(async () => {
       if (this.deps.browserSessions === undefined) {
@@ -778,9 +669,10 @@ export class WorkerWorkflowHost implements WorkflowHost {
     return this.guarded(() => this.sleepSeam(arg));
   }
 
-  /** A short sleep HOLDS the task in-process (cheaper than a release + replay round-trip); a long one
-   *  (≥ {@link SUSPEND_THRESHOLD_MS}) SUSPENDS — releases the task, and a timer re-dispatches the run
-   *  when due. Journaled so a resumed run replays past an already-elapsed sleep instantly. */
+  /** A short sleep HOLDS the task in-process (cheaper than a snapshot round-trip); a long one
+   *  (≥ {@link SUSPEND_THRESHOLD_MS}) SUSPENDS on the snapshot substrate — the VM freezes and the
+   *  wake resolves this very await, heap intact. Without a freeze substrate EVERY sleep holds,
+   *  whatever its length (the no-substrate rule: snapshot or hold, never replay). */
   private async sleepSeam(arg: SleepArg): Promise<void> {
     const ms = this.resolveSleepMs(arg);
     if (ms > this.maxSleepMs) {
@@ -790,33 +682,16 @@ export class WorkerWorkflowHost implements WorkflowHost {
         { kind: "sleep_cap" },
       );
     }
-    const seq = this.seq.next();
-    const fingerprint = seamFingerprint(["sleep"]);
-    if (this.deps.journal !== undefined) {
-      const existing = await this.deps.journal.get(seq);
-      if (existing !== null) {
-        if (existing.fingerprint !== fingerprint)
-          throw determinismError(seq, "sleep", existing.kind);
-        // A journaled sleep already elapsed in a prior segment — a resumed run only progresses past a
-        // sleep once it is due, so on replay this returns immediately.
-        return;
-      }
-    }
     // A non-positive duration (incl. an `until` already in the past) is a no-op hold, not an error.
     const holdMs = Math.max(0, ms);
     if (holdMs === 0) return;
     const freeze = this.deps.freeze;
     if (holdMs >= SUSPEND_THRESHOLD_MS && freeze !== undefined) {
-      // Snapshot substrate: freeze in place; the wake (when the sleep is due) resolves this very
-      // await, heap intact. An abort falls back to holding the REMAINDER in-process — the
-      // two-ways rule: snapshot or hold, never replay.
+      // Snapshot substrate: freeze in place. An abort falls back to holding the REMAINDER
+      // in-process.
       const requestedAt = this.now();
-      const outcome = await this.freezeWait(freeze, {
-        reason: "sleep",
-        seq,
-        fingerprint,
-        durationMs: holdMs,
-      });
+      const seq = this.seq.next();
+      const outcome = await this.freezeWait(freeze, { reason: "sleep", seq, durationMs: holdMs });
       if (outcome.kind === "wake") return;
       const remaining = holdMs - (this.now() - requestedAt);
       if (remaining <= 0) return;
@@ -824,14 +699,7 @@ export class WorkerWorkflowHost implements WorkflowHost {
       await this.sleeper.hold(remaining, this.deps.signal);
       return;
     }
-    // Long wait (transitional substrate): SUSPEND (release the task). The broker records the
-    // (resolved) sleep journal entry + the wake time transactionally, so on wake this seam replays
-    // past it (the journal hit above). Only when a journal is wired — without it there is no
-    // resume, so fall back to holding.
-    if (holdMs >= SUSPEND_THRESHOLD_MS && this.deps.journal !== undefined) {
-      return this.suspend({ reason: "sleep", seq, fingerprint, durationMs: holdMs });
-    }
-    // Short wait: HOLD the process (no journal — a crash-restart simply re-holds). Snapshot the
+    // Hold: the process sleeps in place (a crash-restart simply re-holds). Snapshot the
     // persistent workspace first so a crash during the hold can restore it. An abort mid-hold rejects.
     if (this.deps.onBeforeSleep !== undefined) await this.deps.onBeforeSleep();
     await this.sleeper.hold(holdMs, this.deps.signal);
