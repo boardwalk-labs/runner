@@ -81,6 +81,17 @@ pnpm test
 pnpm lint && pnpm typecheck && pnpm build
 ```
 
+## The Boardwalk repos
+
+- [`boardwalk`](https://github.com/boardwalk-labs/boardwalk) — the open-source single-node engine: cron scheduling, webhooks, durable runs, run history
+- [`sdk`](https://github.com/boardwalk-labs/sdk) — `@boardwalk-labs/workflow`, the TypeScript API a workflow program imports
+- [`cli`](https://github.com/boardwalk-labs/cli) — `boardwalk`: scaffold, validate, run locally, deploy
+- [`examples`](https://github.com/boardwalk-labs/examples) — copyable workflow templates (`boardwalk init --template`)
+- [`plugins`](https://github.com/boardwalk-labs/plugins) — skills + MCP server for Claude Code, Codex, Cursor, OpenClaw, OpenCode
+- [`runner-images`](https://github.com/boardwalk-labs/runner-images) — reproducible base images hosted runners execute in
+
+Hosted platform and docs: [boardwalk.sh](https://boardwalk.sh).
+
 ## License
 
 Apache-2.0
