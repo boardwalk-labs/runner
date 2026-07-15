@@ -61,14 +61,6 @@ export class BrokerChildDispatcher implements ChildDispatcher {
     return { childRunId: child.childRunId, status: child.status, output: child.output };
   }
 
-  /** Poll a child's current state by id (the resume path), or null when it isn't this run's child. */
-  async poll(childRunId: string): Promise<ChildResult | null> {
-    const child = await this.deps.client.getChild(childRunId);
-    return child === null
-      ? null
-      : { childRunId: child.id, status: child.status, output: child.output };
-  }
-
   /** Fire-and-forget: create (or re-attach to) the child and return its id without holding. */
   async run(slug: string, input: unknown, _opts: CallOptions | undefined): Promise<string> {
     const child = await this.deps.client.startChild(slug, input);

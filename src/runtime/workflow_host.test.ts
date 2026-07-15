@@ -31,7 +31,6 @@ function childStub(over: Partial<ChildDispatcher> = {}): ChildDispatcher {
     call: () => Promise.resolve({ ok: true }),
     start: () =>
       Promise.resolve({ childRunId: "child_1", status: "completed", output: { ok: true } }),
-    poll: () => Promise.resolve(null),
     run: () => Promise.resolve("run_1"),
     schedule: () => Promise.resolve("sched_1"),
     ...over,

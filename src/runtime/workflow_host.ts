@@ -101,8 +101,6 @@ export interface ChildDispatcher {
     opts: CallOptions | undefined,
     signal?: AbortSignal,
   ): Promise<ChildResult>;
-  /** Poll a child run's current state by id, or null when it isn't this run's child. */
-  poll(childRunId: string): Promise<ChildResult | null>;
   run(slug: string, input: unknown, opts: CallOptions | undefined): Promise<string>;
   schedule(slug: string, input: unknown, opts: ScheduleOptions): Promise<string>;
 }
