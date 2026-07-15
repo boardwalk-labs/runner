@@ -79,6 +79,26 @@ export class RuntimeFlusher {
     this.timer.unref();
   }
 
+  /**
+   * Suspend the periodic timer across a VM freeze — the pre-freeze hook pauses AFTER the tail flush
+   * (as its last, non-throwing step), and the wake path resumes AFTER {@link excludeIdle}. Without
+   * this, a tick landing in the sliver between the guest clock resync and the idle rebase would
+   * compute its delta over the whole frozen window and bill suspended time. Reversible, unlike
+   * {@link stop}; a freeze that aborts (snapshot failure → the seam holds in-process) must resume so
+   * a long hold keeps metering.
+   */
+  pause(): void {
+    if (this.timer === null) return;
+    clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  /** Restart periodic flushing after {@link pause} (wake, or a freeze abort). No-op once stopped. */
+  resume(): void {
+    if (this.stopped) return;
+    this.start();
+  }
+
   /** Stop the periodic timer and drain any in-flight flush. Does NOT book the final tail — call
    *  {@link flushFinal} for that on a clean terminal. Idempotent. */
   async stop(): Promise<void> {

@@ -84,6 +84,11 @@ export interface FreezeCoordinatorHooks {
   /** Runs when a wake lands, before the seam resolves: swap the run/api tokens onto the
    *  broker client and rebase the runtime meter past the frozen window. */
   onAfterWake?: (wake: WakePayload) => void | Promise<void>;
+  /** Runs when a REQUESTED freeze aborts (`suspend_abort` — snapshot/store failure) before the
+   *  parked seam resolves: undo onBeforeFreeze's reversible effects (resume the paused runtime
+   *  flusher) since the run now HOLDS in-process instead of freezing. Not called for a failure
+   *  inside onBeforeFreeze itself — that hook owns its own unwind. Must not throw. */
+  onFreezeAborted?: () => void;
 }
 
 export interface FreezeCoordinatorDeps {
@@ -273,6 +278,9 @@ export class FreezeCoordinator {
     }
     const resolve = this.parked;
     this.parked = null;
+    // The freeze is off — the seam will hold in-process, so onBeforeFreeze's reversible prep
+    // (the paused runtime flusher) must unwind before the hold starts metering-blind.
+    this.hooks.onFreezeAborted?.();
     resolve({ kind: "aborted", reason });
   }
 

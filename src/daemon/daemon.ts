@@ -9,7 +9,6 @@
 
 import { mkdir, rm } from "node:fs/promises";
 import * as path from "node:path";
-import * as os from "node:os";
 import type { AssignmentOffer, ClaimResponse } from "../contract.js";
 import { createLogger, type Logger } from "../runtime/support/index.js";
 import type { PoolClient } from "./pool_client.js";
@@ -70,7 +69,10 @@ export function runProcessEnv(
     BOARDWALK_CONTROL_PLANE_URL: claim.control_plane.base_url,
     BOARDWALK_RUN_TOKEN: claim.control_plane.run_token,
     BOARDWALK_API_KEY: claim.control_plane.api_token,
-    BOARDWALK_TASK_CPU_UNITS: String(os.cpus().length * 1024),
+    // BOARDWALK_TASK_CPU_UNITS is deliberately ABSENT: self-hosted compute is Boardwalk-unbilled
+    // (SELF_HOSTED_RUNNERS.md D5), so the runtime's wall-clock fallback (1 vCPU) is the right
+    // display metric. Stamping the host's core count here billed a run at cores × the compute rate
+    // for hardware the org owns.
     // The org's BYO inference providers, as data (the runner-direct BYO design) — consumed by the runtime's direct
     // model path. Names + endpoints + secret NAMES only; never a credential value.
     BOARDWALK_BYO_PROVIDERS: JSON.stringify(claim.byo_providers),

@@ -128,6 +128,30 @@ describe("FreezeCoordinator", () => {
     expect(outcome).toEqual({ kind: "aborted", reason: "store_unavailable" });
   });
 
+  it("fires onFreezeAborted on suspend_abort so the paused runtime flusher resumes for the hold", async () => {
+    const { channel } = fakeChannel();
+    const c = new FreezeCoordinator({ channel });
+    const onFreezeAborted = vi.fn();
+    c.setHooks({ onFreezeAborted });
+    const wait = c.suspendingWait(sleepSignal());
+    await tick();
+    c.onSuspendAbort({ reason: "store_unavailable" });
+    await wait;
+    expect(onFreezeAborted).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT fire onFreezeAborted on a wake (excludeIdle+resume own that path)", async () => {
+    const { channel } = fakeChannel();
+    const c = new FreezeCoordinator({ channel });
+    const onFreezeAborted = vi.fn();
+    c.setHooks({ onFreezeAborted });
+    const wait = c.suspendingWait(sleepSignal());
+    await tick();
+    c.onWake(wakePayload());
+    await wait;
+    expect(onFreezeAborted).not.toHaveBeenCalled();
+  });
+
   it("retries the freeze after an abort for a human-input seam", async () => {
     const { channel, requests } = fakeChannel();
     const delays: number[] = [];

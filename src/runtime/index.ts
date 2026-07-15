@@ -499,6 +499,16 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
           // The recorder never spans a snapshot: finalize + upload the in-flight segment before the
           // freeze (SCREEN_CAPTURE §4.3). Bounded internally, so a slow upload delays, not blocks, it.
           await capture?.stopAndFlush();
+          // Pause LAST (nothing after it can throw, so a failed persist never strands a paused
+          // flusher): with the timer off, no tick can land in the post-wake sliver between the
+          // guest clock resync and excludeIdle below — a tick there would compute its delta over
+          // the whole frozen window and bill suspended time. Resumed on wake and on suspend_abort.
+          activeFlusher?.pause();
+        },
+        // The freeze died (snapshot/store failure) — the seam holds in-process, which must keep
+        // metering: undo the pre-freeze pause.
+        onFreezeAborted: (): void => {
+          activeFlusher?.resume();
         },
         // On wake: reseed the userspace CSPRNG (clause 3 — a suspend snapshot restored more than
         // once, e.g. a re-dispatch retry, would otherwise repeat its post-wake `crypto.*` draws),
@@ -519,6 +529,8 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
             redactor.record(wake.api_token);
           }
           activeFlusher?.excludeIdle(wake.wall_clock_ms - freezeWallMs);
+          // Only now that the frozen window is excluded may the flush timer run again.
+          activeFlusher?.resume();
           // Resume capture in a fresh segment epoch (a suspend/resume boundary is a segment boundary).
           void capture?.startFresh();
         },

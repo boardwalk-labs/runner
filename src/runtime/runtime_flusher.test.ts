@@ -171,3 +171,74 @@ describe("RuntimeFlusher — periodic timer", () => {
     await expect(flusher.stop()).resolves.toBeUndefined();
   });
 });
+
+describe("RuntimeFlusher — pause/resume across a freeze", () => {
+  function timedSetup() {
+    vi.useFakeTimers();
+    let clock = 0;
+    const reports: { seconds: number; id: string }[] = [];
+    const flusher = new RuntimeFlusher({
+      runId: "run_1",
+      sessionId: "s1",
+      startedAtMs: 0,
+      now: () => clock,
+      report: (seconds, id) => {
+        reports.push({ seconds, id });
+        return Promise.resolve();
+      },
+      intervalMs: 1_000,
+    });
+    return { flusher, reports, setClock: (ms: number) => (clock = ms) };
+  }
+
+  it("a paused flusher never ticks — the resync→excludeIdle sliver cannot bill the frozen window", async () => {
+    const { flusher, reports, setClock } = timedSetup();
+    flusher.start();
+    setClock(1_000);
+    await flusher.flushNow(); // the pre-freeze tail flush (seq 0, 1s)
+    flusher.pause();
+    // The wake: the guest clock has jumped past a long frozen window, excludeIdle not yet applied.
+    // With the timer paused, no tick can fire here and book the frozen hour.
+    setClock(3_601_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(reports).toEqual([{ seconds: 1, id: "run_1:s1:rt:0" }]);
+    // excludeIdle lands, the timer resumes: only true post-wake runtime bills.
+    flusher.excludeIdle(3_600_000);
+    flusher.resume();
+    setClock(3_603_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(reports).toEqual([
+      { seconds: 1, id: "run_1:s1:rt:0" },
+      { seconds: 2, id: "run_1:s1:rt:1" },
+    ]);
+    await flusher.stop();
+  });
+
+  it("resume() after a freeze abort restarts periodic metering (the in-process hold keeps billing)", async () => {
+    const { flusher, reports, setClock } = timedSetup();
+    flusher.start();
+    flusher.pause();
+    flusher.resume(); // suspend_abort → the seam holds in-process
+    setClock(2_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(reports).toEqual([{ seconds: 2, id: "run_1:s1:rt:0" }]);
+    await flusher.stop();
+  });
+
+  it("resume() is a no-op once stopped", async () => {
+    const { flusher, reports, setClock } = timedSetup();
+    flusher.start();
+    await flusher.stop();
+    flusher.resume();
+    setClock(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(reports).toEqual([]); // stop is terminal — resume must not revive the timer
+  });
+
+  it("pause() before start() is harmless", () => {
+    const { flusher } = timedSetup();
+    expect(() => {
+      flusher.pause();
+    }).not.toThrow();
+  });
+});

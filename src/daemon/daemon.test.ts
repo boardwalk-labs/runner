@@ -67,6 +67,11 @@ describe("runProcessEnv", () => {
     expect(env.WORKSPACE_ROOT).toBe("/w");
     expect(JSON.parse(env.BOARDWALK_BYO_PROVIDERS ?? "null")).toEqual([]);
   });
+
+  it("does NOT stamp BOARDWALK_TASK_CPU_UNITS — self-hosted compute is unbilled (D5), runtime meters wall-clock", () => {
+    const env = runProcessEnv(CLAIM, { runnerId: "r1", workspaceRoot: "/w" });
+    expect(env.BOARDWALK_TASK_CPU_UNITS).toBeUndefined();
+  });
 });
 
 describe("startDaemon", () => {
