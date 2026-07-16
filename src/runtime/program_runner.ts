@@ -205,6 +205,25 @@ function errorHint(err: unknown): string | undefined {
   return typeof hint === "string" && hint !== "" ? hint : undefined;
 }
 
+/** A machine-readable error code shaped like one: SCREAMING_SNAKE, as an engine `EngineError.code`
+ *  (`VALIDATION`, `PROVIDER_ERROR`, …) and a Node syscall error (`ENOENT`) both are. */
+const ERROR_CODE_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * The SEMANTIC code of a thrown error, preferred over its class name. An engine `EngineError` carries
+ * `code: "VALIDATION"`; reporting `err.name` instead surfaced the useless `"EngineError"` on every
+ * hosted failure (and `"Error"` for anything else). Duck-typed for the same reason as {@link errorHint}.
+ *
+ * Two guards, because a thrown value is author-controlled: the SCREAMING_SNAKE shape keeps prose (or a
+ * stray object field) out of a field the UI renders as a code, and the CALLER redacts the result — an
+ * uppercase-alnum secret would satisfy the pattern, so the shape check is hygiene, not the boundary.
+ */
+function errorCode(err: unknown): string | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const code: unknown = (err as { code?: unknown }).code;
+  return typeof code === "string" && ERROR_CODE_RE.test(code) ? code : undefined;
+}
+
 /**
  * Run a workflow program to completion. Installs the host + input, extracts the VERIFIED artifact +
  * dynamic-imports its entry (which runs the body), and returns the terminal result. Always tears the
@@ -250,13 +269,21 @@ export async function runWorkflowProgram(
     // the same untrusted inputs as the message and could echo a resolved secret.
     const rawHint = errorHint(err);
     const hint = rawHint === undefined ? undefined : redactText(rawHint);
+    // The error's own code when it has one ("VALIDATION"), else the class name ("Error"). Redacted
+    // like the rest: it is read off an author-controlled throw, not trusted to be a literal.
+    const rawCode = errorCode(err);
+    const code =
+      rawCode !== undefined
+        ? redactText(rawCode)
+        : err instanceof Error
+          ? err.name
+          : "PROGRAM_ERROR";
     log.error("program_failed", { runId: args.runId, error: message });
     return {
       kind: "failed",
       output: null,
       error: {
-        // `code` is the error class name (e.g. "Error", "AppError"), not user content — left as-is.
-        code: err instanceof Error ? err.name : "PROGRAM_ERROR",
+        code,
         message,
         ...(hint === undefined ? {} : { hint }),
       },

@@ -375,6 +375,61 @@ describe("runWorkflowProgram — failures", () => {
     expect(errorOf(res)?.hint).toBeUndefined();
   });
 
+  it("reports an engine error's SEMANTIC code, not its class name", async () => {
+    // `err.name` is "EngineError" — true and useless. The EngineError's own code says what KIND of
+    // failure it was, which is what the UI/CLI renders and what an author can act on.
+    const engineError = Object.assign(new Error("bad tools"), { code: "VALIDATION" });
+    const rec = recordingHost({ agent: () => Promise.reject(engineError) });
+    const source = `
+      import { agent } from "@boardwalk-labs/workflow";
+      await agent("boom");
+    `;
+    const res = await runSource("run_code", source, null, { host: rec.host });
+    expect(errorOf(res)?.code).toBe("VALIDATION");
+  });
+
+  it("falls back to the class name when the error carries no code", async () => {
+    const res = await runSource("run_code_plain", `throw new TypeError("plain");`, null, {
+      host: recordingHost().host,
+    });
+    expect(errorOf(res)?.code).toBe("TypeError");
+  });
+
+  it("ignores a code that isn't code-shaped (prose must not land in a code field)", async () => {
+    const weird = Object.assign(new Error("boom"), { code: "not a real code, just prose" });
+    const rec = recordingHost({ agent: () => Promise.reject(weird) });
+    const source = `
+      import { agent } from "@boardwalk-labs/workflow";
+      await agent("boom");
+    `;
+    const res = await runSource("run_code_prose", source, null, { host: rec.host });
+    expect(errorOf(res)?.code).toBe("Error");
+  });
+
+  it("keeps a Node syscall code (it is code-shaped and more useful than `Error`)", async () => {
+    const res = await runSource(
+      "run_code_enoent",
+      `import { readFileSync } from "node:fs"; readFileSync("/definitely/not/here");`,
+      null,
+      { host: recordingHost().host },
+    );
+    expect(errorOf(res)?.code).toBe("ENOENT");
+  });
+
+  it("redacts the code too (it is read off an author-controlled throw)", async () => {
+    const leaked = Object.assign(new Error("boom"), { code: "TOKEN_ABC123XYZ789" });
+    const rec = recordingHost({ agent: () => Promise.reject(leaked) });
+    const source = `
+      import { agent } from "@boardwalk-labs/workflow";
+      await agent("boom");
+    `;
+    const res = await runSource("run_code_redact", source, null, {
+      host: rec.host,
+      redactText: (s) => s.split("TOKEN_ABC123XYZ789").join("[REDACTED]"),
+    });
+    expect(errorOf(res)?.code).toBe("[REDACTED]");
+  });
+
   it("redacts the hint too (it is built from the same untrusted inputs as the message)", async () => {
     const leaked = Object.assign(new Error("failed"), { hint: "use token-abc123xyz789 next time" });
     const rec = recordingHost({ agent: () => Promise.reject(leaked) });
