@@ -8,8 +8,8 @@ importers:
   .:
     dependencies:
       "@boardwalk-labs/engine":
-        specifier: 0.2.8
-        version: 0.2.8
+        specifier: 0.2.9
+        version: 0.2.9
       "@boardwalk-labs/workflow":
         specifier: 0.2.2
         version: 0.2.2
@@ -104,10 +104,10 @@ packages:
       }
     engines: { node: ">=18" }
 
-  "@boardwalk-labs/engine@0.2.8":
+  "@boardwalk-labs/engine@0.2.9":
     resolution:
       {
-        integrity: sha512-URcki2nxoCm025spx6OLtVSWMKisL0biphw3SAgroRB19rGp/z4Lgt+kz37CoV04AK2+G+bqWITymnvOBmLxQw==,
+        integrity: sha512-ttpyG5GUIX65LBr44dDv/8hInwiWPOkjAVdre7V4X9P5QleDaQaLONHnLCD9DoBzCm7gQm4g1tatdIpL7ETkFA==,
       }
     engines: { node: ">=24.0.0" }
     hasBin: true
@@ -3003,7 +3003,7 @@ snapshots:
 
   "@bcoe/v8-coverage@1.0.2": {}
 
-  "@boardwalk-labs/engine@0.2.8":
+  "@boardwalk-labs/engine@0.2.9":
     dependencies:
       "@boardwalk-labs/workflow": 0.2.2
       zod: 4.4.3
