@@ -1,6 +1,6 @@
 {
   "name": "@boardwalk-labs/runner",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Boardwalk self-hosted runner: execute cloud-scheduled runs on your own machines. Currently: the canonical runner contract types.",
   "license": "Apache-2.0",
   "repository": {
@@ -53,7 +53,7 @@
     "prebuild": "prebuildify --napi --strip -t 24.0.0"
   },
   "dependencies": {
-    "@boardwalk-labs/engine": "0.2.5",
+    "@boardwalk-labs/engine": "0.2.6",
     "@boardwalk-labs/workflow": "0.2.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "node-gyp-build": "^4.8.4",
