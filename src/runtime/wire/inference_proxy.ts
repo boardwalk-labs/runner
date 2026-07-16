@@ -15,7 +15,8 @@
 // many text deltas; NDJSON lets the runner consume them incrementally over the raw socket (the
 // buffered REST path can't stream). Each frame is one of:
 //   { "t": "delta",  "text": <string> }                  — a streamed assistant-text chunk
-//   { "t": "result", "turn": <ChatTurn>, "modelRef": <string>, "costMicros": <number> }  — terminal turn
+//   { "t": "result", "turn": <ChatTurn>, "modelRef": <string>, "costMicros": <number>,
+//     "contextTokens"?: <number> }                                                       — terminal turn
 //   { "t": "error",  "error": { code, message } }         — a terminal model/broker error
 //
 // A well-formed stream is zero-or-more `delta` frames followed by EXACTLY ONE `result` frame, OR a
@@ -68,7 +69,7 @@ export interface ProxyError {
  *  ignores it. */
 export type InferenceFrame =
   | { kind: "delta"; text: string }
-  | { kind: "result"; turn: ChatTurn; modelRef: string; costMicros: number }
+  | { kind: "result"; turn: ChatTurn; modelRef: string; costMicros: number; contextTokens?: number }
   | { kind: "error"; error: ProxyError }
   | { kind: "ping" };
 
@@ -126,8 +127,20 @@ export function serializeDeltaFrame(text: string): string {
 /** Serialize the single terminal turn result as one NDJSON line. `costMicros` is the turn's EXACT
  *  upstream cost (the managed provider's per-request cost × 1e6) on the managed lane — 0 for BYO or when unavailable.
  *  The worker feeds it to the budget guardrail so `max_usd` tracks real spend, not a token estimate. */
-export function serializeResultFrame(turn: ChatTurn, modelRef: string, costMicros = 0): string {
-  return `${JSON.stringify({ t: "result", turn, modelRef, costMicros })}\n`;
+export function serializeResultFrame(
+  turn: ChatTurn,
+  modelRef: string,
+  costMicros = 0,
+  contextTokens?: number,
+): string {
+  const frame = {
+    t: "result",
+    turn,
+    modelRef,
+    costMicros,
+    ...(contextTokens !== undefined ? { contextTokens } : {}),
+  };
+  return `${JSON.stringify(frame)}\n`;
 }
 
 /** Serialize a terminal error as a single NDJSON line. */
@@ -158,6 +171,11 @@ export function parseInferenceFrame(line: string): InferenceFrame {
         // A pre-cost-forwarding broker (rolling deploy) omits this → 0 → the worker falls back to the
         // representative-rate estimate, exactly as before. Non-number / negative also clamps to 0.
         costMicros: typeof rec.costMicros === "number" && rec.costMicros > 0 ? rec.costMicros : 0,
+        // The served model's context window; absent from a pre-window broker (rolling deploy) or
+        // when its catalog can't say ⇒ the agent loop keeps its conservative default budget.
+        ...(typeof rec.contextTokens === "number" && rec.contextTokens > 0
+          ? { contextTokens: rec.contextTokens }
+          : {}),
       };
     case "error":
       return { kind: "error", error: toProxyError(rec.error) };

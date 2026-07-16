@@ -388,7 +388,13 @@ export class EngineLeafExecutor implements LeafExecutor {
       if (frame.kind === "delta") {
         providerIo.onDelta?.(frame.text);
       } else if (frame.kind === "result") {
-        result = { turn: frame.turn, modelRef: frame.modelRef };
+        // contextTokens (when the broker knows the served model's window) lets the engine's loop
+        // size compaction against the real window instead of a conservative default.
+        result = {
+          turn: frame.turn,
+          modelRef: frame.modelRef,
+          ...(frame.contextTokens !== undefined ? { contextTokens: frame.contextTokens } : {}),
+        };
         // The broker stamps the turn's exact upstream cost on the result frame (0 ⇒ none / BYO); hand
         // it to the budget guardrail via the caller's stash so max_usd caps on real spend.
         if (frame.costMicros > 0) onCost?.(frame.costMicros);
