@@ -191,7 +191,19 @@ export interface ProgramRunnerDeps {
  *  holds the process, and the body simply continues when the wait is over. */
 export type ProgramResult =
   | { kind: "completed"; output: unknown }
-  | { kind: "failed"; output: null; error: { code: string; message: string } };
+  | { kind: "failed"; output: null; error: { code: string; message: string; hint?: string } };
+
+/** An engine `EngineError` carries a one-line actionable `hint` alongside its message. It reaches us
+ *  as a thrown value across the SDK/engine package boundary, so DUCK-TYPE it rather than `instanceof`
+ *  (a dual-package copy of the class would defeat the check) — any thrown error carrying a non-empty
+ *  string `hint` is surfaced. Without this the hint is dropped here, and on a hosted run there is no
+ *  other place it could survive: the runner reports a failure as `{ code, message, hint? }` and the
+ *  broker persists exactly that. */
+function errorHint(err: unknown): string | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const hint: unknown = (err as { hint?: unknown }).hint;
+  return typeof hint === "string" && hint !== "" ? hint : undefined;
+}
 
 /**
  * Run a workflow program to completion. Installs the host + input, extracts the VERIFIED artifact +
@@ -234,6 +246,10 @@ export async function runWorkflowProgram(
     const redactText = deps.redactText ?? ((s: string): string => s);
     // Redact BEFORE both sinks: the message can carry a secret the program resolved then threw.
     const message = redactText(err instanceof Error ? err.message : String(err));
+    // The hint is author-facing guidance ("write `builtins: [...]`"); redact it too — it is built from
+    // the same untrusted inputs as the message and could echo a resolved secret.
+    const rawHint = errorHint(err);
+    const hint = rawHint === undefined ? undefined : redactText(rawHint);
     log.error("program_failed", { runId: args.runId, error: message });
     return {
       kind: "failed",
@@ -242,6 +258,7 @@ export async function runWorkflowProgram(
         // `code` is the error class name (e.g. "Error", "AppError"), not user content — left as-is.
         code: err instanceof Error ? err.name : "PROGRAM_ERROR",
         message,
+        ...(hint === undefined ? {} : { hint }),
       },
     };
   } finally {

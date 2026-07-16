@@ -35,7 +35,7 @@ interface Recorder {
 /** Narrow a {@link ProgramResult} to its `completed` output / `failed` error (the result is now a
  *  discriminated union that also includes `suspended`). */
 const outputOf = (r: ProgramResult): unknown => (r.kind === "completed" ? r.output : undefined);
-const errorOf = (r: ProgramResult): { code: string; message: string } | undefined =>
+const errorOf = (r: ProgramResult): { code: string; message: string; hint?: string } | undefined =>
   r.kind === "failed" ? r.error : undefined;
 
 function recordingHost(overrides: Partial<WorkflowHost> = {}): Recorder {
@@ -344,6 +344,49 @@ describe("runWorkflowProgram — failures", () => {
     });
     expect(res.kind).toBe("failed");
     expect(errorOf(res)?.message).toBe("boom [REDACTED] here");
+  });
+
+  it("surfaces a thrown error's `hint` (an engine EngineError, duck-typed) on the failed result", async () => {
+    // A leaf rejects with an EngineError-shaped value: message + a one-line actionable hint. The
+    // runner has no other place to preserve the hint — on a hosted run the broker persists exactly
+    // the { code, message, hint } this returns.
+    const engineError = Object.assign(new Error("agent() got a string in `tools`."), {
+      hint: 'Built-in tools are on by default — write `builtins: ["bash"]`.',
+    });
+    const rec = recordingHost({ agent: () => Promise.reject(engineError) });
+    const source = `
+      import { agent } from "@boardwalk-labs/workflow";
+      await agent("boom");
+    `;
+    const res = await runSource("run_hint", source, null, { host: rec.host });
+    expect(res.kind).toBe("failed");
+    expect(errorOf(res)?.message).toContain("got a string");
+    expect(errorOf(res)?.hint).toBe(
+      'Built-in tools are on by default — write `builtins: ["bash"]`.',
+    );
+  });
+
+  it("leaves `hint` absent for an ordinary error that carries none", async () => {
+    const rec = recordingHost();
+    const res = await runSource("run_nohint", `throw new Error("plain boom");`, null, {
+      host: rec.host,
+    });
+    expect(res.kind).toBe("failed");
+    expect(errorOf(res)?.hint).toBeUndefined();
+  });
+
+  it("redacts the hint too (it is built from the same untrusted inputs as the message)", async () => {
+    const leaked = Object.assign(new Error("failed"), { hint: "use token-abc123xyz789 next time" });
+    const rec = recordingHost({ agent: () => Promise.reject(leaked) });
+    const source = `
+      import { agent } from "@boardwalk-labs/workflow";
+      await agent("boom");
+    `;
+    const res = await runSource("run_hint_redact", source, null, {
+      host: rec.host,
+      redactText: (s) => s.split("token-abc123xyz789").join("[REDACTED]"),
+    });
+    expect(errorOf(res)?.hint).toBe("use [REDACTED] next time");
   });
 });
 
