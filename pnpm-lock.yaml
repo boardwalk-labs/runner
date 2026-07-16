@@ -8,11 +8,11 @@ importers:
   .:
     dependencies:
       "@boardwalk-labs/engine":
-        specifier: 0.2.4
-        version: 0.2.4
+        specifier: 0.2.5
+        version: 0.2.5
       "@boardwalk-labs/workflow":
-        specifier: 0.2.1
-        version: 0.2.1
+        specifier: 0.2.2
+        version: 0.2.2
       "@modelcontextprotocol/sdk":
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
@@ -104,18 +104,18 @@ packages:
       }
     engines: { node: ">=18" }
 
-  "@boardwalk-labs/engine@0.2.4":
+  "@boardwalk-labs/engine@0.2.5":
     resolution:
       {
-        integrity: sha512-7lBSWukMfXRKIFx7KqXMYxVZCenKRxPqxCyfc0vUpWzx0F9iuxqV+QR1gSBBqh+hIMrUwd+nIf6zSnyvr7+xJQ==,
+        integrity: sha512-f5hR56kdDFyYQLUmau7GQmJ8Fp5D6t4wi+eDL7yDVOFPPiUt3XJbNVozr8lc9F410e/4lsQf8bMu3EoFVeWfyg==,
       }
     engines: { node: ">=24.0.0" }
     hasBin: true
 
-  "@boardwalk-labs/workflow@0.2.1":
+  "@boardwalk-labs/workflow@0.2.2":
     resolution:
       {
-        integrity: sha512-NfxR9ZSLt0WfHrtYr/zhYZloAUmrDIk6yP/tswkB/POIO1I5P1dVJpQ+E4JIpeEul71SrO0Tym+kjhpgDjoI4Q==,
+        integrity: sha512-QW3G/L7A+NKNfdlDm+8Ub100ngE33zTO+P81nUa6UXFOzCCazgKbw/c9u1da1YThw+SbE++BML2VdxbrbxXJjg==,
       }
     engines: { node: ">=24" }
 
@@ -3003,12 +3003,12 @@ snapshots:
 
   "@bcoe/v8-coverage@1.0.2": {}
 
-  "@boardwalk-labs/engine@0.2.4":
+  "@boardwalk-labs/engine@0.2.5":
     dependencies:
-      "@boardwalk-labs/workflow": 0.2.1
+      "@boardwalk-labs/workflow": 0.2.2
       zod: 4.4.3
 
-  "@boardwalk-labs/workflow@0.2.1":
+  "@boardwalk-labs/workflow@0.2.2":
     dependencies:
       typescript: 5.9.3
       zod: 4.4.3

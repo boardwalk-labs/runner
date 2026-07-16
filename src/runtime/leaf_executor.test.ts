@@ -7,12 +7,14 @@ import type { AgentOptions } from "@boardwalk-labs/workflow/runtime";
 import { BudgetMeter } from "./agent/budget.js";
 import { SecretRedactor } from "./agent/secret_redactor.js";
 import { BUDGET_GUARDRAIL_RATE } from "./agent/model_rates.js";
+import { runEventSchema } from "@boardwalk-labs/workflow";
 import type { AgentIdentity, RunEvent, RunEventBody, TurnEventSink } from "./agent/events.js";
 import type { InferenceFrame, InferenceProxyRequest } from "./wire/inference_proxy.js";
 import { LspService, type ChatTurn, type ToolHost } from "@boardwalk-labs/engine/core";
 import {
   EngineLeafExecutor,
   assertHostedMcpAllowed,
+  toRunEventBody,
   type MeterUsageInput,
 } from "./leaf_executor.js";
 import type { InferenceProxyTransport } from "./inference_transport.js";
@@ -199,6 +201,52 @@ describe("EngineLeafExecutor.run — events", () => {
     // turn_started carries the leaf identity.
     const started = sink.bodies[0];
     expect(started?.kind === "turn_started" && started.agentId).toBe("agent-1");
+  });
+});
+
+describe("toRunEventBody — compaction frames", () => {
+  const IDENT: AgentIdentity = { agentId: "agent-1", agentName: "writer" };
+  const ENVELOPE = { runId: "run_1", turnId: "t1", seq: 1, t: 1_770_000_000_000 };
+
+  /** The mapper is the ONLY place identity is attached to these frames -- the engine bodies carry it,
+   *  but the SDK schema REQUIRES agentId, so a dropped spread fails at the backend, not here. */
+  it("maps a started frame and satisfies the published SDK schema", () => {
+    const body = toRunEventBody(
+      {
+        kind: "compaction_started",
+        ...IDENT,
+        tokens: 940_000,
+        budget: 936_000,
+        contextTokens: 1_000_000,
+      },
+      IDENT,
+    );
+    expect(runEventSchema.parse({ ...ENVELOPE, ...body })).toMatchObject({
+      kind: "compaction_started",
+      agentId: "agent-1",
+      tokens: 940_000,
+      budget: 936_000,
+      contextTokens: 1_000_000,
+    });
+  });
+
+  it("omits an unknown window rather than sending a null the schema would reject", () => {
+    const body = toRunEventBody(
+      { kind: "compaction_started", ...IDENT, tokens: 160_000, budget: 150_000 },
+      IDENT,
+    );
+    expect(body).not.toHaveProperty("contextTokens");
+    expect(() => runEventSchema.parse({ ...ENVELOPE, ...body })).not.toThrow();
+  });
+
+  it("maps every ended method, including the passes that reclaim nothing", () => {
+    for (const method of ["summarized", "deduped", "none"] as const) {
+      const body = toRunEventBody(
+        { kind: "compaction_ended", ...IDENT, tokens: 536_000, reclaimed: 404_000, method },
+        IDENT,
+      );
+      expect(runEventSchema.parse({ ...ENVELOPE, ...body })).toMatchObject({ method });
+    }
   });
 });
 

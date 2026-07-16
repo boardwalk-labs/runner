@@ -471,7 +471,8 @@ function toUsageDelta(usage: TokenUsage): UsageDelta {
  * and the body is otherwise passed through verbatim. A discriminated switch keeps it exhaustive
  * (any new engine kind surfaces as a compile error here, not a silent drop).
  */
-function toRunEventBody(body: LeafEventBody, identity: AgentIdentity): RunEventBody {
+/** Engine LeafEventBody → the platform's v1 RunEventBody. Exported for testing. */
+export function toRunEventBody(body: LeafEventBody, identity: AgentIdentity): RunEventBody {
   switch (body.kind) {
     case "turn_ended":
       return {
@@ -504,5 +505,21 @@ function toRunEventBody(body: LeafEventBody, identity: AgentIdentity): RunEventB
       return { kind: "tool_call_result", toolCallId: body.toolCallId, result: body.result };
     case "tool_call_error":
       return { kind: "tool_call_error", toolCallId: body.toolCallId, error: body.error };
+    case "compaction_started":
+      return {
+        kind: "compaction_started",
+        ...identity,
+        tokens: body.tokens,
+        budget: body.budget,
+        ...(body.contextTokens === undefined ? {} : { contextTokens: body.contextTokens }),
+      };
+    case "compaction_ended":
+      return {
+        kind: "compaction_ended",
+        ...identity,
+        tokens: body.tokens,
+        reclaimed: body.reclaimed,
+        method: body.method,
+      };
   }
 }
