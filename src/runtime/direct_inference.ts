@@ -80,6 +80,7 @@ export async function streamDirectTurn(
   entry: ByoInferenceProvider,
   req: DirectTurnRequest,
   onDelta: ((text: string) => void) | undefined,
+  onReasoningDelta: ((text: string) => void) | undefined,
   /** Register the resolved key with the CURRENT leaf's engine redactor, before the model call.
    *  The key resolves mid-leaf (after the leaf's redactor snapshot is seeded), so without this a
    *  provider that echoes the Authorization header in an error body would leak it into that
@@ -104,6 +105,7 @@ export async function streamDirectTurn(
   const io = {
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     ...(onDelta !== undefined ? { onDelta } : {}),
+    ...(onReasoningDelta !== undefined ? { onReasoningDelta } : {}),
   };
   log.debug("direct_turn", { provider: entry.name, source: entry.source, model: req.model });
   const turn =

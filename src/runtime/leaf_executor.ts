@@ -369,6 +369,7 @@ export class EngineLeafExecutor implements LeafExecutor {
           ...(req.reasoning !== undefined ? { reasoning: req.reasoning } : {}),
         },
         providerIo.onDelta,
+        providerIo.onReasoningDelta,
         // Register the org's key with THIS leaf's redactor before the model call, so an error
         // body echoing it is scrubbed from the leaf's run events (not just the terminal error).
         (value) => redactor.add("byo-key", value),
@@ -387,6 +388,8 @@ export class EngineLeafExecutor implements LeafExecutor {
       throwIfAborted(signal);
       if (frame.kind === "delta") {
         providerIo.onDelta?.(frame.text);
+      } else if (frame.kind === "reasoning") {
+        providerIo.onReasoningDelta?.(frame.text);
       } else if (frame.kind === "result") {
         // contextTokens (when the broker knows the served model's window) lets the engine's loop
         // size compaction against the real window instead of a conservative default.
@@ -488,6 +491,8 @@ export function toRunEventBody(body: LeafEventBody, identity: AgentIdentity): Ru
       return { kind: "text_delta", blockId: body.blockId, text: body.text };
     case "text_end":
       return { kind: "text_end", blockId: body.blockId };
+    case "reasoning_delta":
+      return { kind: "reasoning_delta", text: body.text };
     case "tool_call_start":
       return { kind: "tool_call_start", toolCallId: body.toolCallId, toolName: body.toolName };
     case "tool_call_input_complete":

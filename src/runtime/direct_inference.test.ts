@@ -73,6 +73,7 @@ describe("streamDirectTurn", () => {
       VLLM,
       { model: "qwen3", messages: [{ role: "user", content: "hi" }], tools: [] },
       (t) => deltas.push(t),
+      undefined,
     );
     expect(resolveSecret).toHaveBeenCalledWith("VLLM_KEY");
     expect(out.modelRef).toBe("my-vllm/qwen3");
@@ -81,6 +82,30 @@ describe("streamDirectTurn", () => {
     const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://10.0.0.5:8000/chat/completions");
     expect((init.headers as Record<string, string>).authorization).toBe("Bearer sk-org-own");
+  });
+
+  it("routes streamed reasoning to onReasoningDelta, separate from the answer text", async () => {
+    const resolveSecret = vi.fn().mockResolvedValue("sk-org-own");
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(
+        sseResponse([
+          JSON.stringify({ choices: [{ delta: { reasoning: "thinking" } }] }),
+          JSON.stringify({ choices: [{ delta: { content: "answer" }, finish_reason: "stop" }] }),
+        ]),
+      );
+    const deltas: string[] = [];
+    const reasoning: string[] = [];
+    const out = await streamDirectTurn(
+      { registry: [VLLM], resolveSecret, fetchImpl },
+      VLLM,
+      { model: "qwen3", messages: [{ role: "user", content: "hi" }], tools: [] },
+      (t) => deltas.push(t),
+      (t) => reasoning.push(t),
+    );
+    expect(reasoning).toEqual(["thinking"]);
+    expect(deltas).toEqual(["answer"]);
+    expect(out.turn.text).toBe("answer");
   });
 
   it("registers the resolved key with the leaf redactor before the model call (leak guard)", async () => {
@@ -98,6 +123,7 @@ describe("streamDirectTurn", () => {
         { registry: [VLLM], resolveSecret, fetchImpl },
         VLLM,
         { model: "qwen3", messages: [{ role: "user", content: "hi" }], tools: [] },
+        undefined,
         undefined,
         (v) => registered.push(v),
       ),
@@ -120,6 +146,7 @@ describe("streamDirectTurn", () => {
       { registry: [entry], resolveSecret, fetchImpl },
       entry,
       { model: "m", messages: [{ role: "user", content: "hi" }], tools: [] },
+      undefined,
       undefined,
     );
     expect(resolveSecret).not.toHaveBeenCalled();

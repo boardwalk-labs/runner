@@ -69,6 +69,7 @@ export interface ProxyError {
  *  ignores it. */
 export type InferenceFrame =
   | { kind: "delta"; text: string }
+  | { kind: "reasoning"; text: string }
   | { kind: "result"; turn: ChatTurn; modelRef: string; costMicros: number; contextTokens?: number }
   | { kind: "error"; error: ProxyError }
   | { kind: "ping" };
@@ -124,6 +125,12 @@ export function serializeDeltaFrame(text: string): string {
   return `${JSON.stringify({ t: "delta", text })}\n`;
 }
 
+/** Serialize one streamed reasoning/thinking delta as a single NDJSON line. Separate from a `delta`
+ *  frame so the worker routes it to the thinking trace, never into the assistant answer. */
+export function serializeReasoningFrame(text: string): string {
+  return `${JSON.stringify({ t: "reasoning", text })}\n`;
+}
+
 /** Serialize the single terminal turn result as one NDJSON line. `costMicros` is the turn's EXACT
  *  upstream cost (the managed provider's per-request cost × 1e6) on the managed lane — 0 for BYO or when unavailable.
  *  The worker feeds it to the budget guardrail so `max_usd` tracks real spend, not a token estimate. */
@@ -163,6 +170,8 @@ export function parseInferenceFrame(line: string): InferenceFrame {
   switch (rec.t) {
     case "delta":
       return { kind: "delta", text: typeof rec.text === "string" ? rec.text : "" };
+    case "reasoning":
+      return { kind: "reasoning", text: typeof rec.text === "string" ? rec.text : "" };
     case "result":
       return {
         kind: "result",
@@ -182,7 +191,11 @@ export function parseInferenceFrame(line: string): InferenceFrame {
     case "ping":
       return { kind: "ping" };
     default:
-      throw new Error(`Unknown inference frame kind: ${String(rec.t)}`);
+      // Lenient consumer: a well-formed frame whose kind this runner predates must not crash the
+      // stream — a newer broker may emit frames an older runner can't name (this is how `reasoning`
+      // itself reaches a fleet mid-rollout). Treat it as a no-op heartbeat, which the leaf loop
+      // already ignores. Only a genuinely malformed line (caught above) is fatal.
+      return { kind: "ping" };
   }
 }
 

@@ -250,6 +250,20 @@ describe("toRunEventBody — compaction frames", () => {
   });
 });
 
+describe("toRunEventBody — reasoning frames", () => {
+  const IDENT: AgentIdentity = { agentId: "agent-1", agentName: "writer" };
+  const ENVELOPE = { runId: "run_1", turnId: "t1", seq: 1, t: 1_770_000_000_000 };
+
+  it("maps a reasoning_delta and satisfies the published SDK schema", () => {
+    const body = toRunEventBody({ kind: "reasoning_delta", text: "let me think" }, IDENT);
+    expect(body).toEqual({ kind: "reasoning_delta", text: "let me think" });
+    expect(runEventSchema.parse({ ...ENVELOPE, ...body })).toMatchObject({
+      kind: "reasoning_delta",
+      text: "let me think",
+    });
+  });
+});
+
 describe("EngineLeafExecutor.run — budget + metering", () => {
   it("feeds the run-level budget and meters per-leaf, per-model through the broker hook", async () => {
     const meterCalls: MeterUsageInput[] = [];

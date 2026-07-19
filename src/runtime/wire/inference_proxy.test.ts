@@ -1,8 +1,32 @@
 import { describe, it, expect } from "vitest";
 import type { ChatTurn } from "@boardwalk-labs/engine/core";
-import { parseInferenceFrame, serializeResultFrame } from "./inference_proxy.js";
+import {
+  parseInferenceFrame,
+  serializeReasoningFrame,
+  serializeResultFrame,
+} from "./inference_proxy.js";
 
 const turn: ChatTurn = { text: "ok", toolCalls: [], usage: {}, wantsTools: false };
+
+describe("reasoning frame", () => {
+  it("round-trips a reasoning delta as its own frame kind (not a text delta)", () => {
+    const frame = parseInferenceFrame(serializeReasoningFrame("let me think").trimEnd());
+    expect(frame).toEqual({ kind: "reasoning", text: "let me think" });
+  });
+
+  it("coerces a missing/non-string reasoning text to empty, like the delta frame", () => {
+    const frame = parseInferenceFrame(JSON.stringify({ t: "reasoning" }));
+    expect(frame).toEqual({ kind: "reasoning", text: "" });
+  });
+});
+
+describe("forward compatibility", () => {
+  it("tolerates an unknown frame kind as a no-op instead of crashing the stream", () => {
+    // The whole point: a newer broker can emit a frame kind an older runner predates (this is how
+    // `reasoning` reaches a fleet mid-rollout) without killing the model turn.
+    expect(parseInferenceFrame(JSON.stringify({ t: "something-new" }))).toEqual({ kind: "ping" });
+  });
+});
 
 describe("result frame contextTokens", () => {
   it("round-trips the served model's context window", () => {
