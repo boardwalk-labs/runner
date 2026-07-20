@@ -5,6 +5,7 @@ import {
   INFERENCE_NDJSON_CONTENT_TYPE,
   serializeDeltaFrame,
   serializeErrorFrame,
+  serializeHeartbeatFrame,
   serializeResultFrame,
   type InferenceFrame,
 } from "./wire/inference_proxy.js";
@@ -917,19 +918,126 @@ describe("transient-failure retry (control-plane deploy rollovers)", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("streaming inference is exempt (single-shot; its stream is not replayable)", async () => {
-    const { fetchImpl, calls } = fakeFetch(() => json(503, { error: { message: "rolling" } }));
-    const c = retryClient(fetchImpl, [0, 0, 0]);
-    await expect(async () => {
+  // Streaming inference retries only while a re-POST is safe — before any CONTENT frame has gone out.
+  // A bare drop here used to surface as a run-fatal `PROVIDER_ERROR: terminated`.
+  describe("streaming inference", () => {
+    const turn = {
+      text: "hi",
+      toolCalls: [],
+      usage: { inputTokens: 1, outputTokens: 1 },
+      wantsTools: false,
+    };
+    const streamOk = (ndjson: string): Response =>
+      new Response(ndjson, {
+        status: 200,
+        headers: { "content-type": INFERENCE_NDJSON_CONTENT_TYPE },
+      });
+    // A 200 stream that relays `lines` verbatim, then the socket drops (undici `terminated`).
+    function streamThenDrop(lines: readonly string[]): Response {
+      let i = 0;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          const line = lines[i];
+          if (line === undefined) {
+            controller.error(new TypeError("terminated"));
+            return;
+          }
+          i += 1;
+          controller.enqueue(new TextEncoder().encode(line));
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": INFERENCE_NDJSON_CONTENT_TYPE },
+      });
+    }
+    async function drain(c: RunnerControlClient): Promise<InferenceFrame[]> {
+      const out: InferenceFrame[] = [];
       for await (const f of c.streamInference({
         model: "a",
         provider: "b",
         messages: [],
         tools: [],
       })) {
-        void f;
+        out.push(f);
       }
-    }).rejects.toThrow();
-    expect(calls).toHaveLength(1);
+      return out;
+    }
+
+    it("retries an LB 503 before the stream begins, then relays the turn", async () => {
+      let n = 0;
+      const { fetchImpl, calls } = fakeFetch(() => {
+        n += 1;
+        return n < 2
+          ? json(503, { error: "no healthy target" })
+          : streamOk(serializeResultFrame(turn, "m"));
+      });
+      const frames = await drain(retryClient(fetchImpl, [0, 0]));
+      expect(frames).toEqual([{ kind: "result", turn, modelRef: "m", costMicros: 0 }]);
+      expect(calls).toHaveLength(2);
+    });
+
+    it("does NOT retry a 502 — the broker's upstream model error surfaces once", async () => {
+      const { fetchImpl, calls } = fakeFetch(() =>
+        json(502, { error: { code: "MODEL_ERROR", message: "upstream boom" } }),
+      );
+      await expect(drain(retryClient(fetchImpl, [0, 0]))).rejects.toThrow(/^upstream boom$/);
+      expect(calls).toHaveLength(1);
+    });
+
+    it("retries a connection failure (the POST never returned)", async () => {
+      let n = 0;
+      const { fetchImpl, calls } = fakeFetch(() => {
+        n += 1;
+        if (n === 1) throw new TypeError("fetch failed");
+        return streamOk(serializeResultFrame(turn, "m"));
+      });
+      const frames = await drain(retryClient(fetchImpl, [0]));
+      expect(frames).toEqual([{ kind: "result", turn, modelRef: "m", costMicros: 0 }]);
+      expect(calls).toHaveLength(2);
+    });
+
+    it("retries a mid-stream drop that relayed only heartbeats (the observed failure)", async () => {
+      let n = 0;
+      const { fetchImpl, calls } = fakeFetch(() => {
+        n += 1;
+        return n < 2
+          ? streamThenDrop([serializeHeartbeatFrame(), serializeHeartbeatFrame()])
+          : streamOk(serializeResultFrame(turn, "m"));
+      });
+      const frames = await drain(retryClient(fetchImpl, [0, 0]));
+      // The aborted attempt's pings are no-ops; the re-POST delivered the real result.
+      expect(frames.filter((f) => f.kind === "result")).toEqual([
+        { kind: "result", turn, modelRef: "m", costMicros: 0 },
+      ]);
+      expect(calls).toHaveLength(2);
+    });
+
+    it("does NOT retry once a content frame (delta) has been relayed — no duplicate output", async () => {
+      const { fetchImpl, calls } = fakeFetch(() =>
+        streamThenDrop([serializeDeltaFrame("partial")]),
+      );
+      const seen: InferenceFrame[] = [];
+      await expect(
+        (async () => {
+          for await (const f of retryClient(fetchImpl, [0, 0]).streamInference({
+            model: "a",
+            provider: "b",
+            messages: [],
+            tools: [],
+          })) {
+            seen.push(f);
+          }
+        })(),
+      ).rejects.toThrow(/terminated/);
+      expect(seen).toEqual([{ kind: "delta", text: "partial" }]); // relayed exactly once
+      expect(calls).toHaveLength(1); // NOT retried
+    });
+
+    it("exhausts the schedule on a persistent pre-stream 503", async () => {
+      const { fetchImpl, calls } = fakeFetch(() => json(503, { error: "still rolling" }));
+      await expect(drain(retryClient(fetchImpl, [0, 0]))).rejects.toThrow();
+      expect(calls).toHaveLength(3); // first attempt + two retries
+    });
   });
 });

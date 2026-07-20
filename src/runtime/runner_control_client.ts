@@ -60,6 +60,15 @@ export interface RunnerControlClientConfig {
  */
 const RETRYABLE_STATUSES = new Set([502, 503, 504]);
 
+/**
+ * Transient statuses worth retrying on the STREAMING inference POST — a narrower set than
+ * {@link RETRYABLE_STATUSES}. 502 is EXCLUDED: on `/inference` the broker uses 502 for a real
+ * upstream model error (a clean, customer-facing message), so retrying it just re-hits a guaranteed
+ * failure. 503/504 are only ever the load balancer during a rollover (no healthy / draining target,
+ * gateway timeout) — safe to re-POST since the stream hasn't begun. See {@link streamInference}.
+ */
+const INFERENCE_RETRYABLE_STATUSES = new Set([503, 504]);
+
 /** Default backoff (ms) between attempts — ~17.5s of spread, sized to ride out the target-group
  *  rotation window of an api-server rolling deploy (the observed killer: guests died hard
  *  mid-suspend/finalize during TWO deploys, 2026-07-13, and only crash-reclaim saved the runs). */
@@ -565,21 +574,89 @@ export class RunnerControlClient {
    * Backs {@link InferenceProxyTransport} (inference_transport.ts) — the model swap is invisible to
    * the engine loop, which keeps the runner provider-agnostic (the broker owns model invocation). A
    * non-200 (a failure BEFORE the stream began) throws the broker's already-classified message.
+   *
+   * Resilience (added because a bare drop here surfaced as a run-fatal `PROVIDER_ERROR: terminated`):
+   * a transient failure is retried WHILE it is still safe to re-POST — i.e. before any CONTENT frame
+   * has been relayed. Three cases:
+   *   - the POST never returned a response (connection refused/reset during an api-server rollover),
+   *   - a load-balancer {@link INFERENCE_RETRYABLE_STATUSES} (no healthy / gateway timeout) before the
+   *     stream began — NOT 502, which the broker uses for a real upstream model error,
+   *   - the body dropped MID-stream (undici `terminated` / socket close) but only `ping` heartbeats
+   *     had been relayed so far (the observed failure: a huge-context turn streamed only pings for
+   *     ~120s during time-to-first-token, then the connection dropped).
+   * Once a `delta`/`reasoning`/`result`/`error` frame has been yielded, the model has already
+   * produced output (or the turn finished), so a re-POST would duplicate it: the drop surfaces as
+   * before. Re-POST is billing-safe — the broker aborts the abandoned turn on our disconnect and
+   * returns before it meters (no `result` frame ⇒ no usage). The body is a reusable string.
    */
   async *streamInference(
     req: InferenceProxyRequest,
   ): AsyncGenerator<InferenceFrame, void, undefined> {
-    const res = await this.fetchImpl(this.url("inference"), {
-      method: "POST",
-      headers: { ...this.headers(true), accept: INFERENCE_NDJSON_CONTENT_TYPE },
-      body: serializeInferenceRequest(req),
+    const body = serializeInferenceRequest(req);
+    for (let attempt = 0; ; attempt += 1) {
+      const last = attempt >= this.retryDelaysMs.length;
+
+      let res: Response;
+      try {
+        res = await this.fetchImpl(this.url("inference"), {
+          method: "POST",
+          headers: { ...this.headers(true), accept: INFERENCE_NDJSON_CONTENT_TYPE },
+          body,
+        });
+      } catch (err) {
+        // No response at all — nothing streamed, so a re-POST is always safe.
+        if (last) throw err;
+        await this.backoffInferenceRetry(attempt, "connect", err);
+        continue;
+      }
+
+      if (res.status !== 200 || res.body === null) {
+        // A load-balancer transient (target draining / gateway timeout) before the stream began —
+        // safe to re-POST. Any other non-200 is the broker's real, already-classified answer
+        // (incl. a 502 upstream model error): surface it as the run's customer-facing error.
+        if (!last && res.body !== null && INFERENCE_RETRYABLE_STATUSES.has(res.status)) {
+          await res.body.cancel().catch(() => {});
+          await this.backoffInferenceRetry(attempt, "status", res.status);
+          continue;
+        }
+        throw await inferenceHttpError(res);
+      }
+
+      // Relay the stream. A mid-stream transport drop throws out of readNdjsonLines; retry it only
+      // while nothing but heartbeats has gone out (see the doc-comment). `ping` frames carry no
+      // model output, so a drop during the pre-first-token wait stays safely retryable.
+      let sawContent = false;
+      try {
+        for await (const line of readNdjsonLines(res.body)) {
+          const frame = parseInferenceFrame(line);
+          if (frame.kind !== "ping") sawContent = true;
+          yield frame;
+        }
+        return; // the stream ended cleanly
+      } catch (err) {
+        if (last || sawContent) throw err;
+        await res.body.cancel().catch(() => {});
+        await this.backoffInferenceRetry(attempt, "stream", err);
+        continue;
+      }
+    }
+  }
+
+  /** Log + wait one backoff step before re-POSTing a transient inference failure (see streamInference). */
+  private async backoffInferenceRetry(
+    attempt: number,
+    reason: "connect" | "status" | "stream",
+    detail: unknown,
+  ): Promise<void> {
+    log.warn("broker_inference_retry", {
+      reason,
+      ...(reason === "status"
+        ? { status: detail as number }
+        : { error: detail instanceof Error ? detail.name : "unknown" }),
+      attempt: attempt + 1,
+      delayMs: this.retryDelaysMs[attempt],
     });
-    if (res.status !== 200 || res.body === null) {
-      throw await inferenceHttpError(res);
-    }
-    for await (const line of readNdjsonLines(res.body)) {
-      yield parseInferenceFrame(line);
-    }
+    await sleep(this.retryDelaysMs[attempt] ?? 0);
   }
 
   private url(suffix: string): string {
