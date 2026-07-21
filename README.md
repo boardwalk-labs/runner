@@ -31,7 +31,9 @@ boardwalk-runner start --url https://api.boardwalk.sh --pool default
 ```
 
 `start` polls for runs targeting `runs_on: { kind: "self-hosted" }` and executes one at a
-time; run more daemons (or machines) for concurrency. `Ctrl-C` drains: the current run
+time; run more daemons (or machines) for concurrency. Each run executes in a container by default
+(Docker or Podman required); pass `--host` to run it directly on the machine instead. `Ctrl-C`
+drains: the current run
 finishes, nothing new is claimed. Useful flags: `--once` (execute one run, then exit),
 `--verbose` (debug-level daemon logs), `--debug` (also debug-logs inside each run process),
 `--work-dir`, `--identity-dir`. Behind a corporate proxy, launch with `NODE_USE_ENV_PROXY=1`
@@ -58,7 +60,7 @@ runs every non-browser workflow exactly as before.
 
 ## Security model
 
-This part of the contract is settled, even though the client isn't built yet:
+This part of the contract is settled:
 
 - The runner **never receives broad credentials**: a single-purpose registration token to join,
   a standing runner token that can only poll/claim/heartbeat, and a short-lived **run-scoped**
@@ -87,7 +89,7 @@ pnpm lint && pnpm typecheck && pnpm build
 - [`sdk`](https://github.com/boardwalk-labs/sdk) — `@boardwalk-labs/workflow`, the TypeScript API a workflow program imports
 - [`cli`](https://github.com/boardwalk-labs/cli) — `boardwalk`: scaffold, validate, run locally, deploy
 - [`examples`](https://github.com/boardwalk-labs/examples) — copyable workflow templates (`boardwalk init --template`)
-- [`plugins`](https://github.com/boardwalk-labs/plugins) — skills + MCP server for Claude Code, Codex, Cursor, OpenClaw, OpenCode
+- [`plugins`](https://github.com/boardwalk-labs/plugins) — coding-agent skills (Claude Code, Codex, Cursor, OpenClaw, OpenCode) + a control-plane MCP server
 - [`runner-images`](https://github.com/boardwalk-labs/runner-images) — reproducible base images hosted runners execute in
 
 Hosted platform and docs: [boardwalk.sh](https://boardwalk.sh).
