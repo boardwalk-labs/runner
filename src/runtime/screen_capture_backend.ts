@@ -2,6 +2,11 @@
 // the X display `:0` with two outputs — rolling MP4 segments (recording) and a single low-fps JPEG that
 // is continuously overwritten (the live-view frame). See docs/SCREEN_CAPTURE.md §4.
 //
+// The recording is CHANGE-DRIVEN (mpdecimate + VFR): it stays always-on but only encodes frames that
+// differ from the previous one, so an idle/headless desktop encodes ~nothing (a blank desktop collapses
+// to ~1 frame) while a changing screen records in full. This keeps the always-on desktop cheap enough
+// to run on every VM without a "record only when watched" gate.
+//
 // Only runs where the runner IMAGE ships the desktop stack (Xvfb + ffmpeg), gated by
 // BOARDWALK_BROWSER_TIER=1 (the same "desktop present" signal the browser tier uses) + a
 // BOARDWALK_RECORDING_ENABLED kill switch (default on). Off on Fargate / self-hosted images with no
@@ -63,8 +68,9 @@ export function loadCaptureConfig(env: NodeJS.ProcessEnv): CaptureConfig | null 
   };
 }
 
-/** ffmpeg args: one x11grab input, two outputs (segmented MP4 + a single overwritten JPEG). */
-function ffmpegArgs(cfg: CaptureConfig, dir: string): string[] {
+/** ffmpeg args: one x11grab input, two outputs (change-driven segmented MP4 + a single overwritten
+ *  JPEG). Exported for unit testing. */
+export function ffmpegArgs(cfg: CaptureConfig, dir: string): string[] {
   const liveFps = Math.max(1, Math.round(1000 / cfg.liveFrameIntervalMs));
   return [
     "-y",
@@ -79,8 +85,17 @@ function ffmpegArgs(cfg: CaptureConfig, dir: string): string[] {
     "-i",
     cfg.display,
     // Recording: H.264 MP4 segments, each a standalone playable file (docs/SCREEN_CAPTURE.md §4.2).
+    // Change-driven: `mpdecimate` drops near-duplicate frames and `-fps_mode vfr` lets the muxer honor
+    // those drops, so a static/idle desktop encodes ~nothing (collapses to ~1 frame) while a changing
+    // screen still records in full. Always-on — cost tracks on-screen activity, not a flat framerate.
+    // (`-preset ultrafast` would cut per-frame CPU further on busy screens but inflates file size; kept
+    //  `veryfast` so the change is a pure win with no storage/bandwidth regression.)
     "-map",
     "0:v",
+    "-vf",
+    "mpdecimate",
+    "-fps_mode",
+    "vfr",
     "-c:v",
     "libx264",
     "-preset",
