@@ -179,12 +179,17 @@ const USAGE = `boardwalk-runner <register|start|deregister> [flags]
 async function mainCli(): Promise<void> {
   // --verbose: debug-level daemon logs (poll cycles, heartbeats). --debug: the same, PLUS the
   // spawned run processes log debug too (the env below is forwarded to children by realSpawn).
+  // Sanctioned OPERATOR write of the runner log env, BEFORE any worker boots — the worker's
+  // `configureLogging` snapshots it from the trusted boot env, so this operator flag wins while a
+  // run's author `meta.env` (applied later, over the relay) does not.
+  /* eslint-disable no-restricted-syntax -- operator sets the runner log env pre-boot; not author-reachable */
   if (hasFlag("debug")) {
     process.env.BOARDWALK_RUNNER_LOG_LEVEL = "debug";
     process.env.BOARDWALK_RUNNER_DEBUG = "1";
   } else if (hasFlag("verbose")) {
     process.env.BOARDWALK_RUNNER_LOG_LEVEL = "debug";
   }
+  /* eslint-enable no-restricted-syntax */
   const cmd = process.argv[2];
   if (cmd === "register") return await cmdRegister();
   if (cmd === "start") return await cmdStart();

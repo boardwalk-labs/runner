@@ -22,6 +22,26 @@ export default tseslint.config(
       "@typescript-eslint/no-unsafe-member-access": "error",
       "@typescript-eslint/no-unsafe-return": "error",
       "@typescript-eslint/explicit-module-boundary-types": "error",
+      // Platform config lives in the platform's own `BOARDWALK_*` namespace, but the workflow AUTHOR
+      // owns process.env (no reserved keys — docs/RUN_ENV_AND_CREDS.md), so `process.env.BOARDWALK_*`
+      // is author-shadowable. Read platform config from the trusted BOOT-env snapshot (`platformBootEnv`
+      // in `main`) instead. Relay-delivered per-run keys (asserted by `applyIdentityToEnv`) and the
+      // operator's pre-boot CLI writes are the only sanctioned exceptions (marked with a disable).
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            "MemberExpression[object.object.name='process'][object.property.name='env'][property.name=/^BOARDWALK_/]",
+          message:
+            "Don't read/write process.env.BOARDWALK_* — the workflow author owns process.env and can shadow it. Resolve platform config from the trusted boot-env snapshot (platformBootEnv) instead. See docs/RUN_ENV_AND_CREDS.md (Addendum 2026-07-21).",
+        },
+        {
+          selector:
+            "MemberExpression[object.object.name='process'][object.property.name='env'][property.value=/^BOARDWALK_/]",
+          message:
+            "Don't read/write process.env['BOARDWALK_*'] — the workflow author owns process.env and can shadow it. Resolve platform config from the trusted boot-env snapshot (platformBootEnv) instead. See docs/RUN_ENV_AND_CREDS.md (Addendum 2026-07-21).",
+        },
+      ],
     },
   },
 );

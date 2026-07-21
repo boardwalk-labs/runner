@@ -95,13 +95,34 @@ export interface Logger {
 
 const LEVEL_ORDER: Record<string, number> = { DEBUG: 10, INFO: 20, WARN: 30, ERROR: 40 };
 
-/** Active log level: BOARDWALK_RUNNER_LOG_LEVEL (debug|info|warn|error), default info.
- *  BOARDWALK_RUNNER_DEBUG=1 is a legacy alias for debug. Read per call so a CLI flag that
- *  sets the env (e.g. `--verbose` / `--debug`) applies without logger re-creation. */
-function activeLevel(): number {
-  if (process.env.BOARDWALK_RUNNER_DEBUG === "1") return LEVEL_ORDER.DEBUG ?? 10;
-  const name = process.env.BOARDWALK_RUNNER_LOG_LEVEL?.toUpperCase() ?? "INFO";
+/** Numeric log level from an env: BOARDWALK_RUNNER_LOG_LEVEL (debug|info|warn|error), default info;
+ *  BOARDWALK_RUNNER_DEBUG=1 is a legacy alias for debug. Reads the passed `env`, not process.env. */
+function levelFromEnv(env: NodeJS.ProcessEnv): number {
+  if (env.BOARDWALK_RUNNER_DEBUG === "1") return LEVEL_ORDER.DEBUG ?? 10;
+  const name = env.BOARDWALK_RUNNER_LOG_LEVEL?.toUpperCase() ?? "INFO";
   return LEVEL_ORDER[name] ?? 20;
+}
+
+/** The level frozen at worker bootstrap from the TRUSTED boot env, or null until then. */
+let configuredLevel: number | null = null;
+
+/**
+ * Freeze the runner's log level from a TRUSTED env — the platform boot env, snapshotted before the
+ * identity relay overlays a run's author env onto process.env (see `main`). Call once at bootstrap.
+ *
+ * Until it's called — in tests, and in the CLI/daemon before boot — {@link activeLevel} falls back to
+ * reading process.env live, so an operator's `--verbose`/`--debug` (which sets the env BEFORE boot,
+ * bin.ts) still applies. After it's called, a workflow author's `meta.env` (overlaid onto process.env
+ * at run time) can no longer raise the runner's own log verbosity. An author-facing verbosity control
+ * belongs in the manifest `meta` (e.g. a `logVerbosity` field), delivered over the trusted control
+ * plane — never an env knob.
+ */
+export function configureLogging(env: NodeJS.ProcessEnv): void {
+  configuredLevel = levelFromEnv(env);
+}
+
+function activeLevel(): number {
+  return configuredLevel ?? levelFromEnv(process.env);
 }
 
 function emit(level: string, module: string, message: string, fields?: LogFields): void {

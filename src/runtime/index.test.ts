@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   assembleWorkerDeps,
   capturePlatformContext,
+  capturePlatformConfig,
   publicApiOrigin,
   PLATFORM_ENV_KEYS,
   tokenMeterIdentifiers,
@@ -339,6 +340,49 @@ describe("capturePlatformContext (the run env/credential rules)", () => {
     const env = platformEnv();
     delete env.BOARDWALK_RUN_TOKEN;
     expect(() => capturePlatformContext(env)).toThrow(/BOARDWALK_RUN_TOKEN/);
+  });
+});
+
+describe("capturePlatformConfig (the worker's own trusted config)", () => {
+  it("resolves the browser/capture tier + roots + run-log mirror from the desktop boot env", () => {
+    const cfg = capturePlatformConfig({
+      BOARDWALK_BROWSER_TIER: "1",
+      BOARDWALK_BROWSER_CHROME_PATH: "/usr/local/bin/boardwalk-chromium",
+      DISPLAY: ":0",
+      WORKER_ID: "w-1",
+      WORKSPACE_ROOT: "/ws",
+      PROGRAM_ROOT: "/prog",
+      PERSIST_SCOPE_DIR: "/persist",
+      BOARDWALK_RUN_LOG_FILE: "/tmp/run.log",
+    });
+    expect(cfg.browser).not.toBeNull();
+    expect(cfg.capture).not.toBeNull();
+    expect(cfg.workerId).toBe("w-1");
+    expect(cfg.workspaceRoot).toBe("/ws");
+    expect(cfg.programRoot).toBe("/prog");
+    expect(cfg.persistScopeDir).toBe("/persist");
+    expect(cfg.runLogFilePath).toBe("/tmp/run.log");
+  });
+
+  it("defaults the roots and omits the optionals off the desktop tier", () => {
+    const cfg = capturePlatformConfig({});
+    expect(cfg.browser).toBeNull();
+    expect(cfg.capture).toBeNull();
+    expect(cfg.workspaceRoot).toBe("/workspace");
+    expect(cfg.programRoot).toContain("bw-programs");
+    expect(cfg.workerId).toBeUndefined();
+    expect(cfg.persistScopeDir).toBeUndefined();
+    expect(cfg.runLogFilePath).toBeUndefined();
+  });
+
+  it("is a pure function of the env it is given — an author overlay never reaches it", () => {
+    // The worker resolves this from the pre-overlay BOOT snapshot; a run's author `meta.env` lands on a
+    // DIFFERENT (later) env. Recording is decided by WHICH env is passed — so resolving from the boot
+    // snapshot keeps a `BOARDWALK_RECORDING_ENABLED=0` in a run's meta.env inert.
+    const boot = { BOARDWALK_BROWSER_TIER: "1" };
+    const authorOverlaid = { BOARDWALK_BROWSER_TIER: "1", BOARDWALK_RECORDING_ENABLED: "0" };
+    expect(capturePlatformConfig(boot).capture).not.toBeNull();
+    expect(capturePlatformConfig(authorOverlaid).capture).toBeNull();
   });
 });
 

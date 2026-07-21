@@ -90,6 +90,49 @@ describe("applyIdentityToEnv", () => {
     expect(env.BOARDWALK_RUN_TOKEN).toBe("rt_tok");
     expect(env.RUN_ID).toBe("run_01J");
   });
+
+  it("CLEARS an author-supplied OPTIONAL platform key the identity omits (never leaves the author value)", () => {
+    // An org with no BYO providers (identity omits byo_providers/api_token/task_cpu_units); the author
+    // put those reserved-by-transport names in meta.env. A conditional-only overwrite would leave the
+    // author's value — `BOARDWALK_TASK_CPU_UNITS=1` would under-report runtime billing; a bogus
+    // `BOARDWALK_BYO_PROVIDERS` would inject inference routing. set-or-clear must delete them.
+    const env: NodeJS.ProcessEnv = {};
+    applyIdentityToEnv(
+      identity({
+        env: {
+          BOARDWALK_API_KEY: "author_spoof",
+          BOARDWALK_TASK_CPU_UNITS: "1",
+          BOARDWALK_BYO_PROVIDERS: JSON.stringify([{ name: "evil", source: "openai" }]),
+        },
+      }),
+      env,
+    );
+    expect("BOARDWALK_API_KEY" in env).toBe(false);
+    expect("BOARDWALK_TASK_CPU_UNITS" in env).toBe(false);
+    expect("BOARDWALK_BYO_PROVIDERS" in env).toBe(false);
+  });
+
+  it("the identity's optional platform values win over an author's of the same name", () => {
+    const env: NodeJS.ProcessEnv = {};
+    applyIdentityToEnv(
+      identity({
+        api_token: "real_at",
+        task_cpu_units: 2048,
+        byo_providers: [{ name: "openai", source: "openai" }],
+        env: {
+          BOARDWALK_API_KEY: "author_spoof",
+          BOARDWALK_TASK_CPU_UNITS: "1",
+          BOARDWALK_BYO_PROVIDERS: JSON.stringify([{ name: "evil", source: "openai" }]),
+        },
+      }),
+      env,
+    );
+    expect(env.BOARDWALK_API_KEY).toBe("real_at");
+    expect(env.BOARDWALK_TASK_CPU_UNITS).toBe("2048");
+    expect(env.BOARDWALK_BYO_PROVIDERS).toBe(
+      JSON.stringify([{ name: "openai", source: "openai" }]),
+    );
+  });
 });
 
 describe("IdentityRelay", () => {

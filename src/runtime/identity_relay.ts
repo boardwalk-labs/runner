@@ -99,18 +99,39 @@ export function applyIdentityToEnv(identity: RelayIdentity, env: NodeJS.ProcessE
   for (const [key, value] of Object.entries(identity.env ?? {})) {
     env[key] = value;
   }
+  // The platform transport keys OWN their names: assert the trusted value, or DELETE the key when the
+  // identity omits it — so an author's `meta.env` (applied just above) can NEVER survive on a platform
+  // key. RUN_ID / control-plane URL / run token are always present; the api token, task size, and BYO
+  // registry are optional, so they set-or-clear (a conditional-only overwrite would leave an
+  // author-supplied `BOARDWALK_TASK_CPU_UNITS` / `BOARDWALK_API_KEY` / `BOARDWALK_BYO_PROVIDERS` in
+  // place for a run whose identity happens not to carry that field — e.g. an org with no BYO providers).
   env.RUN_ID = identity.run_id;
   env.BOARDWALK_CONTROL_PLANE_URL = identity.control_plane_url;
   env.BOARDWALK_RUN_TOKEN = identity.run_token;
-  if (identity.api_token !== undefined && identity.api_token.length > 0) {
-    env.BOARDWALK_API_KEY = identity.api_token;
-  }
-  if (identity.task_cpu_units !== undefined) {
-    env.BOARDWALK_TASK_CPU_UNITS = String(identity.task_cpu_units);
-  }
-  if (identity.byo_providers !== undefined) {
-    env.BOARDWALK_BYO_PROVIDERS = JSON.stringify(identity.byo_providers);
-  }
+  setOrClear(
+    env,
+    "BOARDWALK_API_KEY",
+    identity.api_token !== undefined && identity.api_token.length > 0
+      ? identity.api_token
+      : undefined,
+  );
+  setOrClear(
+    env,
+    "BOARDWALK_TASK_CPU_UNITS",
+    identity.task_cpu_units !== undefined ? String(identity.task_cpu_units) : undefined,
+  );
+  setOrClear(
+    env,
+    "BOARDWALK_BYO_PROVIDERS",
+    identity.byo_providers !== undefined ? JSON.stringify(identity.byo_providers) : undefined,
+  );
+}
+
+/** Assert a trusted value on a platform transport key, or DELETE the key when absent — so an
+ *  author-overlaid value on that reserved-by-transport name never survives into the run env. */
+function setOrClear(env: NodeJS.ProcessEnv, key: string, value: string | undefined): void {
+  if (value !== undefined) env[key] = value;
+  else Reflect.deleteProperty(env, key);
 }
 
 /** The worker_ready diagnostics — supplied by the worker (init cannot know these),

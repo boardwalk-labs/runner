@@ -27,7 +27,14 @@
 // Documented v0 deferral (a clear seam): durable events — a no-op AgentEventStore (live fan-out
 // via the broker only) until durable event storage lands.
 
-import { createLogger, newId, AppError, ErrorCode, DEFAULT_LEASE_MS } from "./support/index.js";
+import {
+  createLogger,
+  configureLogging,
+  newId,
+  AppError,
+  ErrorCode,
+  DEFAULT_LEASE_MS,
+} from "./support/index.js";
 import { LspService } from "@boardwalk-labs/engine/core";
 import { BudgetMeter } from "./agent/budget.js";
 import { WorkerRunEventEmitter } from "./run_event_emitter.js";
@@ -57,9 +64,14 @@ import {
   loadGuestBrowserConfig,
   makeGuestBrowserBackend,
   connectSessionMcp,
+  type GuestBrowserConfig,
 } from "./browser_session_backend.js";
 import { ScreenCapture, type CaptureBackend } from "./screen_capture.js";
-import { loadCaptureConfig, makeCaptureBackend } from "./screen_capture_backend.js";
+import {
+  loadCaptureConfig,
+  makeCaptureBackend,
+  type CaptureConfig,
+} from "./screen_capture_backend.js";
 import {
   runProgramWorker,
   type ProgramWorkerDeps,
@@ -137,6 +149,10 @@ export interface WorkerRuntime {
   /** Screen-capture backend (session recording + live-view frames), present ONLY when the runner IMAGE
    *  ships the desktop stack (ffmpeg + an X display) and recording isn't disabled. Absent ⇒ no capture. */
   captureBackend?: CaptureBackend;
+  /** Path for the on-screen run-log mirror an xterm in the ambient desktop tails (BOARDWALK_RUN_LOG_FILE,
+   *  set by the desktop guest image). Resolved by `main` from the trusted platform BOOT env so a run's
+   *  author `meta.env` can't repoint it; absent off the desktop tier ⇒ no local sink. */
+  runLogFilePath?: string;
 }
 
 /** Durable events are deferred (durable event storage) — live fan-out via the broker only. */
@@ -215,9 +231,10 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
   // monotonic with no separate program band. Frames publish as `{cursor, event}` rows via the
   // broker telemetry path. The claim wrapper below bumps it past a previous session's frames.
   // Optional on-screen mirror: append the (already-redacted) event stream to a local file an xterm in
-  // the ambient desktop tails, so the live-view/recording shows the run working. Opt-in via the env the
-  // desktop guest image sets (BOARDWALK_RUN_LOG_FILE); absent everywhere else, so no cost off-desktop.
-  const runLogFilePath = process.env.BOARDWALK_RUN_LOG_FILE?.trim();
+  // the ambient desktop tails, so the live-view/recording shows the run working. The path is injected
+  // (resolved by `main` from the trusted platform BOOT env), so env-reading stays out of this pure
+  // wiring and a run's author env can't repoint the mirror. Absent off the desktop tier ⇒ no sink.
+  const runLogFilePath = runtime.runLogFilePath?.trim();
   const runLogLocalSink =
     runLogFilePath !== undefined && runLogFilePath !== ""
       ? makeRunLogFileSink(runLogFilePath)
@@ -787,7 +804,72 @@ export function capturePlatformContext(env: NodeJS.ProcessEnv): PlatformContext 
   return { runId, controlPlane, vcpus };
 }
 
+/**
+ * The platform-owned config the worker reads for ITSELF: the browser/desktop tier, screen capture, and
+ * the run's sandbox roots / worker id / run-log mirror. All resolved from the passed env — which `main`
+ * captures from the trusted BOOT env (image-baked `/etc/bwimage.env`) BEFORE the identity relay overlays
+ * the run's author env onto process.env. Consumers use these TYPED fields, never process.env, so a
+ * workflow author's `meta.env` can't shadow platform behavior while the author still owns process.env
+ * outright (docs/RUN_ENV_AND_CREDS.md). Distinct from {@link capturePlatformContext}, which resolves the
+ * per-run CREDENTIALS the relay injects (read post-overlay, then scrubbed).
+ */
+export interface PlatformConfig {
+  /** Browser/desktop tier backend config, or null when the image ships no browser stack. */
+  browser: GuestBrowserConfig | null;
+  /** Screen-capture config, or null when the image ships no desktop stack / recording is off. */
+  capture: CaptureConfig | null;
+  /** Stable worker id (WORKER_ID); absent ⇒ the caller derives one from the run id. */
+  workerId?: string;
+  /** Sandbox workspace root (WORKSPACE_ROOT), default `/workspace`. */
+  workspaceRoot: string;
+  /** Program-extraction root (PROGRAM_ROOT), default `<tmpdir>/bw-programs`. */
+  programRoot: string;
+  /** Self-hosted durable-workspace scope (PERSIST_SCOPE_DIR); set by the daemon only. */
+  persistScopeDir?: string;
+  /** Ambient-desktop run-log mirror path (BOARDWALK_RUN_LOG_FILE); set by the desktop image only. */
+  runLogFilePath?: string;
+}
+
+/**
+ * Resolve {@link PlatformConfig} from the trusted BOOT env. This is the ONE place env is read for the
+ * worker's own platform config — every other module consumes the typed result — so platform behavior
+ * never depends on the author-mutable process.env. Pure (unit-tested). MUST be called on the boot-env
+ * snapshot taken BEFORE the identity relay overlays the author env (see `main`).
+ */
+export function capturePlatformConfig(bootEnv: NodeJS.ProcessEnv): PlatformConfig {
+  return {
+    browser: loadGuestBrowserConfig(bootEnv),
+    capture: loadCaptureConfig(bootEnv),
+    ...(bootEnv.WORKER_ID !== undefined ? { workerId: bootEnv.WORKER_ID } : {}),
+    workspaceRoot: bootEnv.WORKSPACE_ROOT ?? "/workspace",
+    // Never inside the workspace, and never `process.cwd()` (WORKSPACE_PERSISTENCE.md I2). `tmpdir()`
+    // honors TMPDIR, which the self-hosted daemon points at the per-run dir — so concurrent daemons on
+    // one machine don't collide, and the hosted lanes get the VM's own /tmp.
+    programRoot: bootEnv.PROGRAM_ROOT ?? join(tmpdir(), "bw-programs"),
+    ...(bootEnv.PERSIST_SCOPE_DIR !== undefined
+      ? { persistScopeDir: bootEnv.PERSIST_SCOPE_DIR }
+      : {}),
+    ...(bootEnv.BOARDWALK_RUN_LOG_FILE !== undefined
+      ? { runLogFilePath: bootEnv.BOARDWALK_RUN_LOG_FILE }
+      : {}),
+  };
+}
+
 export async function main(): Promise<void> {
+  // Snapshot the platform-owned BOOT env (image-baked `/etc/bwimage.env`, plus anything the
+  // launcher/daemon set) BEFORE the identity relay overlays the run's AUTHOR env onto process.env below,
+  // and resolve the worker's OWN config from it up front. The worker reads platform behavior only from
+  // these trusted values — never the author-mutable process.env — so a workflow's `meta.env` can't
+  // shadow it (`BOARDWALK_RECORDING_ENABLED=0`, `BOARDWALK_BROWSER_TIER=0`, `BOARDWALK_RUNNER_LOG_LEVEL`,
+  // repointing `WORKSPACE_ROOT`, ...). The author still owns process.env outright — no reserved keys
+  // (docs/RUN_ENV_AND_CREDS.md); an eslint rule bans `process.env.BOARDWALK_*` reads to keep it that way.
+  // Per-run values the relay ITSELF delivers (run token, api token, task size, BYO providers) are a
+  // separate channel: `applyIdentityToEnv` set-or-clears them over the author env, so they stay trusted
+  // in process.env. On env-boot substrates (Fargate/self-hosted, no relay) this equals the boot env.
+  const platformBootEnv: NodeJS.ProcessEnv = { ...process.env };
+  configureLogging(platformBootEnv);
+  const platformConfig = capturePlatformConfig(platformBootEnv);
+
   // Relay-mode bootstrap (the snapshot-based microVM substrate): when the guest init handed
   // us an identity relay fd, park here — warm, generic, pre-identity; this await is what the
   // base snapshot freezes — until the run's identity arrives, then map it onto process.env
@@ -819,30 +901,34 @@ export async function main(): Promise<void> {
   const platform = capturePlatformContext(process.env);
   const runId = platform.runId;
 
+  // BYO providers are a per-run value the relay delivers, NOT image-baked config — read post-overlay.
+  // `applyIdentityToEnv` set-or-clears this key over the author env, so the value here is the org's
+  // registry (or empty), never an author's `meta.env`. (Sanctioned platform-key read; the general ban
+  // on `process.env.BOARDWALK_*` is what routes image config through `platformBootEnv` above.)
+  // eslint-disable-next-line no-restricted-syntax -- relay-asserted per-run key, trusted post-overlay
   const byoProviders = parseByoProviders(process.env.BOARDWALK_BYO_PROVIDERS);
   Reflect.deleteProperty(process.env, "BOARDWALK_BYO_PROVIDERS");
 
-  // Browser tier: only when the runner IMAGE declares the browser stack (BOARDWALK_BROWSER_TIER=1 +
-  // a Chrome path). The backend is run-independent (buildHost builds the per-run manager over it);
-  // absent ⇒ `computer.openBrowser()` fails clearly. Read here so env-reading stays out of the pure wiring.
-  const guestBrowserConfig = loadGuestBrowserConfig(process.env);
+  // Construct the image-tier backends from the typed platform config (env already read once, above).
+  // Browser tier: present only when the image declares the browser stack (BOARDWALK_BROWSER_TIER=1 + a
+  // Chrome path); absent ⇒ `computer.openBrowser()` fails clearly. Screen capture: present only when the
+  // image ships the desktop stack (ffmpeg + a display) and recording isn't disabled.
   const browserBackend =
-    guestBrowserConfig !== null ? makeGuestBrowserBackend(guestBrowserConfig) : undefined;
-  // Screen capture (recording + live-view): present only when the image ships the desktop stack
-  // (ffmpeg + a display) and recording isn't disabled. Read here so env-reading stays out of the wiring.
-  const captureConfig = loadCaptureConfig(process.env);
-  const captureBackend = captureConfig !== null ? makeCaptureBackend(captureConfig) : undefined;
+    platformConfig.browser !== null ? makeGuestBrowserBackend(platformConfig.browser) : undefined;
+  const captureBackend =
+    platformConfig.capture !== null ? makeCaptureBackend(platformConfig.capture) : undefined;
 
   const deps = assembleWorkerDeps({
-    workerId: process.env.WORKER_ID ?? `worker-${runId}`,
-    workspaceRoot: process.env.WORKSPACE_ROOT ?? "/workspace",
-    // Never inside the workspace, and never `process.cwd()` (WORKSPACE_PERSISTENCE.md I2). `tmpdir()`
-    // honors TMPDIR, which the self-hosted daemon points at the per-run dir — so concurrent daemons on
-    // one machine don't collide, and the hosted lanes get the VM's own /tmp.
-    programRoot: process.env.PROGRAM_ROOT ?? join(tmpdir(), "bw-programs"),
-    // Set by the self-hosted daemon only (both isolation lanes); hosted images never set it.
-    ...(process.env.PERSIST_SCOPE_DIR !== undefined
-      ? { persistScopeDir: process.env.PERSIST_SCOPE_DIR }
+    // Worker-self config from the typed platform config (trusted boot env), never process.env — so a
+    // run's `meta.env` can't repoint its own workspace/program roots, worker id, or run-log mirror.
+    workerId: platformConfig.workerId ?? `worker-${runId}`,
+    workspaceRoot: platformConfig.workspaceRoot,
+    programRoot: platformConfig.programRoot,
+    ...(platformConfig.persistScopeDir !== undefined
+      ? { persistScopeDir: platformConfig.persistScopeDir }
+      : {}),
+    ...(platformConfig.runLogFilePath !== undefined
+      ? { runLogFilePath: platformConfig.runLogFilePath }
       : {}),
     runId,
     controlPlane: platform.controlPlane,
