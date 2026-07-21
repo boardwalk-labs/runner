@@ -3,6 +3,7 @@ import type { ChatTurn } from "@boardwalk-labs/engine/core";
 import {
   parseInferenceFrame,
   serializeReasoningFrame,
+  serializeResetFrame,
   serializeResultFrame,
 } from "./inference_proxy.js";
 
@@ -17,6 +18,13 @@ describe("reasoning frame", () => {
   it("coerces a missing/non-string reasoning text to empty, like the delta frame", () => {
     const frame = parseInferenceFrame(JSON.stringify({ t: "reasoning" }));
     expect(frame).toEqual({ kind: "reasoning", text: "" });
+  });
+});
+
+describe("reset frame", () => {
+  it("round-trips a reset (no payload) so the leaf can act on a broker restart", () => {
+    const frame = parseInferenceFrame(serializeResetFrame().trimEnd());
+    expect(frame).toEqual({ kind: "reset" });
   });
 });
 

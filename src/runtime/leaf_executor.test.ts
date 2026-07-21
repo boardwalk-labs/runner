@@ -202,6 +202,35 @@ describe("EngineLeafExecutor.run — events", () => {
     const started = sink.bodies[0];
     expect(started?.kind === "turn_started" && started.agentId).toBe("agent-1");
   });
+
+  it("emits turn_reset on a broker restart frame, and takes the turn from the post-restart result", async () => {
+    // The broker relayed a delta, then a `reset` (transient drop recovered), then the real answer.
+    // The leaf surfaces turn_reset so a viewer discards the stale prefix, and returns the restarted
+    // turn's text — never the concatenation.
+    const sink = new RecordingSink();
+    const script: InferenceFrame[] = [
+      { kind: "delta", text: "half-writ" },
+      { kind: "reset" },
+      { kind: "delta", text: "the real answer" },
+      {
+        kind: "result",
+        turn: { text: "the real answer", toolCalls: [], usage: {}, wantsTools: false },
+        modelRef: "boardwalk/m",
+        costMicros: 0,
+      },
+    ];
+    const { exec } = makeExecutor({ scripts: [script], sink });
+    const out = await exec.run("go", OPTS);
+    expect(out).toBe("the real answer");
+    const kinds = sink.bodies.map((b) => b.kind);
+    expect(kinds).toContain("turn_reset");
+    // The reset lands AFTER the stale delta and BEFORE the turn ends, so a viewer can void the prefix.
+    const resetAt = kinds.indexOf("turn_reset");
+    const firstDeltaAt = kinds.indexOf("text_delta");
+    expect(firstDeltaAt).toBeGreaterThanOrEqual(0);
+    expect(resetAt).toBeGreaterThan(firstDeltaAt);
+    expect(resetAt).toBeLessThan(kinds.lastIndexOf("turn_ended") + 1);
+  });
 });
 
 describe("toRunEventBody — compaction frames", () => {

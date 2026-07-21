@@ -206,6 +206,11 @@ export class EngineLeafExecutor implements LeafExecutor {
     // io (children get their own via `forChild`), and the loop is strictly streamModel→reportUsage per
     // turn, so a single slot never races. Null ⇒ no upstream cost for the next turn (BYO / unavailable).
     let pendingCostMicros: number | null = null;
+    // The turn currently streaming, tracked so `streamModel` can attribute a `turn_reset` to it when
+    // the broker restarts a dropped model call mid-stream. Set on `startTurn` and every `emit` (the
+    // engine stamps both with the turn's id); within a leaf, turns are strictly sequential, so this is
+    // never stale for the turn actually streaming.
+    let currentTurnId: string | undefined = undefined;
     return {
       identity,
       redactor,
@@ -238,20 +243,33 @@ export class EngineLeafExecutor implements LeafExecutor {
         // and the run may have been cancelled while frozen.
         await this.deps.budgetGate?.clear();
         throwIfAborted(signal);
-        return this.streamModel(req, providerIo, signal, redactor, (costMicros) => {
-          pendingCostMicros = (pendingCostMicros ?? 0) + costMicros;
-        });
+        return this.streamModel(
+          req,
+          providerIo,
+          signal,
+          redactor,
+          (costMicros) => {
+            pendingCostMicros = (pendingCostMicros ?? 0) + costMicros;
+          },
+          // The broker restarted a dropped model call after content had already streamed: void the
+          // turn's emitted text/reasoning so a viewer re-renders from the restart, not the concatenation.
+          () => {
+            if (currentTurnId !== undefined) sink.emit({ kind: "turn_reset" }, currentTurnId);
+          },
+        );
       },
 
       // turn_started rides a NEW stride block (the supervisor opens it); subsequent leaf events ride
       // the same block. The shared emitter owns the run-global cursor.
       startTurn: (turnId: string): void => {
+        currentTurnId = turnId;
         sink.beginTurn(turnId, { kind: "turn_started", ...identity });
       },
 
       // Engine LeafEventBody → the platform's v1 RunEventBody. The platform already adopted the SDK
       // v1 wire format, and the engine emits the same kinds, so this is a near-identity mapping.
       emit: (turnId: string, body: LeafEventBody): void => {
+        currentTurnId = turnId;
         sink.emit(toRunEventBody(body, identity), turnId);
       },
 
@@ -347,6 +365,7 @@ export class EngineLeafExecutor implements LeafExecutor {
     signal: AbortSignal | undefined,
     redactor: Redactor,
     onCost?: (costMicros: number) => void,
+    onReset?: () => void,
   ): Promise<ModelTurnResult> {
     // Runner-direct BYO (D7): the org's own endpoint + key, called with the same engine adapters
     // the broker uses. No platform cost (BYO is never metered) — onCost stays untouched.
@@ -390,6 +409,11 @@ export class EngineLeafExecutor implements LeafExecutor {
         providerIo.onDelta?.(frame.text);
       } else if (frame.kind === "reasoning") {
         providerIo.onReasoningDelta?.(frame.text);
+      } else if (frame.kind === "reset") {
+        // The broker recovered a transient mid-stream drop and is restarting the turn: everything
+        // relayed above is void. Signal the viewer to discard the turn's streamed text/reasoning; the
+        // authoritative turn still comes from the single terminal `result` frame below.
+        onReset?.();
       } else if (frame.kind === "result") {
         // contextTokens (when the broker knows the served model's window) lets the engine's loop
         // size compaction against the real window instead of a conservative default.

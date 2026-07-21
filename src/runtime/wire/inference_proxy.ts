@@ -66,10 +66,13 @@ export interface ProxyError {
 
 /** A parsed response frame. `ping` is a no-payload heartbeat the broker emits during a long model
  *  turn to keep the connection producing bytes (so idle/body timeouts don't sever it); the worker
- *  ignores it. */
+ *  ignores it. `reset` voids every delta/reasoning relayed so far for the in-progress turn — the
+ *  broker restarts a turn after a transient mid-stream drop; the worker signals the viewer to discard
+ *  the turn's streamed output (the authoritative turn still arrives in the single `result`). */
 export type InferenceFrame =
   | { kind: "delta"; text: string }
   | { kind: "reasoning"; text: string }
+  | { kind: "reset" }
   | { kind: "result"; turn: ChatTurn; modelRef: string; costMicros: number; contextTokens?: number }
   | { kind: "error"; error: ProxyError }
   | { kind: "ping" };
@@ -155,6 +158,13 @@ export function serializeErrorFrame(error: ProxyError): string {
   return `${JSON.stringify({ t: "error", error })}\n`;
 }
 
+/** Serialize a `reset` frame (no payload): the broker restarted a turn after a transient mid-stream
+ *  drop, so every delta/reasoning relayed so far is void. The broker is the producer; this mirror
+ *  exists so runner tests can construct the frame. */
+export function serializeResetFrame(): string {
+  return `${JSON.stringify({ t: "reset" })}\n`;
+}
+
 /** Serialize a heartbeat (no payload) as a single NDJSON line. The broker emits these on an interval
  *  during a long model turn so the worker↔broker connection keeps producing bytes — neither side's
  *  idle/body timeout fires while the model is generating but not yet streaming text. */
@@ -188,6 +198,8 @@ export function parseInferenceFrame(line: string): InferenceFrame {
       };
     case "error":
       return { kind: "error", error: toProxyError(rec.error) };
+    case "reset":
+      return { kind: "reset" };
     case "ping":
       return { kind: "ping" };
     default:
