@@ -22,7 +22,7 @@
 // A well-formed stream is zero-or-more `delta` frames followed by EXACTLY ONE `result` frame, OR a
 // single terminal `error` frame. The neutral conversation shapes (ChatMessage / ChatTurn / ToolSpec)
 // are the engine's `@boardwalk-labs/engine/core` types — so the worker's loop and the broker's
-// adapters speak the same wire as `boardwalk dev` and the self-hosted server (one agent loop).
+// adapters speak the same wire as the self-hosted server (one agent loop).
 
 import type { ChatMessage, ChatTurn, ToolSpec } from "@boardwalk-labs/engine/core";
 import type { NormalizedReasoning } from "@boardwalk-labs/workflow";

@@ -68,7 +68,7 @@ export interface TurnEventSink {
  * Identity of one agent() leaf — stamped on its `turn_started`/`turn_ended` frames so a stream
  * consumer can tell concurrent agents apart. `agentId` is stable + run-unique (worker-assigned);
  * `agentName` is the author's `AgentOptions.name`, present only when set. Mirrors the engine's
- * `AgentIdentity` shape so the platform's wire matches `boardwalk dev` and the self-hosted server.
+ * `AgentIdentity` shape so the platform's wire matches the self-hosted server.
  */
 export interface AgentIdentity {
   agentId: string;

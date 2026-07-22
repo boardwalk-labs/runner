@@ -3,8 +3,8 @@
 // In the JS-body model the run is the workflow PROGRAM; the agent loop is no longer "the run" — it
 // is an ephemeral leaf the program invokes via `agent(prompt, opts)`. This is the LeafExecutor the
 // worker's WorkflowHost delegates `agent()` to. It runs ONE leaf to completion via the engine's
-// `runAgentLeaf` (`@boardwalk-labs/engine/core`) — the SAME loop `boardwalk dev` and the self-hosted
-// server run — supplying a broker-backed `LeafIo`: the model call routes through the Runner Control
+// `runAgentLeaf` (`@boardwalk-labs/engine/core`) — the SAME loop the self-hosted
+// server runs — supplying a broker-backed `LeafIo`: the model call routes through the Runner Control
 // API (the worker holds no model creds), events flow onto the run's v1 event stream, usage meters
 // per-leaf + per-model through the broker, and secrets are redacted out of all model-bound content.
 //
