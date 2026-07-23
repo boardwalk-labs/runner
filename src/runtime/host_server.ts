@@ -193,6 +193,7 @@ export class WorkflowHostServer {
   private nextInvokeId = 1;
   private sockPath: string | null = null;
   private returned: { value: JsonValue } | null = null;
+  private reportFailure: Error | null = null;
   private cancelled = false;
   private readonly onAbort = (): void => {
     this.notifyCancel();
@@ -257,6 +258,15 @@ export class WorkflowHostServer {
    *  reported" for callers that care). */
   hasReturn(): boolean {
     return this.returned !== null;
+  }
+
+  /** The error the most recent `report_return` attempt failed with (the output-schema mismatch),
+   *  or null when none failed / a later report succeeded. An IN-PROCESS loader re-throws this
+   *  error itself; a SUBPROCESS loader (Python) can only propagate it as a traceback + non-zero
+   *  exit, so the runner reads it back here to curate the run's failure with the original
+   *  code/message instead of the traceback's last line. */
+  reportReturnFailure(): Error | null {
+    return this.returned !== null ? null : this.reportFailure;
   }
 
   /** Push the `cancel` notification to every connected client (idempotent). */
@@ -402,6 +412,11 @@ export class WorkflowHostServer {
       const result = await this.dispatch(conn, id, method, parsed.data);
       conn.send({ jsonrpc: "2.0", id, result });
     } catch (err) {
+      // Remember a report_return failure for {@link reportReturnFailure} — a subprocess loader
+      // cannot re-throw it to the runner the way the in-process loader does.
+      if (method === "report_return") {
+        this.reportFailure = err instanceof Error ? err : new Error(String(err));
+      }
       conn.send({ jsonrpc: "2.0", id, error: protocolErrorOf(err) });
     }
   }

@@ -49,6 +49,7 @@ import {
   type JsonValue,
 } from "@boardwalk-labs/workflow/runtime";
 import { WorkflowHostServer, type HostCapabilities } from "./host_server.js";
+import { invokePythonProgram, isPythonEntry } from "./python_program.js";
 import { AppError, ErrorCode, createLogger } from "./support/index.js";
 
 const log = createLogger("ProgramRunner");
@@ -198,6 +199,11 @@ export interface ProgramRunnerDeps {
   signal?: AbortSignal | undefined;
   /** Override the socket directory (tests). Default `os.tmpdir()` (short paths — sun_path cap). */
   sockDir?: string | undefined;
+  /** Interpreter a `.py` entry is launched with (P5.5). Default `python3`, resolved on PATH —
+   *  the base image bakes one CPython (P5.3). May be an absolute path. */
+  pythonInterpreter?: string | undefined;
+  /** How long after SIGTERM an aborted Python child gets before SIGKILL. Default 5s. */
+  pythonKillGraceMs?: number | undefined;
 }
 
 /** Terminal result of running a workflow program. `output` is the validated value `run()`
@@ -274,8 +280,12 @@ export async function runWorkflowProgram(
     await rm(tgzPath, { force: true });
     // The bundled tree is now on disk — let the worker point the agent() leaf at `<dir>/skills/*.md`.
     deps.onExtracted?.(dir);
+    // Language dispatch by entry extension (P5.5): a `.py` entry runs as a SUBPROCESS speaking
+    // the same host protocol (`python -m boardwalk._loader <entry>`, provided by the image's
+    // Python SDK — no JS SDK link to make); everything else keeps the in-process TS loader.
+    const python = isPythonEntry(args.entry);
     // Make the bare `@boardwalk-labs/workflow` import resolve from ANY work root.
-    await ensureSdkLink(dir);
+    if (!python) await ensureSdkLink(dir);
     // Re-validate the entry here even though the control plane checked it at deploy (defense-in-depth
     // for a self-hosted runner pointed at an arbitrary control plane).
     const entryPath = resolveEntryPath(dir, args.entry);
@@ -287,7 +297,9 @@ export async function runWorkflowProgram(
 
     // Invoke run(input, context) to its natural completion / failure. A waiting seam freezes with
     // the VM (snapshot substrate) or holds the process — either way the await continues.
-    return await invokeProgram(entryPath, sockPath, server, deps);
+    return python
+      ? await invokePythonProgram(entryPath, sockPath, server, deps)
+      : await invokeProgram(entryPath, sockPath, server, deps);
   } catch (err) {
     const redactText = deps.redactText ?? ((s: string): string => s);
     // Redact BEFORE both sinks: the message can carry a secret the program resolved then threw.
