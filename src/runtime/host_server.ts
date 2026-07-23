@@ -434,12 +434,18 @@ export class WorkflowHostServer {
       }
       case "workflows.call": {
         const p = params as HostMethodParams<"workflows.call">;
-        const result = await caps.callWorkflow(p.slug, p.input, pruneUndefined<CallOptions>(p.opts));
+        const result = await caps.callWorkflow(
+          p.slug,
+          p.input,
+          pruneUndefined<CallOptions>(p.opts),
+        );
         return { output: asJsonValue(result.output), output_schema: result.outputSchema };
       }
       case "workflows.run": {
         const p = params as HostMethodParams<"workflows.run">;
-        return { runId: await caps.runWorkflow(p.slug, p.input, pruneUndefined<CallOptions>(p.opts)) };
+        return {
+          runId: await caps.runWorkflow(p.slug, p.input, pruneUndefined<CallOptions>(p.opts)),
+        };
       }
       case "workflows.schedule": {
         const p = params as HostMethodParams<"workflows.schedule">;
@@ -469,7 +475,9 @@ export class WorkflowHostServer {
       case "artifacts.write": {
         const p = params as HostMethodParams<"artifacts.write">;
         const body: ArtifactBody =
-          p.body.encoding === "utf8" ? p.body.data : new Uint8Array(Buffer.from(p.body.data, "base64"));
+          p.body.encoding === "utf8"
+            ? p.body.data
+            : new Uint8Array(Buffer.from(p.body.data, "base64"));
         const ref = await caps.writeArtifact(p.name, p.contentType, body, p.metadata);
         return { ref: { id: ref.id, name: ref.name, url: ref.url } };
       }
@@ -702,9 +710,7 @@ export function protocolErrorOf(err: unknown): { code: string; message: string; 
 /** Compile the output-schema validator: structural (formats off — same honesty as the revive
  *  pass), lax about unknown keywords (`contentEncoding` etc.). A schema that will not compile is
  *  a platform bug in the deriver — warned and skipped (fail-soft), never a run failure. */
-function compileOutputValidator(
-  schema: Record<string, unknown> | null,
-): ValidateFunction | null {
+function compileOutputValidator(schema: Record<string, unknown> | null): ValidateFunction | null {
   if (schema === null) return null;
   try {
     const ajv = new Ajv({ strict: false, validateFormats: false });
