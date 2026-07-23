@@ -12,7 +12,6 @@ import {
   workerAuthContext,
   type WorkerRuntime,
 } from "./index.js";
-import { WorkerWorkflowHost } from "./workflow_host.js";
 import { workflowManifestSchema } from "./wire/manifest.js";
 import type { Run, RunActor } from "./wire/run.js";
 
@@ -97,14 +96,35 @@ describe("assembleWorkerDeps", () => {
     }
   });
 
-  it("buildHost constructs a per-run WorkflowHost", async () => {
+  it("buildHost constructs the per-run capability seam (every protocol method wired)", async () => {
     const deps = assembleWorkerDeps(runtime());
     const manifest = workflowManifestSchema.parse({
       slug: "demo",
       triggers: [{ kind: "manual" }],
     });
-    const { host } = await deps.buildHost(sampleRun(), manifest, new AbortController().signal);
-    expect(host).toBeInstanceOf(WorkerWorkflowHost);
+    const { capabilities } = await deps.buildHost(
+      sampleRun(),
+      manifest,
+      new AbortController().signal,
+    );
+    for (const member of [
+      "agent",
+      "callWorkflow",
+      "runWorkflow",
+      "scheduleWorkflow",
+      "sleep",
+      "humanInput",
+      "getSecret",
+      "writeArtifact",
+      "openBrowser",
+      "shell",
+      "phase",
+      "idToken",
+      "apiToken",
+      "usage",
+    ] as const) {
+      expect(typeof capabilities[member]).toBe("function");
+    }
   });
 
   it("buildHost returns a per-run LSP handle the orchestrator closes at run end", async () => {
@@ -258,7 +278,11 @@ describe("assembleWorkerDeps — Runner Control API (the Runner Credential Broke
       slug: "demo",
       triggers: [{ kind: "manual" }],
     });
-    const { host } = await deps.buildHost(sampleRun(), manifest, new AbortController().signal);
+    const { capabilities } = await deps.buildHost(
+      sampleRun(),
+      manifest,
+      new AbortController().signal,
+    );
 
     // Runtime is now metered by the flusher; its final flush books the tail through the broker /usage.
     const runtimeFlush = deps.startRuntimeFlush?.({
@@ -267,9 +291,8 @@ describe("assembleWorkerDeps — Runner Control API (the Runner Credential Broke
     });
     await runtimeFlush?.flushFinal();
     await runtimeFlush?.stop();
-    const secret = await host.getSecret("LINEAR_TOKEN");
-    if (host.runWorkflow === undefined) throw new Error("host.runWorkflow not wired");
-    const childId = await host.runWorkflow("child-wf", { x: 1 }, undefined);
+    const secret = await capabilities.getSecret("LINEAR_TOKEN");
+    const childId = await capabilities.runWorkflow("child-wf", { x: 1 }, undefined);
 
     expect(secret).toBe("sk-secret");
     expect(childId).toBe("child_1");
@@ -397,24 +420,20 @@ describe("publicApiOrigin", () => {
   });
 });
 
-describe("buildHost — the runtime accessor (import { runtime })", () => {
+describe("buildHost — the auth mints (auth.apiToken / auth.idToken)", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("exposes run ids + a redacted on-demand apiToken, never via process.env", async () => {
+  it("serves the captured (env-scrubbed) api token on demand via auth.apiToken", async () => {
     const deps = assembleWorkerDeps(runtime());
     const manifest = workflowManifestSchema.parse({ slug: "demo", triggers: [{ kind: "manual" }] });
-    const { host } = await deps.buildHost(sampleRun(), manifest, new AbortController().signal);
-    // The host carries the runtime context the SDK `runtime` accessor reads off it (instanceof narrows
-    // to the concrete worker host, which has the non-optional `runtime`).
-    if (!(host instanceof WorkerWorkflowHost)) throw new Error("expected a WorkerWorkflowHost");
-    expect(host.runtime.runId).toBe("01H_run");
-    expect(host.runtime.workflowId).toBe("01H_agent");
-    expect(host.runtime.orgId).toBe("01H_org");
-    // apiUrl is the origin of the broker base URL (the public API shares it).
-    expect(host.runtime.apiUrl).toBe("https://api.boardwalk.sh");
-    await expect(host.runtime.apiToken()).resolves.toBe("api_token");
+    const { capabilities } = await deps.buildHost(
+      sampleRun(),
+      manifest,
+      new AbortController().signal,
+    );
+    await expect(capabilities.apiToken()).resolves.toBe("api_token");
   });
 
   it("rejects apiToken() clearly when no run API token was provisioned", async () => {
@@ -423,9 +442,12 @@ describe("buildHost — the runtime accessor (import { runtime })", () => {
       controlPlane: { baseUrl: "https://api.boardwalk.sh", runToken: "rt_token" },
     });
     const manifest = workflowManifestSchema.parse({ slug: "demo", triggers: [{ kind: "manual" }] });
-    const { host } = await deps.buildHost(sampleRun(), manifest, new AbortController().signal);
-    if (!(host instanceof WorkerWorkflowHost)) throw new Error("expected a WorkerWorkflowHost");
-    await expect(host.runtime.apiToken()).rejects.toThrow(/not provisioned a public-API token/);
+    const { capabilities } = await deps.buildHost(
+      sampleRun(),
+      manifest,
+      new AbortController().signal,
+    );
+    await expect(capabilities.apiToken()).rejects.toThrow(/not provisioned a public-API token/);
   });
 
   it("idToken mints via the broker per call and records the JWT in the redactor", async () => {
@@ -455,14 +477,13 @@ describe("buildHost — the runtime accessor (import { runtime })", () => {
       triggers: [{ kind: "manual" }],
       permissions: { id_token: "write" },
     });
-    const { host, redactor } = await deps.buildHost(
+    const { capabilities, redactor } = await deps.buildHost(
       sampleRun(),
       manifest,
       new AbortController().signal,
     );
-    if (!(host instanceof WorkerWorkflowHost)) throw new Error("expected a WorkerWorkflowHost");
 
-    await expect(host.runtime.idToken("sts.amazonaws.com")).resolves.toBe(jwt);
+    await expect(capabilities.idToken("sts.amazonaws.com")).resolves.toBe(jwt);
     expect(seen.map((s) => s.url)).toEqual([
       "https://api.boardwalk.sh/runner/v1/runs/run-test/oidc/token",
     ]);

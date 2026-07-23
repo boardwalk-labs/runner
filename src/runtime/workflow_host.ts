@@ -1,5 +1,5 @@
-// WorkerWorkflowHost — the real WorkflowHost the worker installs onto @boardwalk-labs/workflow
-// before running a program (the workflow runtime design). The program's hooks delegate here:
+// WorkerWorkflowHost — the runner's capability layer behind the host protocol (the
+// workflow-format redesign). The protocol server's `HostCapabilities` seam delegates here:
 //
 //   agent(prompt, opts)        → an ephemeral agent leaf (the demoted agent loop)
 //   sleep(arg)                 → an IN-PROCESS hold (hold-and-pay; no checkpoint, no exit)
@@ -12,7 +12,6 @@
 
 import { AppError, ErrorCode } from "./support/index.js";
 import type {
-  WorkflowHost,
   AgentOptions,
   ArtifactBody,
   ArtifactRef,
@@ -22,8 +21,11 @@ import type {
   HumanInputOptions,
   HumanInputResult,
   PhaseOptions,
+  ShellResult,
   SleepArg,
+  UsageSnapshot,
 } from "@boardwalk-labs/workflow/runtime";
+import type { ShellOptions } from "@boardwalk-labs/workflow";
 import type { BrowserSessionManager } from "./browser_session.js";
 import { LeafParked, type LeafResume } from "@boardwalk-labs/engine/core";
 import { normalizeHumanInputResult } from "./wire/human_input.js";
@@ -242,9 +244,15 @@ export interface WorkerWorkflowHostDeps {
   heldInput?: HeldInputPort;
   /** Poll interval for a held gate's answer (default 3s). */
   heldPollIntervalMs?: number;
+  /** Backs the protocol's `shell` capability (shell_exec's runShell in production). Absent ⇒
+   *  `shell()` is unsupported in this runtime and rejects clearly. */
+  shell?: (cmd: string, opts: ShellOptions | undefined) => Promise<ShellResult>;
+  /** Live budget state for `usage.get` (the BudgetMeter's usageSnapshot in production). Absent ⇒
+   *  `usage.get()` is unsupported in this runtime and rejects clearly. */
+  usage?: () => UsageSnapshot;
 }
 
-export class WorkerWorkflowHost implements WorkflowHost {
+export class WorkerWorkflowHost {
   private readonly sleeper: SleepController;
   private readonly now: () => number;
   private readonly maxSleepMs: number;
@@ -737,6 +745,40 @@ export class WorkerWorkflowHost implements WorkflowHost {
     // persistent workspace first so a crash during the hold can restore it. An abort mid-hold rejects.
     if (this.deps.onBeforeSleep !== undefined) await this.deps.onBeforeSleep();
     await this.sleeper.hold(holdMs, this.deps.signal);
+  }
+
+  /** The protocol's `shell` capability. Runs under the same abort/freeze gate as every hook, so
+   *  a freeze never snapshots around an unguarded seam and an aborted run rejects promptly. */
+  shell(cmd: string, opts: ShellOptions | undefined): Promise<ShellResult> {
+    return this.guarded(async () => {
+      if (this.deps.shell === undefined) {
+        throw new AppError(ErrorCode.VALIDATION_FAILED, "shell is not available in this runtime");
+      }
+      return await this.deps.shell(cmd, opts);
+    });
+  }
+
+  /** Live budget state for `usage.get` — every dimension `{spent, cap, remaining}`. */
+  usage(): Promise<UsageSnapshot> {
+    return this.guarded(async () => {
+      if (this.deps.usage === undefined) {
+        throw new AppError(
+          ErrorCode.VALIDATION_FAILED,
+          "usage.get is not available in this runtime",
+        );
+      }
+      return Promise.resolve(this.deps.usage());
+    });
+  }
+
+  /** `auth.idToken(audience)` — minted per call by the broker via {@link RuntimeContext}. */
+  idToken(audience: string): Promise<string> {
+    return this.guarded(() => this.deps.runtime.idToken(audience));
+  }
+
+  /** `auth.apiToken()` — the run's short-lived, manifest-scoped public-API bearer. */
+  apiToken(): Promise<string> {
+    return this.guarded(() => this.deps.runtime.apiToken());
   }
 
   /** Resolve any {@link SleepArg} shape to a millisecond duration from now. */

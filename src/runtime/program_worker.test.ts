@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { WorkflowHost } from "@boardwalk-labs/workflow/runtime";
+import type { HostCapabilities } from "./host_server.js";
 import type { Run } from "./wire/run.js";
 import { SecretRedactor } from "./agent/secret_redactor.js";
 import {
@@ -35,6 +35,10 @@ function fakeRun(over: Partial<Run> = {}): Run {
     orgId: "org_1",
     workflowId: "wf_1",
     workflowVersionId: "ver_1",
+    environmentId: null,
+    actor: { type: "user", user_id: "user_1" },
+    triggerKind: "manual",
+    createdAt: 1_700_000_000_000,
     input: { name: "world" },
     triggerPayload: null,
     ...over,
@@ -48,7 +52,7 @@ const VALID_MANIFEST = {
 
 // The default program the worker fetches + verifies + extracts + runs (a tiny one-leaf program). Built
 // into a real artifact so the worker's download→verify→extract→import path runs end-to-end in the test.
-const DEFAULT_PROGRAM_SOURCE = `import { agent } from "@boardwalk-labs/workflow";\nawait agent("go");`;
+const DEFAULT_PROGRAM_SOURCE = `import { agent } from "@boardwalk-labs/workflow";\nexport default async function run() { await agent("go"); }`;
 const DEFAULT_ARTIFACT = buildSingleFileArtifact(DEFAULT_PROGRAM_SOURCE);
 const DEFAULT_PROGRAM: ProgramRef = {
   entry: DEFAULT_ARTIFACT.entry,
@@ -147,8 +151,11 @@ function harness(
       return Promise.resolve();
     },
   };
-  const host: WorkflowHost = {
-    setPhase: (name) => {
+  const notStubbed = (what: string): never => {
+    throw new Error(`${what} is not stubbed in this test`);
+  };
+  const capabilities: HostCapabilities = {
+    phase: (name) => {
       hostCalls.phases.push(name);
       phaseActive = true;
     },
@@ -156,12 +163,21 @@ function harness(
       hostCalls.agent.push(prompt);
       return Promise.resolve("leaf-result");
     },
-    callWorkflow: () => Promise.resolve(null),
+    callWorkflow: () => Promise.resolve({ output: null, outputSchema: null }),
+    runWorkflow: () => notStubbed("workflows.run"),
+    scheduleWorkflow: () => notStubbed("workflows.schedule"),
     sleep: (arg) => {
       hostCalls.sleeps.push(arg);
       return Promise.resolve();
     },
+    humanInput: () => notStubbed("humanInput"),
     getSecret: () => Promise.resolve("sek"),
+    writeArtifact: () => notStubbed("artifacts.write"),
+    openBrowser: () => notStubbed("computer.openBrowser"),
+    shell: () => notStubbed("shell"),
+    idToken: () => notStubbed("auth.idToken"),
+    apiToken: () => notStubbed("auth.apiToken"),
+    usage: () => notStubbed("usage.get"),
   };
 
   const redactor = new SecretRedactor();
@@ -203,7 +219,7 @@ function harness(
       finalizer,
       buildHost: () =>
         Promise.resolve({
-          host,
+          capabilities,
           redactor,
           phases: {
             close: (status: "completed" | "failed" | "cancelled") => {
@@ -323,7 +339,7 @@ describe("runProgramWorker — happy path", () => {
   it("injects the trigger input into the program", async () => {
     const h = harness({
       claim: fakeRun({ input: { topic: "payments" } }),
-      programSource: `import { agent, input } from "@boardwalk-labs/workflow"; await agent("triage " + JSON.stringify(input));`,
+      programSource: `import { agent } from "@boardwalk-labs/workflow"; export default async function run(input) { await agent("triage " + JSON.stringify(input)); }`,
     });
     await runProgramWorker("run_1", h.deps);
     expect(h.hostCalls.agent).toEqual(['triage {"topic":"payments"}']);
@@ -333,8 +349,10 @@ describe("runProgramWorker — happy path", () => {
     const h = harness({
       programSource: `
           import { phase, agent } from "@boardwalk-labs/workflow";
-          phase("Install dependencies");
-          await agent("go");
+          export default async function run() {
+            phase("Install dependencies");
+            await agent("go");
+          }
         `,
     });
     const outcome = await runProgramWorker("run_1", h.deps);
@@ -355,7 +373,7 @@ describe("runProgramWorker — workspace persistence", () => {
   it("persists even when the program fails", async () => {
     const h = harness({
       persistWorkspace: true,
-      programSource: `throw new Error("boom");`,
+      programSource: `export default function run() { throw new Error("boom"); }`,
     });
     await runProgramWorker("run_1", h.deps);
     expect(h.workspace.persisted).toBe(1);
@@ -369,7 +387,10 @@ describe("runProgramWorker — workspace persistence", () => {
   });
 
   it("reaps browser sessions even when the program fails", async () => {
-    const h = harness({ withBrowser: true, programSource: `throw new Error("boom");` });
+    const h = harness({
+      withBrowser: true,
+      programSource: `export default function run() { throw new Error("boom"); }`,
+    });
     await runProgramWorker("run_1", h.deps);
     expect(h.browser.closed).toBe(1);
   });
@@ -390,7 +411,10 @@ describe("runProgramWorker — per-run LSP teardown (no leaked language-server p
   });
 
   it("closes the per-run LSP even when the program fails", async () => {
-    const h = harness({ withLsp: true, programSource: `throw new Error("boom");` });
+    const h = harness({
+      withLsp: true,
+      programSource: `export default function run() { throw new Error("boom"); }`,
+    });
     const outcome = await runProgramWorker("run_1", h.deps);
     expect(outcome.kind).toBe("failed");
     expect(h.lsp.closed).toBe(1);
@@ -470,35 +494,17 @@ describe("runProgramWorker — pre-flight failures (no charge)", () => {
     expect(h.runtimeFlush.flushedFinal).toBe(0);
   });
 
-  it("fails BEFORE running when resumed past budget.deadline_seconds (no agent turn needed)", async () => {
+  it("runs normally under a budget with the renamed max_compute_seconds cap", async () => {
+    // The manifest's budget schema has no deadline_seconds and names max_compute_seconds now;
+    // a fresh run with a roomy compute cap runs to completion (the cap itself is the meter's job).
     const h = harness({
-      // The run first started 60s ago (it suspended in between); the 25s wall-clock deadline is blown.
-      // The program has an agent() call, but the deadline is enforced PRE-RUN so it never executes —
-      // this is the no-agent-turn gap the BudgetMeter (per-turn) can't catch.
-      claim: fakeRun({ startedAt: Date.now() - 60_000 }),
       version: {
-        manifest: { ...VALID_MANIFEST, budget: { deadline_seconds: 25 } },
+        manifest: { ...VALID_MANIFEST, budget: { max_compute_seconds: 3600 } },
         program: DEFAULT_PROGRAM,
       },
     });
     const outcome = await runProgramWorker("run_1", h.deps);
-    expect(outcome).toEqual({ kind: "failed", reason: "deadline_exceeded" });
-    expect(h.runtimeFlush.flushedFinal).toBe(0); // never ran → no charge
-    expect(h.hostCalls.agent).toEqual([]); // the program never executed
-    expect(h.finalized[0]?.status).toBe("failed");
-    expect(JSON.stringify(h.finalized[0]?.output)).toContain("deadline_seconds");
-  });
-
-  it("does NOT trip the deadline on a fresh run whose deadline hasn't elapsed", async () => {
-    const h = harness({
-      claim: fakeRun({ startedAt: Date.now() }), // just started — well within a 25s deadline
-      version: {
-        manifest: { ...VALID_MANIFEST, budget: { deadline_seconds: 25 } },
-        program: DEFAULT_PROGRAM,
-      },
-    });
-    const outcome = await runProgramWorker("run_1", h.deps);
-    expect(outcome).toEqual({ kind: "completed" }); // runs to completion normally
+    expect(outcome).toEqual({ kind: "completed" });
     expect(h.hostCalls.agent).toEqual(["go"]);
   });
 });
@@ -506,7 +512,7 @@ describe("runProgramWorker — pre-flight failures (no charge)", () => {
 describe("runProgramWorker — program failure (charges, then fails)", () => {
   it("charges runtime then finalizes failed when the program throws", async () => {
     const h = harness({
-      programSource: `import { phase } from "@boardwalk-labs/workflow"; phase("Build"); throw new Error("kaboom");`,
+      programSource: `import { phase } from "@boardwalk-labs/workflow"; export default function run() { phase("Build"); throw new Error("kaboom"); }`,
     });
     const outcome = await runProgramWorker("run_1", h.deps);
     expect(outcome.kind).toBe("failed");
@@ -570,7 +576,7 @@ describe("runProgramWorker — program failure (charges, then fails)", () => {
   it("redacts a resolved secret from a thrown error before finalizing", async () => {
     const secret = "sk-live-supersecret-value-1234";
     const h = harness({
-      programSource: `throw new Error("upstream rejected key ${secret}");`,
+      programSource: `export default function run() { throw new Error("upstream rejected key ${secret}"); }`,
     });
     // Simulate the program having resolved the secret earlier in the run (secrets.get records it).
     h.redactor.record(secret);

@@ -108,9 +108,9 @@ function answerText(result: HumanInputResult): string {
  * overwhelming majority of calls). On a `usd` breach: park at a gate, then apply the answer to the
  * live meter and let the call proceed.
  *
- * Scope (slice 1): ONLY the `usd` cap parks. A `tokens` / `duration` / `deadline` breach still fails
- * the run through the leaf executor's existing throw — those dimensions have no "approve more" story
- * yet, and `deadline` is wall-clock, which a park cannot pause by definition.
+ * Scope (slice 1): ONLY the `usd` cap parks. A `tokens` / `compute` breach still fails the run
+ * through the leaf executor's existing throw — the locked budget decision makes those pausable too
+ * (dimension-native presets at the same gate), which is the remaining P3 budget-alignment work.
  */
 export class BudgetGate {
   constructor(

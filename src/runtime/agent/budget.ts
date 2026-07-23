@@ -1,4 +1,4 @@
-// BudgetMeter — enforces token / USD / duration caps declared in the manifest.
+// BudgetMeter — enforces token / USD / compute-time caps declared in the manifest.
 //
 // One meter per run. The agent loop calls `addUsage()` after each LLM turn and
 // `assertWithinCaps()` between turns. When a cap is exceeded the meter throws
@@ -14,6 +14,7 @@
 // the fallback rate as a constructor arg so tests inject a fixed rate.
 
 import { AppError, ErrorCode } from "../support/index.js";
+import type { UsageSnapshot } from "@boardwalk-labs/workflow/runtime";
 import type { Budget } from "../wire/manifest.js";
 
 /** Per-million-token rates. */
@@ -49,8 +50,8 @@ export interface PriorUsage {
   totalUsd: number;
   /**
    * Active execution time from prior sessions (ms). Only on-CPU turn time counts toward the
-   * duration cap — sleep/wait pauses don't burn it (a run intentionally parked for a day must
-   * not blow its duration budget on resume).
+   * compute cap — sleep/wait pauses don't burn it (a run intentionally parked for a day must
+   * not blow its `max_compute_seconds` budget on resume).
    */
   activeMs: number;
 }
@@ -70,10 +71,6 @@ export interface BudgetMeterOptions {
   rate: ModelRate;
   /** This SESSION's start time (ms). Per-session active duration is measured from here. */
   startedAt: number;
-  /** The RUN's original start time (ms) — the basis for `deadline_seconds`, a WALL-CLOCK cap that
-   *  INCLUDES suspended idle (unlike max_duration_seconds, which is active compute). Omit to leave
-   *  the deadline cap unenforced (e.g. a run that hasn't started yet). */
-  deadlineStartedAt?: number;
   /** Cumulative usage from prior sessions of this run (resume). Defaults to zero. */
   priorUsage?: PriorUsage;
   /** Injected clock for tests. */
@@ -97,7 +94,6 @@ export class BudgetMeter {
   private budget: Budget | undefined;
   private readonly rate: ModelRate;
   private readonly startedAt: number;
-  private readonly deadlineStartedAt: number | null;
   private readonly prior: PriorUsage;
   private readonly now: () => number;
 
@@ -111,7 +107,6 @@ export class BudgetMeter {
     if (opts.budget !== undefined) this.budget = opts.budget;
     this.rate = opts.rate;
     this.startedAt = opts.startedAt;
-    this.deadlineStartedAt = opts.deadlineStartedAt ?? null;
     this.prior = opts.priorUsage ?? ZERO_PRIOR;
     this.now = opts.now ?? Date.now;
   }
@@ -196,27 +191,16 @@ export class BudgetMeter {
         { kind: "usd", used: snap.totalUsd, cap: this.budget.max_usd },
       );
     }
-    if (this.budget.max_duration_seconds !== undefined) {
+    // max_compute_seconds bounds ACTIVE compute (turn time) — a long sleep / human-input wait
+    // doesn't burn it. There is deliberately no wall-clock deadline cap (deadline_seconds was
+    // deleted with the workflow-format redesign; nothing replaces it).
+    if (this.budget.max_compute_seconds !== undefined) {
       const elapsedSeconds = Math.floor(snap.elapsedMs / 1000);
-      if (elapsedSeconds > this.budget.max_duration_seconds) {
+      if (elapsedSeconds > this.budget.max_compute_seconds) {
         throw new AppError(
           ErrorCode.BUDGET_EXCEEDED,
-          `Duration cap exceeded: ${elapsedSeconds.toString()}s > ${this.budget.max_duration_seconds.toString()}s`,
-          { kind: "duration", used: elapsedSeconds, cap: this.budget.max_duration_seconds },
-        );
-      }
-    }
-    // deadline_seconds: WALL-CLOCK from the run's original start, INCLUDING suspended idle (a run
-    // resumed past its deadline trips on its first cap check; a long-running one trips per turn).
-    // Distinct from max_duration_seconds (active compute) — a long sleep / human-input wait does not
-    // burn that, but DOES count here.
-    if (this.budget.deadline_seconds !== undefined && this.deadlineStartedAt !== null) {
-      const wallSeconds = Math.floor((this.now() - this.deadlineStartedAt) / 1000);
-      if (wallSeconds > this.budget.deadline_seconds) {
-        throw new AppError(
-          ErrorCode.BUDGET_EXCEEDED,
-          `Deadline exceeded: ${wallSeconds.toString()}s > ${this.budget.deadline_seconds.toString()}s (wall-clock)`,
-          { kind: "deadline", used: wallSeconds, cap: this.budget.deadline_seconds },
+          `Compute cap exceeded: ${elapsedSeconds.toString()}s > ${this.budget.max_compute_seconds.toString()}s`,
+          { kind: "compute", used: elapsedSeconds, cap: this.budget.max_compute_seconds },
         );
       }
     }
@@ -247,7 +231,7 @@ export class BudgetMeter {
     return this.budget?.max_usd ?? null;
   }
 
-  capBreachReason(): "tokens" | "usd" | "duration" | "deadline" | null {
+  capBreachReason(): "tokens" | "usd" | "compute" | null {
     try {
       this.assertWithinCaps();
       return null;
@@ -258,19 +242,34 @@ export class BudgetMeter {
         err.detail !== null &&
         "kind" in err.detail
       ) {
-        return (err.detail as { kind: "tokens" | "usd" | "duration" | "deadline" }).kind;
+        return (err.detail as { kind: "tokens" | "usd" | "compute" }).kind;
       }
       throw err;
     }
   }
 
   /**
-   * The declared `max_duration_seconds` cap, or null when unset. Lets callers that
-   * reason about wall-clock ahead of time (e.g. the sleep tool rejecting a sleep that
-   * would overrun the run) read the cap without reaching into the meter's internals.
+   * Live budget state in the host protocol's `usage.get` shape: every dimension always present
+   * as `{spent, cap, remaining}`, with `cap`/`remaining` null when uncapped. RUN-CUMULATIVE (the
+   * same basis cap enforcement uses), so a program polling it sees the numbers the platform's
+   * budget pause would act on. `tokens.spent` is conversation tokens (input + output) — the same
+   * basis as the `max_tokens` cap.
    */
-  durationCapSeconds(): number | null {
-    return this.budget?.max_duration_seconds ?? null;
+  usageSnapshot(): UsageSnapshot {
+    const snap = this.cumulative();
+    const dimension = (spent: number, cap: number | undefined): UsageSnapshot["usd"] => ({
+      spent,
+      cap: cap ?? null,
+      remaining: cap === undefined ? null : Math.max(0, cap - spent),
+    });
+    return {
+      usd: dimension(snap.totalUsd, this.budget?.max_usd),
+      tokens: dimension(snap.totalTokens, this.budget?.max_tokens),
+      compute_seconds: dimension(
+        Math.floor(snap.elapsedMs / 1000),
+        this.budget?.max_compute_seconds,
+      ),
+    };
   }
 
   /**

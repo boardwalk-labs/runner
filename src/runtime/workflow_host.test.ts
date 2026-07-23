@@ -20,6 +20,7 @@ import {
   type SecretAccessor,
   type SleepController,
   type PhaseController,
+  type WorkerWorkflowHostDeps,
 } from "./workflow_host.js";
 import { LeafParked } from "@boardwalk-labs/engine/core";
 import { RunAbortedError } from "./run_abort.js";
@@ -56,6 +57,8 @@ function makeHost(
     heldInput: HeldInputPort;
     heldPollIntervalMs: number;
     browserSessions: BrowserSessionManager;
+    shell: NonNullable<WorkerWorkflowHostDeps["shell"]>;
+    usage: NonNullable<WorkerWorkflowHostDeps["usage"]>;
   }> = {},
 ): { host: WorkerWorkflowHost; held: number[] } {
   const held: number[] = [];
@@ -88,6 +91,8 @@ function makeHost(
       ? { heldPollIntervalMs: over.heldPollIntervalMs }
       : {}),
     ...(over.browserSessions ? { browserSessions: over.browserSessions } : {}),
+    ...(over.shell ? { shell: over.shell } : {}),
+    ...(over.usage ? { usage: over.usage } : {}),
   });
   return { host, held };
 }
@@ -652,5 +657,61 @@ describe("computer.openBrowser + agent({ session })", () => {
     await expect(
       host.agent("drive", { session: { id: "ghost" } as BrowserSession }),
     ).rejects.toThrow(/not open in this run/);
+  });
+});
+
+describe("WorkerWorkflowHost — the redesign's protocol capabilities (shell / usage / auth)", () => {
+  const ZERO_USAGE = {
+    usd: { spent: 0, cap: null, remaining: null },
+    tokens: { spent: 0, cap: null, remaining: null },
+    compute_seconds: { spent: 0, cap: null, remaining: null },
+  };
+
+  it("shell() delegates to the injected runner under the abort guard", async () => {
+    const seen: string[] = [];
+    const { host } = makeHost({
+      shell: (cmd) => {
+        seen.push(cmd);
+        return Promise.resolve({ exitCode: 0, stdout: "out", stderr: "" });
+      },
+    });
+    await expect(host.shell("echo hi", undefined)).resolves.toEqual({
+      exitCode: 0,
+      stdout: "out",
+      stderr: "",
+    });
+    expect(seen).toEqual(["echo hi"]);
+  });
+
+  it("shell() fails CLOSED when no runner is wired", async () => {
+    const { host } = makeHost();
+    await expect(host.shell("echo hi", undefined)).rejects.toThrow(/shell is not available/);
+  });
+
+  it("shell() rejects promptly on an aborted run", async () => {
+    const { host } = makeHost({
+      signal: abortedSignal(),
+      shell: () => Promise.resolve({ exitCode: 0, stdout: "", stderr: "" }),
+    });
+    await expect(host.shell("echo hi", undefined)).rejects.toBeInstanceOf(RunAbortedError);
+  });
+
+  it("usage() serves the injected live snapshot; fails CLOSED without one", async () => {
+    const { host } = makeHost({ usage: () => ZERO_USAGE });
+    await expect(host.usage()).resolves.toEqual(ZERO_USAGE);
+    const bare = makeHost();
+    await expect(bare.host.usage()).rejects.toThrow(/usage.get is not available/);
+  });
+
+  it("idToken()/apiToken() delegate to the runtime context mints", async () => {
+    const { host } = makeHost();
+    await expect(host.idToken("sts.amazonaws.com")).resolves.toBe("id-token-test");
+    await expect(host.apiToken()).resolves.toBe("api-token-test");
+  });
+
+  it("the auth mints honor the abort guard too", async () => {
+    const { host } = makeHost({ signal: abortedSignal() });
+    await expect(host.idToken("aud")).rejects.toBeInstanceOf(RunAbortedError);
+    await expect(host.apiToken()).rejects.toBeInstanceOf(RunAbortedError);
   });
 });

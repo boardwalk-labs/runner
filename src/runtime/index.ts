@@ -59,6 +59,8 @@ import { reseedUserspaceCsprng } from "./uniqueness_reseed.js";
 import { resetHttpConnectionPool } from "./http_pool_reset.js";
 import type { ByoInferenceProvider } from "../contract.js";
 import { WorkerWorkflowHost, type RuntimeContext } from "./workflow_host.js";
+import { buildHostCapabilities } from "./host_capabilities.js";
+import { runShell } from "./shell_exec.js";
 import { BrowserSessionManager, type BrowserBackend } from "./browser_session.js";
 import {
   loadGuestBrowserConfig,
@@ -271,10 +273,6 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // the bill — the platform meters the actual per-leaf usage.
       rate: BUDGET_GUARDRAIL_RATE,
       startedAt: Date.now(),
-      // deadline_seconds is WALL-CLOCK from the run's ORIGINAL start (incl. suspended idle), so a run
-      // resumed past its deadline trips on its first cap check. Falls back to now on the first session
-      // (startedAt is being set this session anyway).
-      deadlineStartedAt: run.startedAt ?? Date.now(),
     });
     // Per-session id for per-turn metering identifiers (`<runId>:<sessionId>:<leafIndex>:<turnSeq>`) —
     // a fresh value per worker session keeps a resumed run's events from colliding with a prior
@@ -533,9 +531,18 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // (absent ⇒ the host throws "not available on this runner image").
       ...(browserSessions !== undefined ? { browserSessions } : {}),
       phases: phaseTracker,
+      // The protocol's `shell` capability: host-side execution in the run's workspace (the old
+      // in-process execSync moved behind the wire with the redesign).
+      shell: (cmd, opts) =>
+        runShell(cmd, opts, { workspaceRoot: runtime.workspaceRoot, signal }),
+      // Live budget state for `usage.get` — read off the run-level meter (run-cumulative).
+      usage: () => budget.usageSnapshot(),
     });
     // Close the budget gate's cycle: the leaf (built above) parks THROUGH the host (built just now).
     budgetHost = host;
+    // The protocol server's dispatch seam — a thin adapter over the host (workflows.call gains
+    // its output_schema slot, null until the broker delivers the callee's schema).
+    const capabilities = buildHostCapabilities(host);
     // Late-bind the coordinator's per-run hooks now that the run-scoped objects exist.
     if (freeze !== undefined) {
       const coordinator = freeze;
@@ -591,7 +598,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     // Hand the redactor back too: the worker scrubs a terminal error's message with it;
     // workspace (when opted in) hydrates at start + persists at terminal.
     return Promise.resolve({
-      host,
+      capabilities,
       redactor,
       phases: phaseTracker,
       // The orchestrator closes the per-run LSP on every terminal path (close() is idempotent + never

@@ -115,18 +115,18 @@ describe("BudgetMeter.assertWithinCaps", () => {
     }
   });
 
-  it("throws when duration cap is exceeded (seconds-resolution)", () => {
+  it("throws when the compute cap is exceeded (seconds-resolution)", () => {
     let t = NOW;
     const m = new BudgetMeter({
       rate: RATE,
-      budget: { max_duration_seconds: 5 },
+      budget: { max_compute_seconds: 5 },
       startedAt: NOW,
       now: () => t,
     });
     t = NOW + 6_000;
     expect(() => {
       m.assertWithinCaps();
-    }).toThrow(AppError);
+    }).toThrow(/Compute cap exceeded/);
   });
 
   it("does NOT throw at the boundary (eq, not gt)", () => {
@@ -135,47 +135,6 @@ describe("BudgetMeter.assertWithinCaps", () => {
     expect(() => {
       m.assertWithinCaps();
     }).not.toThrow();
-  });
-
-  it("deadline_seconds throws on WALL-CLOCK from the run's original start (incl. suspended idle)", () => {
-    const t = NOW;
-    const m = new BudgetMeter({
-      rate: RATE,
-      budget: { deadline_seconds: 30 },
-      startedAt: NOW, // this session just started
-      deadlineStartedAt: NOW - 60_000, // but the RUN started 60s ago (it was suspended in between)
-      now: () => t,
-    });
-    expect(m.capBreachReason()).toBe("deadline"); // 60s wall-clock > 30s deadline
-    expect(() => {
-      m.assertWithinCaps();
-    }).toThrow(/Deadline exceeded/);
-  });
-
-  it("deadline_seconds is NOT burned by suspended idle on the active (max_duration) cap", () => {
-    // The same run: 60s wall-clock (mostly suspended), but only 5s of active compute this session.
-    // max_duration_seconds (active) is fine; deadline_seconds (wall) trips. Orthogonal caps.
-    const t = NOW + 5_000;
-    const m = new BudgetMeter({
-      rate: RATE,
-      budget: { max_duration_seconds: 30, deadline_seconds: 30 },
-      startedAt: NOW, // session active = 5s
-      deadlineStartedAt: NOW - 55_000, // wall-clock = 60s
-      now: () => t,
-    });
-    const reason = m.capBreachReason();
-    expect(reason).toBe("deadline"); // not "duration" — active (5s) is within 30s
-  });
-
-  it("deadline_seconds with no deadlineStartedAt is unenforced (first session, not yet started)", () => {
-    const t = NOW + 999_000;
-    const m = new BudgetMeter({
-      rate: RATE,
-      budget: { deadline_seconds: 1 },
-      startedAt: NOW,
-      now: () => t,
-    });
-    expect(m.capBreachReason()).toBeNull(); // no basis ⇒ not enforced
   });
 });
 
@@ -239,11 +198,11 @@ describe("BudgetMeter — cumulative usage across resume sessions", () => {
     }).toThrow(AppError);
   });
 
-  it("trips the duration cap on cumulative ACTIVE time (prior activeMs + this session)", () => {
+  it("trips the compute cap on cumulative ACTIVE time (prior activeMs + this session)", () => {
     let t = NOW;
     const m = new BudgetMeter({
       rate: RATE,
-      budget: { max_duration_seconds: 10 },
+      budget: { max_compute_seconds: 10 },
       startedAt: NOW,
       now: () => t,
       priorUsage: { ...priorUsage, activeMs: 8_000 }, // 8s of prior active time
@@ -255,7 +214,7 @@ describe("BudgetMeter — cumulative usage across resume sessions", () => {
     try {
       m.assertWithinCaps();
     } catch (err) {
-      expect((err as AppError).detail).toMatchObject({ kind: "duration" });
+      expect((err as AppError).detail).toMatchObject({ kind: "compute" });
     }
   });
 });
@@ -273,18 +232,45 @@ describe("BudgetMeter.capBreachReason", () => {
   });
 });
 
-describe("BudgetMeter.durationCapSeconds", () => {
-  it("returns the declared duration cap", () => {
-    const m = meter({ budget: { max_duration_seconds: 900 } });
-    expect(m.durationCapSeconds()).toBe(900);
+describe("BudgetMeter.usageSnapshot (the usage.get shape)", () => {
+  it("reports every dimension with cap/remaining null when uncapped", () => {
+    const m = meter();
+    m.addUsage({ inputTokens: 100, outputTokens: 50 });
+    const snap = m.usageSnapshot();
+    expect(snap.tokens).toEqual({ spent: 150, cap: null, remaining: null });
+    expect(snap.usd.cap).toBeNull();
+    expect(snap.compute_seconds.cap).toBeNull();
   });
 
-  it("returns null when no budget is set", () => {
-    expect(meter().durationCapSeconds()).toBeNull();
+  it("reports spent/cap/remaining per capped dimension, run-cumulatively", () => {
+    let t = NOW;
+    const m = new BudgetMeter({
+      rate: RATE,
+      budget: { max_tokens: 1_000, max_usd: 1, max_compute_seconds: 60 },
+      startedAt: NOW,
+      now: () => t,
+      priorUsage: {
+        inputTokens: 200,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalUsd: 0.25,
+        activeMs: 10_000,
+      },
+    });
+    m.addUsage({ inputTokens: 100 }, 0.05);
+    t = NOW + 5_000;
+    const snap = m.usageSnapshot();
+    expect(snap.tokens).toEqual({ spent: 300, cap: 1_000, remaining: 700 });
+    expect(snap.usd.spent).toBeCloseTo(0.3, 8);
+    expect(snap.usd.cap).toBe(1);
+    expect(snap.usd.remaining).toBeCloseTo(0.7, 8);
+    expect(snap.compute_seconds).toEqual({ spent: 15, cap: 60, remaining: 45 });
   });
 
-  it("returns null when a budget is set without a duration cap", () => {
+  it("clamps remaining at 0 once a dimension is over its cap", () => {
     const m = meter({ budget: { max_tokens: 100 } });
-    expect(m.durationCapSeconds()).toBeNull();
+    m.addUsage({ inputTokens: 150 });
+    expect(m.usageSnapshot().tokens).toEqual({ spent: 150, cap: 100, remaining: 0 });
   });
 });

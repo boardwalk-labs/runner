@@ -54,8 +54,9 @@
   },
   "dependencies": {
     "@boardwalk-labs/engine": "0.2.12",
-    "@boardwalk-labs/workflow": "0.2.6",
+    "@boardwalk-labs/workflow": "0.3.0-alpha.3",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "ajv": "^8.20.0",
     "node-gyp-build": "^4.8.4",
     "tar": "^7.5.16",
     "undici": "^6.27.0",

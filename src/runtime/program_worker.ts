@@ -24,7 +24,8 @@
 import { createLogger } from "./support/index.js";
 import type { Run } from "./wire/run.js";
 import { workflowManifestSchema, type WorkflowManifest } from "./wire/manifest.js";
-import type { WorkflowHost } from "@boardwalk-labs/workflow/runtime";
+import type { HostCapabilities } from "./host_server.js";
+import { buildContextData } from "./run_context.js";
 import type { SecretRedactor } from "./agent/secret_redactor.js";
 // Import from the pure file (NOT the domain/workflow barrel, which pulls in `typescript`) so the
 // worker bundle stays free of the TS compiler — the worker never transpiles.
@@ -105,19 +106,18 @@ export interface RunOutputHandle {
   output(value: unknown): void;
 }
 
-/** Builds the per-run host (leaf + sleep + children + secrets) for a claimed run. Receives the run's
- *  cooperative-cancellation `signal` so every host hook honors it (credit exhaustion / cancel).
- *  Returns the run's `SecretRedactor` alongside the host so the orchestrator can scrub a terminal
- *  error with the SAME instance every resolved secret was recorded into; `readUsage` — a
- *  sampler over the run-level BudgetMeter the token flusher meters from; and an optional `workspace`
- *  handle (when the workflow opted into persistence) the orchestrator hydrates at start + persists at
- *  terminal (the host's `sleep` also persists, wired inside buildHost). */
+/** Builds the per-run capability seam (leaf + sleep + children + secrets + shell + usage + auth)
+ *  for a claimed run — what the host-protocol server dispatches onto. Receives the run's
+ *  cooperative-cancellation `signal` so every hook honors it (credit exhaustion / cancel).
+ *  Returns the run's `SecretRedactor` alongside so the orchestrator can scrub a terminal
+ *  error with the SAME instance every resolved secret was recorded into, and an optional
+ *  `workspace` handle the orchestrator hydrates at start + persists at terminal. */
 export type ProgramHostBuilder = (
   run: Run,
   manifest: WorkflowManifest,
   signal: AbortSignal,
 ) => Promise<{
-  host: WorkflowHost;
+  capabilities: HostCapabilities;
   redactor: SecretRedactor;
   workspace?: WorkspaceHandle;
   phases?: PhaseLifecycleHandle;
@@ -264,26 +264,6 @@ export async function runProgramWorker(
     return { kind: "failed", reason: "program_integrity" };
   }
 
-  // deadline_seconds: a WALL-CLOCK cap from the run's ORIGINAL start (incl. suspended idle). Enforced
-  // HERE, before running — so a run RESUMED past its deadline (e.g. it slept/awaited longer than the
-  // cap) fails even when its program has NO agent() turn (the BudgetMeter's per-turn check would never
-  // fire for those). Orthogonal to max_duration_seconds (active compute, the BudgetMeter's job).
-  const deadlineSeconds = loaded.manifest.budget?.deadline_seconds;
-  if (
-    deadlineSeconds !== undefined &&
-    claimed.startedAt !== null &&
-    Date.now() - claimed.startedAt > deadlineSeconds * 1000
-  ) {
-    await deps.finalizer.finalize(runId, "failed", {
-      error: {
-        code: "BUDGET_EXCEEDED",
-        message: `Run exceeded budget.deadline_seconds (${deadlineSeconds.toString()}s wall-clock) and was terminated.`,
-      },
-    });
-    log.info("worker_deadline_exceeded", { runId, deadlineSeconds });
-    return { kind: "failed", reason: "deadline_exceeded" };
-  }
-
   // Cooperative-cancellation signal for the run. The credit watcher (and, later, user-initiated
   // cancel) aborts it; the WorkflowHost honors it at every hook so the program unwinds.
   const controller = new AbortController();
@@ -301,7 +281,7 @@ export async function runProgramWorker(
     log.error("worker_host_build_failed", { runId, error: message });
     return { kind: "failed", reason: "host_build_failed" };
   }
-  const { host, redactor, workspace, phases, activity, setProgramDir, lsp } = built;
+  const { capabilities, redactor, workspace, phases, activity, setProgramDir, lsp } = built;
   const browserSessions = built.browserSessions;
   const capture = built.capture;
   // Guarantee the /workspace sandbox dir exists for EVERY run (persist or not) so a program can write
@@ -375,16 +355,21 @@ export async function runProgramWorker(
         tarball,
         entry: loaded.program.entry,
         input: claimed.input ?? claimed.triggerPayload,
-        config: claimed.config ?? {},
+        // The stored derived I/O schemas ride the manifest (P4): the input schema crosses on
+        // `bootstrap` (the SDK's revival pass), the output schema gates `report_return`.
+        inputSchema: loaded.manifest.input_schema ?? null,
+        outputSchema: loaded.manifest.output_schema ?? null,
+        context: buildContextData(claimed, deps.workspaceRoot),
       },
       // redactText scrubs a thrown error's message before it is logged + finalized into run output.
-      // onOutput emits the `output` activity entry into the run's log when the program declared one.
+      // onOutput emits the `output` activity entry into the run's log when the program returned one.
       {
-        host,
+        capabilities,
         workspaceRoot: deps.workspaceRoot,
         programRoot: deps.programRoot,
         redactText: (text) => redactor.redactText(text),
         extract: deps.extractArchive,
+        signal: controller.signal,
         ...(setProgramDir !== undefined ? { onExtracted: setProgramDir } : {}),
         ...(activity !== undefined
           ? {

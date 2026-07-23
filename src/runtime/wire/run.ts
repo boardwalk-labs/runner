@@ -14,9 +14,9 @@ export type RunActor =
       type: "event";
       subscription_id: string;
       source_run_id: string;
-      event: string;
+      source_workflow_id: string;
+      event_type: string;
       event_chain_depth: number;
-      user_id?: string;
     };
 
 export interface Run {
