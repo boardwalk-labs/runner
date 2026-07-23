@@ -237,14 +237,27 @@ export async function runProgramWorker(
   log.info("worker_claimed", { runId, workerId: deps.workerId });
   const claimed = claim.run;
 
+  /** Pre-flight/setup failure: no program ran (and none will) — finalize failed and exit. */
+  const failEarly = async (
+    reason: string,
+    error: { code: string; message: string },
+    logEvent: string,
+    logFields: Record<string, unknown>,
+  ): Promise<ProgramWorkerOutcome> => {
+    await deps.finalizer.finalize(runId, "failed", { error });
+    log.error(logEvent, { runId, ...logFields });
+    return { kind: "failed", reason };
+  };
+
   const loaded = await loadVersion(deps, claimed);
   if (loaded === null) {
     // Pre-flight integrity failure — no program ran, so no charge.
-    await deps.finalizer.finalize(runId, "failed", {
-      error: { code: "INTERNAL_ERROR", message: "Run version missing, or manifest invalid" },
-    });
-    log.error("worker_version_invalid", { runId, workflowVersionId: claimed.workflowVersionId });
-    return { kind: "failed", reason: "version_invalid" };
+    return failEarly(
+      "version_invalid",
+      { code: "INTERNAL_ERROR", message: "Run version missing, or manifest invalid" },
+      "worker_version_invalid",
+      { workflowVersionId: claimed.workflowVersionId },
+    );
   }
 
   // Fetch + verify the program ARTIFACT before any work (pre-flight; an integrity failure = no charge,
@@ -254,21 +267,20 @@ export async function runProgramWorker(
   try {
     tarball = await deps.fetchProgram(loaded.program.downloadUrl);
   } catch (err) {
-    await deps.finalizer.finalize(runId, "failed", {
-      error: { code: "PROGRAM_FETCH_FAILED", message: "Could not download the program artifact" },
-    });
-    log.error("worker_program_fetch_failed", {
-      runId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return { kind: "failed", reason: "program_fetch_failed" };
+    return failEarly(
+      "program_fetch_failed",
+      { code: "PROGRAM_FETCH_FAILED", message: "Could not download the program artifact" },
+      "worker_program_fetch_failed",
+      { error: err instanceof Error ? err.message : String(err) },
+    );
   }
   if (!verifyArtifactDigest(tarball, loaded.program.digest)) {
-    await deps.finalizer.finalize(runId, "failed", {
-      error: { code: "PROGRAM_INTEGRITY", message: "Program artifact digest mismatch" },
-    });
-    log.error("worker_program_integrity", { runId, workflowVersionId: claimed.workflowVersionId });
-    return { kind: "failed", reason: "program_integrity" };
+    return failEarly(
+      "program_integrity",
+      { code: "PROGRAM_INTEGRITY", message: "Program artifact digest mismatch" },
+      "worker_program_integrity",
+      { workflowVersionId: claimed.workflowVersionId },
+    );
   }
 
   // Cooperative-cancellation signal for the run. The credit watcher (and, later, user-initiated
@@ -282,16 +294,25 @@ export async function runProgramWorker(
     built = await deps.buildHost(claimed, loaded.manifest, controller.signal);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await deps.finalizer.finalize(runId, "failed", {
-      error: { code: "HOST_BUILD_FAILED", message },
-    });
-    log.error("worker_host_build_failed", { runId, error: message });
-    return { kind: "failed", reason: "host_build_failed" };
+    return failEarly(
+      "host_build_failed",
+      { code: "HOST_BUILD_FAILED", message },
+      "worker_host_build_failed",
+      { error: message },
+    );
   }
-  const { capabilities, redactor, workspace, phases, activity, setProgramDir, lsp } = built;
-  const browserSessions = built.browserSessions;
-  const capture = built.capture;
-  const budgetWatch = built.budgetWatch;
+  const {
+    capabilities,
+    redactor,
+    workspace,
+    phases,
+    activity,
+    setProgramDir,
+    lsp,
+    browserSessions,
+    capture,
+    budgetWatch,
+  } = built;
   // Guarantee the /workspace sandbox dir exists for EVERY run (persist or not) so a program can write
   // to /workspace without a defensive mkdir. Runs before hydrate (whose extract targets the dir).
   // Best-effort — the image pre-creates the dir; a failure here would resurface at the program's write.

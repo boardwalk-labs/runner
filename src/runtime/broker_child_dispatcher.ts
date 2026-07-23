@@ -140,7 +140,7 @@ export class BrokerChildDispatcher implements ChildDispatcher {
     outputSchema: Record<string, unknown> | null | undefined,
   ): ChildCallOutput {
     if (status === "completed") return { output, outputSchema: outputSchema ?? null };
-    log.warn("child_workflow_nonterminal_output", { slug, childRunId, status });
+    log.warn("child_workflow_did_not_complete", { slug, childRunId, status });
     throw new AppError(
       ErrorCode.INTERNAL_ERROR,
       `Called workflow "${slug}" ${status} (run ${childRunId})`,

@@ -63,8 +63,13 @@ import {
   type ToolDef,
 } from "@boardwalk-labs/workflow/runtime";
 import type { ShellOptions } from "@boardwalk-labs/workflow";
-import { AppError, ErrorCode, createLogger } from "./support/index.js";
+import { AppError, ErrorCode, createLogger, errorCodeOf } from "./support/index.js";
 import { RunAbortedError } from "./run_abort.js";
+
+/** The loader-side curation hint for a `report_return` output-schema mismatch. Shared by the
+ *  in-process TS loader and the Python subprocess path so the author sees ONE message. */
+export const OUTPUT_MISMATCH_HINT =
+  "Return a value matching run()'s declared return type, or update the type and redeploy.";
 
 const log = createLogger("HostServer");
 
@@ -145,6 +150,12 @@ export interface WorkflowHostServerDeps {
 interface PendingInvoke {
   resolve: (value: { output: JsonValue }) => void;
   reject: (reason: Error) => void;
+}
+
+/** The connection + JSON-RPC id a request arrived on (what `agent`'s tool_invoke lane needs). */
+interface RequestOrigin {
+  conn: HostConnection;
+  id: RpcId;
 }
 
 /** One connected protocol client (the program process; several may connect). */
@@ -415,9 +426,9 @@ export class WorkflowHostServer {
       return;
     }
     try {
-      // The schema that ran IS clientToHostRequests[method].params, so the per-case narrowing
-      // inside dispatch is exact.
-      const result = await this.dispatch(conn, id, method, parsed.data);
+      // The schema that ran IS clientToHostRequests[method].params, so the params reaching the
+      // handler map are exact.
+      const result = await this.dispatch(method, parsed.data, { conn, id });
       conn.send({ jsonrpc: "2.0", id, result });
     } catch (err) {
       // Remember a report_return failure for {@link reportReturnFailure} — a subprocess loader
@@ -431,143 +442,121 @@ export class WorkflowHostServer {
 
   // -- method dispatch -------------------------------------------------------
 
-  private async dispatch<M extends HostMethod>(
-    conn: HostConnection,
-    id: RpcId,
+  private dispatch<M extends HostMethod>(
     method: M,
     params: HostMethodParams<M>,
-  ): Promise<HostMethodResult<HostMethod>> {
-    const caps = this.deps.capabilities;
-    switch (method) {
-      case "bootstrap": {
-        const b = this.deps.bootstrap;
-        return { input: b.input, input_schema: b.inputSchema, context: b.context };
-      }
-      case "report_return": {
-        const { value } = params as HostMethodParams<"report_return">;
-        this.assertReturnMatchesSchema(value);
-        this.returned = { value };
-        return {};
-      }
-      case "agent": {
-        const p = params as HostMethodParams<"agent">;
-        const opts = this.toAgentOptions(conn, id, p.opts);
-        const output = await caps.agent(p.prompt, opts);
-        return { output: asJsonValue(output) };
-      }
-      case "workflows.call": {
-        const p = params as HostMethodParams<"workflows.call">;
-        const result = await caps.callWorkflow(
-          p.slug,
-          p.input,
-          pruneUndefined<CallOptions>(p.opts),
-        );
-        return { output: asJsonValue(result.output), output_schema: result.outputSchema };
-      }
-      case "workflows.run": {
-        const p = params as HostMethodParams<"workflows.run">;
-        return {
-          runId: await caps.runWorkflow(p.slug, p.input, pruneUndefined<CallOptions>(p.opts)),
-        };
-      }
-      case "workflows.schedule": {
-        const p = params as HostMethodParams<"workflows.schedule">;
-        return {
-          scheduleId: await caps.scheduleWorkflow(
-            p.slug,
-            p.input,
-            pruneUndefined<ScheduleOptions>(p.opts),
-          ),
-        };
-      }
-      case "sleep": {
-        const p = params as HostMethodParams<"sleep">;
-        await caps.sleep(p.arg);
-        return {};
-      }
-      case "humanInput": {
-        const p = params as HostMethodParams<"humanInput">;
-        // The wire schema mirrors HumanInputOptions field-for-field; pruning the zod
-        // explicit-undefined optionals makes the shapes exact.
-        return { result: await caps.humanInput(pruneUndefined<HumanInputOptions>(p.opts)) };
-      }
-      case "secrets.get": {
-        const p = params as HostMethodParams<"secrets.get">;
-        return { value: await caps.getSecret(p.name) };
-      }
-      case "artifacts.write": {
-        const p = params as HostMethodParams<"artifacts.write">;
-        const body: ArtifactBody =
-          p.body.encoding === "utf8"
-            ? p.body.data
-            : new Uint8Array(Buffer.from(p.body.data, "base64"));
-        const ref = await caps.writeArtifact(p.name, p.contentType, body, p.metadata);
-        return { ref: { id: ref.id, name: ref.name, url: ref.url } };
-      }
-      case "computer.openBrowser": {
-        const p = params as HostMethodParams<"computer.openBrowser">;
-        const session = await caps.openBrowser(pruneUndefined<BrowserSessionOptions>(p.opts));
-        this.browserSessions.set(session.id, session);
-        return { sessionId: session.id };
-      }
-      case "computer.browser.navigate": {
-        const p = params as HostMethodParams<"computer.browser.navigate">;
-        await this.session(p.sessionId).navigate(p.url);
-        return {};
-      }
-      case "computer.browser.url": {
-        const p = params as HostMethodParams<"computer.browser.url">;
-        return { url: await this.session(p.sessionId).url() };
-      }
-      case "computer.browser.title": {
-        const p = params as HostMethodParams<"computer.browser.title">;
-        return { title: await this.session(p.sessionId).title() };
-      }
-      case "computer.browser.screenshot": {
-        const p = params as HostMethodParams<"computer.browser.screenshot">;
-        const ref = await this.session(p.sessionId).screenshot(
-          p.fullPage !== undefined ? { fullPage: p.fullPage } : undefined,
-        );
-        return { ref: { id: ref.id, name: ref.name, url: ref.url } };
-      }
-      case "computer.browser.console": {
-        const p = params as HostMethodParams<"computer.browser.console">;
-        const entries = await this.session(p.sessionId).console();
-        return { entries: filterSince(entries, p.since) };
-      }
-      case "computer.browser.network": {
-        const p = params as HostMethodParams<"computer.browser.network">;
-        const entries = await this.session(p.sessionId).network();
-        return { entries: filterSince(entries, p.since) };
-      }
-      case "computer.browser.eval": {
-        const p = params as HostMethodParams<"computer.browser.eval">;
-        const value = await this.session(p.sessionId).eval(p.expression);
-        return { value: asJsonValue(value) };
-      }
-      case "computer.browser.close": {
-        const p = params as HostMethodParams<"computer.browser.close">;
-        const session = this.browserSessions.get(p.sessionId);
-        this.browserSessions.delete(p.sessionId);
-        if (session !== undefined) await session.close();
-        return {};
-      }
-      case "shell": {
-        const p = params as HostMethodParams<"shell">;
-        return await caps.shell(p.cmd, pruneUndefined<ShellOptions>(p.opts));
-      }
-      case "auth.idToken": {
-        const p = params as HostMethodParams<"auth.idToken">;
-        return { token: await caps.idToken(p.audience) };
-      }
-      case "auth.apiToken":
-        return { token: await caps.apiToken() };
-      case "usage.get":
-        return await caps.usage();
-      default:
-        return unreachable(method);
-    }
+    req: RequestOrigin,
+  ): Promise<HostMethodResult<M>> {
+    return this.handlers[method](params, req);
   }
+
+  private get caps(): HostCapabilities {
+    return this.deps.capabilities;
+  }
+
+  /**
+   * One handler per client→host method, each typed by ITS OWN `HostMethodParams`/`HostMethodResult`
+   * pair via the mapped type — params arrive already narrowed (no per-case casts) and a handler
+   * returning another method's result shape is a COMPILE error (a switch over the union couldn't
+   * catch that). Exhaustive by construction: a new wire method fails the build until a handler
+   * exists. `req` carries the originating connection + request id for `agent`, whose inline tools
+   * round-trip `tool_invoke` on that same connection, correlated by this request's id.
+   */
+  private readonly handlers: {
+    [M in HostMethod]: (
+      params: HostMethodParams<M>,
+      req: RequestOrigin,
+    ) => Promise<HostMethodResult<M>>;
+  } = {
+    bootstrap: () => {
+      const b = this.deps.bootstrap;
+      return Promise.resolve({ input: b.input, input_schema: b.inputSchema, context: b.context });
+    },
+    report_return: ({ value }) => {
+      // A schema mismatch throws out of the sync body — dispatch's caller sees a rejection either
+      // way, since handleRequest awaits the handler inside its own try.
+      this.assertReturnMatchesSchema(value);
+      this.returned = { value };
+      return Promise.resolve({});
+    },
+    agent: async (p, req) => {
+      const opts = this.toAgentOptions(req.conn, req.id, p.opts);
+      const output = await this.caps.agent(p.prompt, opts);
+      return { output: asJsonValue(output) };
+    },
+    "workflows.call": async (p) => {
+      const result = await this.caps.callWorkflow(
+        p.slug,
+        p.input,
+        pruneUndefined<CallOptions>(p.opts),
+      );
+      return { output: asJsonValue(result.output), output_schema: result.outputSchema };
+    },
+    "workflows.run": async (p) => ({
+      runId: await this.caps.runWorkflow(p.slug, p.input, pruneUndefined<CallOptions>(p.opts)),
+    }),
+    "workflows.schedule": async (p) => ({
+      scheduleId: await this.caps.scheduleWorkflow(
+        p.slug,
+        p.input,
+        pruneUndefined<ScheduleOptions>(p.opts),
+      ),
+    }),
+    sleep: async (p) => {
+      await this.caps.sleep(p.arg);
+      return {};
+    },
+    // The wire schema mirrors HumanInputOptions field-for-field; pruning the zod
+    // explicit-undefined optionals makes the shapes exact.
+    humanInput: async (p) => ({
+      result: await this.caps.humanInput(pruneUndefined<HumanInputOptions>(p.opts)),
+    }),
+    "secrets.get": async (p) => ({ value: await this.caps.getSecret(p.name) }),
+    "artifacts.write": async (p) => {
+      const body: ArtifactBody =
+        p.body.encoding === "utf8"
+          ? p.body.data
+          : new Uint8Array(Buffer.from(p.body.data, "base64"));
+      const ref = await this.caps.writeArtifact(p.name, p.contentType, body, p.metadata);
+      return { ref: { id: ref.id, name: ref.name, url: ref.url } };
+    },
+    "computer.openBrowser": async (p) => {
+      const session = await this.caps.openBrowser(pruneUndefined<BrowserSessionOptions>(p.opts));
+      this.browserSessions.set(session.id, session);
+      return { sessionId: session.id };
+    },
+    "computer.browser.navigate": async (p) => {
+      await this.session(p.sessionId).navigate(p.url);
+      return {};
+    },
+    "computer.browser.url": async (p) => ({ url: await this.session(p.sessionId).url() }),
+    "computer.browser.title": async (p) => ({ title: await this.session(p.sessionId).title() }),
+    "computer.browser.screenshot": async (p) => {
+      const ref = await this.session(p.sessionId).screenshot(
+        p.fullPage !== undefined ? { fullPage: p.fullPage } : undefined,
+      );
+      return { ref: { id: ref.id, name: ref.name, url: ref.url } };
+    },
+    "computer.browser.console": async (p) => ({
+      entries: filterSince(await this.session(p.sessionId).console(), p.since),
+    }),
+    "computer.browser.network": async (p) => ({
+      entries: filterSince(await this.session(p.sessionId).network(), p.since),
+    }),
+    "computer.browser.eval": async (p) => ({
+      value: asJsonValue(await this.session(p.sessionId).eval(p.expression)),
+    }),
+    "computer.browser.close": async (p) => {
+      const session = this.browserSessions.get(p.sessionId);
+      this.browserSessions.delete(p.sessionId);
+      if (session !== undefined) await session.close();
+      return {};
+    },
+    shell: async (p) => await this.caps.shell(p.cmd, pruneUndefined<ShellOptions>(p.opts)),
+    "auth.idToken": async (p) => ({ token: await this.caps.idToken(p.audience) }),
+    "auth.apiToken": async () => ({ token: await this.caps.apiToken() }),
+    "usage.get": async () => await this.caps.usage(),
+  };
 
   /** A live browser session by id, or a clear VALIDATION error for a closed/foreign one. */
   private session(sessionId: string): BrowserSession {
@@ -703,8 +692,6 @@ function asJsonValue(value: unknown): JsonValue {
   return (value ?? null) as JsonValue;
 }
 
-const ERROR_CODE_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
-
 /** Map a thrown value to the wire's `{code, message, data?}` (string code, engine taxonomy).
  *  An engine-style `hint` (the one-line "what to do") rides `data.hint` so it SURVIVES the wire —
  *  the loader's failure curation reads it back into the run's `output.error.hint` (the
@@ -716,16 +703,13 @@ export function protocolErrorOf(err: unknown): { code: string; message: string; 
     return { code: "CANCELLED", message: err.message, data: { reason: err.reason } };
   }
   const message = err instanceof Error ? err.message : String(err);
-  const rawCode: unknown =
-    typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined;
   const code =
-    typeof rawCode === "string" && ERROR_CODE_RE.test(rawCode)
-      ? rawCode
-      : err instanceof Error && err.name !== ""
-        ? err.name
-        : // "INTERNAL" (the engine taxonomy's member) — the local engine's server uses the same
-          // fallback, so a program's `catch` sees one code regardless of engine.
-          "INTERNAL";
+    errorCodeOf(err) ??
+    (err instanceof Error && err.name !== ""
+      ? err.name
+      : // "INTERNAL" (the engine taxonomy's member) — the local engine's server uses the same
+        // fallback, so a program's `catch` sees one code regardless of engine.
+        "INTERNAL");
   const rawHint: unknown =
     typeof err === "object" && err !== null ? (err as { hint?: unknown }).hint : undefined;
   const dataParts: Record<string, unknown> = {};
@@ -748,8 +732,4 @@ function compileOutputValidator(schema: Record<string, unknown> | null): Validat
     });
     return null;
   }
-}
-
-function unreachable(value: never): never {
-  throw new Error(`unhandled host method: ${String(value)}`);
 }

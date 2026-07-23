@@ -40,7 +40,7 @@
 import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { HOST_SOCK_ENV } from "@boardwalk-labs/workflow/runtime";
-import type { WorkflowHostServer } from "./host_server.js";
+import { OUTPUT_MISMATCH_HINT, type WorkflowHostServer } from "./host_server.js";
 import type { ProgramResult, ProgramRunnerDeps } from "./program_runner.js";
 import { AppError, ErrorCode } from "./support/index.js";
 import { throwIfAborted } from "./run_abort.js";
@@ -269,9 +269,7 @@ export async function invokePythonProgram(
     if (recorded !== null) {
       const carried = recorded as { code?: unknown; hint?: unknown };
       if (carried.code === ErrorCode.VALIDATION_FAILED.valueOf() && carried.hint === undefined) {
-        Object.assign(recorded, {
-          hint: "Return a value matching run()'s declared return type, or update the type and redeploy.",
-        });
+        Object.assign(recorded, { hint: OUTPUT_MISMATCH_HINT });
       }
       throw recorded;
     }

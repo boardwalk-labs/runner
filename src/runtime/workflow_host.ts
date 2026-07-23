@@ -531,11 +531,11 @@ export class WorkerWorkflowHost {
     return this.guarded(() => this.humanInputSeam(opts));
   }
 
-  private async humanInputSeam(opts: HumanInputOptions): Promise<HumanInputResult> {
+  private humanInputSeam(opts: HumanInputOptions): Promise<HumanInputResult> {
     const seq = this.seq.next();
     const key = opts.key ?? `seam-${String(seq)}`;
     const expiresAt = this.timeoutExpiry(opts.timeout);
-    const signal: SuspendSignal = {
+    return this.awaitGate({
       reason: "human_input",
       seq,
       humanInput: {
@@ -546,13 +546,20 @@ export class WorkerWorkflowHost {
         // A timeout only matters with a wake to fire at; carry onTimeout alongside expiresAt.
         ...(expiresAt !== null ? { expiresAt, onTimeout: opts.onTimeout ?? "fail" } : {}),
       },
-    };
+    });
+  }
+
+  /** Wait a registered gate out on whichever substrate the run has: freeze in place on the
+   *  snapshot fleet, or (self-hosted runner / local dev) hold the live process and poll until a
+   *  person answers. The one place the freeze-vs-hold decision for a gate is made. */
+  private async awaitGate(
+    signal: SuspendSignal & { humanInput: NonNullable<SuspendSignal["humanInput"]> },
+  ): Promise<HumanInputResult> {
     const freeze = this.deps.freeze;
     if (freeze !== undefined) {
-      return await this.freezeHumanInput(freeze, signal, key);
+      return await this.freezeHumanInput(freeze, signal, signal.humanInput.key);
     }
-    // Hold path: register the gate and poll until a person answers.
-    return normalizeHumanInputResult(await this.holdForAnswer(seq, signal.humanInput));
+    return normalizeHumanInputResult(await this.holdForAnswer(signal.seq, signal.humanInput));
   }
 
   /**
@@ -576,20 +583,12 @@ export class WorkerWorkflowHost {
    * the inbox, and is answered by the same machinery as any other gate. No timeout: an unanswered
    * budget gate is aged out by the control plane's inactive-cancel reaper, not by a wake we schedule.
    */
-  async budgetClearance(gate: { prompt: string; inputSpec: unknown }): Promise<HumanInputResult> {
-    const seq = this.seq.next();
-    const key = BUDGET_GATE_KEY;
-    const signal: SuspendSignal = {
+  budgetClearance(gate: { prompt: string; inputSpec: unknown }): Promise<HumanInputResult> {
+    return this.awaitGate({
       reason: "budget",
-      seq,
-      humanInput: { key, prompt: gate.prompt, inputSpec: gate.inputSpec },
-    };
-    const freeze = this.deps.freeze;
-    if (freeze !== undefined) {
-      return await this.freezeHumanInput(freeze, signal, key);
-    }
-    // No freeze substrate (self-hosted runner / local dev): hold the live process until answered.
-    return normalizeHumanInputResult(await this.holdForAnswer(seq, signal.humanInput));
+      seq: this.seq.next(),
+      humanInput: { key: BUDGET_GATE_KEY, prompt: gate.prompt, inputSpec: gate.inputSpec },
+    });
   }
 
   /** Absolute wake time for a `humanInput({ timeout })`, or null when there is none / it's unparseable. */
@@ -679,26 +678,17 @@ export class WorkerWorkflowHost {
 
   /** Fire-and-forget trigger of another workflow; resolves to the new run's id (no hold/poll). */
   runWorkflow(slug: string, input: unknown, opts: CallOptions | undefined): Promise<string> {
-    return this.guarded(async () => {
-      const id = await this.deps.children.run(slug, input, opts);
-      return id;
-    });
+    return this.guarded(() => this.deps.children.run(slug, input, opts));
   }
 
   /** Provision a durable schedule (one-shot/recurring) that fires the target later; resolves to the
    *  new schedule's id WITHOUT running it now. Satisfies the SDK's optional `scheduleWorkflow`. */
   scheduleWorkflow(slug: string, input: unknown, opts: ScheduleOptions): Promise<string> {
-    return this.guarded(async () => {
-      const id = await this.deps.children.schedule(slug, input, opts);
-      return id;
-    });
+    return this.guarded(() => this.deps.children.schedule(slug, input, opts));
   }
 
   getSecret(name: string): Promise<string> {
-    return this.guarded(async () => {
-      const value = await this.deps.secrets.get(name);
-      return value;
-    });
+    return this.guarded(() => this.deps.secrets.get(name));
   }
 
   writeArtifact(
@@ -714,8 +704,7 @@ export class WorkerWorkflowHost {
           "artifacts.write is not available in this runtime",
         );
       }
-      const ref = await this.deps.writeArtifact(name, contentType, body, metadata);
-      return ref;
+      return await this.deps.writeArtifact(name, contentType, body, metadata);
     });
   }
 
@@ -820,6 +809,8 @@ export class WorkerWorkflowHost {
           "usage.get is not available in this runtime",
         );
       }
+      // Promise.resolve keeps the arrow's async-without-await acceptable to require-await; the
+      // arrow stays async so the guard above REJECTS (guarded's contract) rather than throwing.
       return Promise.resolve(this.deps.usage());
     });
   }

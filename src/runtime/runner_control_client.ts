@@ -151,6 +151,44 @@ export class RunnerControlClient {
     return this.retryingFetch(url, init, this.bulkTimeoutMs);
   }
 
+  // The three shapes every UNIFORM control endpoint reduces to. Endpoints where a specific
+  // status is a meaningful answer (claim/renew 409, version/child 404, mcp/token 403, the
+  // no-body hydrate-url POST, and the streaming inference call) keep their own fetch logic.
+  // `op` is the error/log label passed to {@link brokerError} (it sometimes differs from the path).
+
+  /** GET a run-scoped control path; any status but 200 throws. The `as T` is the client's one
+   *  trust-boundary cast: the broker is the platform's own API and each caller names the
+   *  handler's documented reply shape. */
+  private async getJson<T>(op: string, suffix: string): Promise<T> {
+    const res = await this.controlFetch(this.url(suffix), {
+      method: "GET",
+      headers: this.headers(false),
+    });
+    if (res.status !== 200) throw await brokerError(res, op);
+    return (await res.json()) as T;
+  }
+
+  /** POST a JSON body to a run-scoped control path; any status but `expect` throws. */
+  private async postJson<T>(op: string, suffix: string, body: unknown, expect = 200): Promise<T> {
+    const res = await this.controlFetch(this.url(suffix), {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify(body),
+    });
+    if (res.status !== expect) throw await brokerError(res, op);
+    return (await res.json()) as T;
+  }
+
+  /** POST a JSON body to a run-scoped control path expecting an empty 204 reply. */
+  private async postVoid(op: string, suffix: string, body: unknown): Promise<void> {
+    const res = await this.controlFetch(this.url(suffix), {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify(body),
+    });
+    if (res.status !== 204) throw await brokerError(res, op);
+  }
+
   /**
    * One attempt per entry in the backoff schedule (+1): retry thrown network failures (connection
    * reset/refused mid-rollover, our own per-attempt timeout on a dead socket) and the
@@ -248,12 +286,7 @@ export class RunnerControlClient {
    *  whose lease expired and whose run was reclaimed + re-dispatched to a new owner), so a
    *  hung/partitioned worker that later recovers can't clobber the live run or revive a terminal one. */
   async finalize(status: "completed" | "failed", output: unknown, workerId: string): Promise<void> {
-    const res = await this.controlFetch(this.url("finalize"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify({ status, output, workerId }),
-    });
-    if (res.status !== 204) throw await brokerError(res, "finalize");
+    await this.postVoid("finalize", "finalize", { status, output, workerId });
   }
 
   /** Fetch the run's pinned manifest + program source, or null when the version is missing (404). */
@@ -270,12 +303,7 @@ export class RunnerControlClient {
   /** Book a runtime-seconds DELTA (the worker's RuntimeFlusher → broker). `identifier` makes a
    *  retried/duplicate flush idempotent; distinct per-flush ids sum into the run's runtime total. */
   async reportUsage(runtimeSeconds: number, identifier: string): Promise<void> {
-    const res = await this.controlFetch(this.url("usage"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify({ runtimeSeconds, identifier }),
-    });
-    if (res.status !== 204) throw await brokerError(res, "usage");
+    await this.postVoid("usage", "usage", { runtimeSeconds, identifier });
   }
 
   /** Report a token-usage delta for incremental in-run metering (the usage flusher → broker). The
@@ -290,58 +318,38 @@ export class RunnerControlClient {
     cachedReadTokens?: number;
     cachedWriteTokens?: number;
   }): Promise<void> {
-    const res = await this.controlFetch(this.url("usage/tokens"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify(input),
-    });
-    if (res.status !== 204) throw await brokerError(res, "usage/tokens");
+    await this.postVoid("usage/tokens", "usage/tokens", input);
   }
 
   /** Check whether the run's org is still funded (the CreditWatcher → broker). The broker reads the
    *  live billing balance server-side; `false` means out of credit (the watcher then aborts the run). */
   async checkCredit(): Promise<boolean> {
-    const res = await this.controlFetch(this.url("credit"), {
-      method: "GET",
-      headers: this.headers(false),
-    });
-    if (res.status !== 200) throw await brokerError(res, "credit");
-    return ((await res.json()) as { funded: boolean }).funded;
+    return (await this.getJson<{ funded: boolean }>("credit", "credit")).funded;
   }
 
   /** Check whether the run has been asked to cancel (the CancelWatcher → broker). `true` once the user
    *  cancelled the run (the broker flipped it to `cancelling`/`cancelled`); the watcher then aborts the
    *  run. Brokered because the runner holds no DB/Redis — this replaces the unreachable Redis channel. */
   async checkCancelled(): Promise<boolean> {
-    const res = await this.controlFetch(this.url("cancel"), {
-      method: "GET",
-      headers: this.headers(false),
-    });
-    if (res.status !== 200) throw await brokerError(res, "cancel");
-    return ((await res.json()) as { cancelRequested: boolean }).cancelRequested;
+    return (await this.getJson<{ cancelRequested: boolean }>("cancel", "cancel")).cancelRequested;
   }
 
   /** Register-without-release: register a HELD HITL gate's request row
    *  so it is answerable while the run keeps running — no suspend. Idempotent. Returns whether a new
    *  gate was registered. */
   async registerInput(seq: number, gate: unknown): Promise<boolean> {
-    const res = await this.controlFetch(this.url("inputs"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify({ seq, humanInput: gate }),
+    const body = await this.postJson<{ registered: boolean }>("register-input", "inputs", {
+      seq,
+      humanInput: gate,
     });
-    if (res.status !== 200) throw await brokerError(res, "register-input");
-    return ((await res.json()) as { registered: boolean }).registered;
+    return body.registered;
   }
 
   /** Poll the resolved answers for a held gate at `seq` (empty until a human responds). */
   async pollInputAnswers(seq: number): Promise<Record<string, unknown>> {
-    const res = await this.controlFetch(this.url(`inputs/${encodeURIComponent(String(seq))}`), {
-      method: "GET",
-      headers: this.headers(false),
-    });
-    if (res.status !== 200) throw await brokerError(res, "poll-inputs");
-    return ((await res.json()) as { answers: Record<string, unknown> }).answers;
+    const suffix = `inputs/${encodeURIComponent(String(seq))}`;
+    return (await this.getJson<{ answers: Record<string, unknown> }>("poll-inputs", suffix))
+      .answers;
   }
 
   /** Mint a presigned GET URL to restore this workflow's last `/workspace` snapshot (workspace
@@ -362,13 +370,11 @@ export class RunnerControlClient {
   async workspacePersistUrl(
     sizeBytes: number,
   ): Promise<{ url: string; contentType: string } | null> {
-    const res = await this.controlFetch(this.url("workspace/persist-url"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify({ sizeBytes }),
-    });
-    if (res.status !== 200) throw await brokerError(res, "workspace/persist-url");
-    const body = (await res.json()) as { url: string | null; contentType?: string };
+    const body = await this.postJson<{ url: string | null; contentType?: string }>(
+      "workspace/persist-url",
+      "workspace/persist-url",
+      { sizeBytes },
+    );
     return body.url === null ? null : { url: body.url, contentType: body.contentType ?? "" };
   }
 
@@ -385,73 +391,47 @@ export class RunnerControlClient {
    *  third-party-verifiable token (gated server-side on `permissions.id_token: "write"`) — used to
    *  federate into the org's OWN cloud (AWS/GCP). DIFFERENT from this client's run token. */
   async requestOidcToken(audience: string): Promise<{ token: string; expiresIn: number }> {
-    const res = await this.controlFetch(this.url("oidc/token"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify({ audience }),
+    return this.postJson<{ token: string; expiresIn: number }>("oidc/token", "oidc/token", {
+      audience,
     });
-    if (res.status !== 200) throw await brokerError(res, "oidc/token");
-    return (await res.json()) as { token: string; expiresIn: number };
   }
 
   /** Publish a batch of live agent-event frames (the SSE live-tail source) — the broker publishes
    *  them to the run's Redis channel server-side, so the runner holds no Redis credential. */
   async publishTelemetry(frames: string[]): Promise<void> {
-    const res = await this.controlFetch(this.url("telemetry"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify({ frames }),
-    });
-    if (res.status !== 204) throw await brokerError(res, "telemetry");
+    await this.postVoid("telemetry", "telemetry", { frames });
   }
 
   /** Push a batch of encoded desktop frames (base64 JPEG) for the live-view surface — the broker
    *  republishes them to the run's live-view channel server-side (never durably stored; the session
    *  recording is the durable copy). See docs/SCREEN_CAPTURE.md §5. */
   async publishLiveView(frames: string[]): Promise<void> {
-    const res = await this.controlFetch(this.url("liveview"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify({ frames }),
-    });
-    if (res.status !== 204) throw await brokerError(res, "liveview");
+    await this.postVoid("liveview", "liveview", { frames });
   }
 
   /** Is a browser currently watching this run's live-view? The capture loop polls this so it only
    *  captures + pushes frames while someone is attached (capture costs guest CPU + metered egress). */
   async liveViewWanted(): Promise<boolean> {
-    const res = await this.controlFetch(this.url("liveview/wanted"), {
-      method: "GET",
-      headers: this.headers(false),
-    });
-    if (res.status !== 200) throw await brokerError(res, "liveview/wanted");
-    const body = (await res.json()) as { wanted?: unknown };
+    const body = await this.getJson<{ wanted?: unknown }>("liveview/wanted", "liveview/wanted");
     return body.wanted === true;
   }
 
   /** Store a run artifact through the broker (which holds the S3 credential + neutralizes the served
    *  content type server-side). Returns the catalog id + a signed download URL. */
   async writeArtifact(input: ArtifactWriteInput): Promise<ArtifactWriteResult> {
-    const res = await this.controlFetch(this.url("artifacts"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify(input),
-    });
-    if (res.status !== 201) throw await brokerError(res, "artifacts");
-    return (await res.json()) as ArtifactWriteResult;
+    return this.postJson<ArtifactWriteResult>("artifacts", "artifacts", input, 201);
   }
 
   /** Phase 1 of the LARGE-artifact path (the Runner Credential Broker model): presign an S3 PUT. The
    *  broker derives the S3 key + neutralizes/pins the served content type; it returns the upload URL +
    *  required headers + the `s3Key` to echo back at commit. No catalog row exists yet. */
   async presignArtifact(input: ArtifactPresignInput): Promise<ArtifactPresignResult> {
-    const res = await this.controlFetch(this.url("artifacts/presign"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify(input),
-    });
-    if (res.status !== 201) throw await brokerError(res, "artifacts/presign");
-    return (await res.json()) as ArtifactPresignResult;
+    return this.postJson<ArtifactPresignResult>(
+      "artifacts/presign",
+      "artifacts/presign",
+      input,
+      201,
+    );
   }
 
   /** Upload bytes to a presigned S3 URL (the large-artifact path). The `headers` come from the
@@ -467,49 +447,27 @@ export class RunnerControlClient {
    *  broker re-validates the run prefix + re-neutralizes the content type, then returns the catalog id
    *  + a signed download URL. */
   async commitArtifact(input: ArtifactCommitInput): Promise<ArtifactWriteResult> {
-    const res = await this.controlFetch(this.url("artifacts/commit"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify(input),
-    });
-    if (res.status !== 201) throw await brokerError(res, "artifacts/commit");
-    return (await res.json()) as ArtifactWriteResult;
+    return this.postJson<ArtifactWriteResult>("artifacts/commit", "artifacts/commit", input, 201);
   }
 
   /** List the artifacts this run has produced. */
   async listArtifacts(): Promise<ArtifactSummary[]> {
-    const res = await this.controlFetch(this.url("artifacts"), {
-      method: "GET",
-      headers: this.headers(false),
-    });
-    if (res.status !== 200) throw await brokerError(res, "artifacts-list");
-    return ((await res.json()) as { artifacts: ArtifactSummary[] }).artifacts;
+    return (await this.getJson<{ artifacts: ArtifactSummary[] }>("artifacts-list", "artifacts"))
+      .artifacts;
   }
 
   /** Mint a fresh signed download URL for one of this run's artifacts. */
   async signArtifactUrl(artifactId: string, ttlSeconds: number): Promise<ArtifactSignResult> {
-    const res = await this.controlFetch(
-      this.url(`artifacts/${encodeURIComponent(artifactId)}/signed-url`),
-      {
-        method: "POST",
-        headers: this.headers(true),
-        body: JSON.stringify({ ttlSeconds }),
-      },
-    );
-    if (res.status !== 200) throw await brokerError(res, "artifacts-sign");
-    return (await res.json()) as ArtifactSignResult;
+    const suffix = `artifacts/${encodeURIComponent(artifactId)}/signed-url`;
+    return this.postJson<ArtifactSignResult>("artifacts-sign", suffix, { ttlSeconds });
   }
 
   /** Resolve an org secret the run's manifest allows (the program's `secrets.get`). The broker
    *  enforces the allowlist + returns the value; a forbidden/missing secret surfaces as a throw. */
   async resolveSecret(name: string): Promise<string> {
-    const res = await this.controlFetch(this.url("secrets/resolve"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify({ name }),
+    const body = await this.postJson<{ value: string }>("secrets/resolve", "secrets/resolve", {
+      name,
     });
-    if (res.status !== 200) throw await brokerError(res, "secrets/resolve");
-    const body = (await res.json()) as { value: string };
     return body.value;
   }
 
@@ -537,13 +495,7 @@ export class RunnerControlClient {
   /** Proxy a web_search through the broker (which holds the Tavily key) — the runner sends the
    *  query, the broker calls Tavily and returns the results. */
   async webSearch(input: unknown): Promise<WebSearchOutput> {
-    const res = await this.controlFetch(this.url("tools/web_search"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify(input),
-    });
-    if (res.status !== 200) throw await brokerError(res, "tools/web_search");
-    return (await res.json()) as WebSearchOutput;
+    return this.postJson<WebSearchOutput>("tools/web_search", "tools/web_search", input);
   }
 
   /** Create (or idempotently re-attach to) a child run for `workflows.call`. */
@@ -560,13 +512,13 @@ export class RunnerControlClient {
 
   /** Provision a durable schedule for `workflows.schedule`; returns the new schedule's id. */
   async scheduleWorkflow(slug: string, input: unknown, spec: BrokerScheduleSpec): Promise<string> {
-    const res = await this.controlFetch(this.url("schedules"), {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify({ slug, input, ...spec }),
-    });
-    if (res.status !== 201) throw await brokerError(res, "schedules");
-    return ((await res.json()) as { scheduleId: string }).scheduleId;
+    const body = await this.postJson<{ scheduleId: string }>(
+      "schedules",
+      "schedules",
+      { slug, input, ...spec },
+      201,
+    );
+    return body.scheduleId;
   }
 
   /** Poll a child run's status/output, or null when it isn't this run's child (404). */

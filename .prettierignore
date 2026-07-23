@@ -2,3 +2,4 @@ native/
 binding.gyp
 prebuilds/
 build/
+pnpm-lock.yaml

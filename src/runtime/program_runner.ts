@@ -48,9 +48,9 @@ import {
   type HostClient,
   type JsonValue,
 } from "@boardwalk-labs/workflow/runtime";
-import { WorkflowHostServer, type HostCapabilities } from "./host_server.js";
+import { OUTPUT_MISMATCH_HINT, WorkflowHostServer, type HostCapabilities } from "./host_server.js";
 import { invokePythonProgram, isPythonEntry } from "./python_program.js";
-import { AppError, ErrorCode, createLogger } from "./support/index.js";
+import { AppError, ErrorCode, createLogger, errorCodeOf } from "./support/index.js";
 
 const log = createLogger("ProgramRunner");
 
@@ -231,21 +231,6 @@ function errorHint(err: unknown): string | undefined {
   return undefined;
 }
 
-/** A machine-readable error code shaped like one: SCREAMING_SNAKE, as an engine `EngineError.code`
- *  (`VALIDATION`, `PROVIDER_ERROR`, …) and a Node syscall error (`ENOENT`) both are. */
-const ERROR_CODE_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
-
-/**
- * The SEMANTIC code of a thrown error, preferred over its class name. Duck-typed for the same
- * reason as {@link errorHint}. The SCREAMING_SNAKE shape keeps prose out of a field the UI
- * renders as a code; the CALLER redacts the result.
- */
-function errorCode(err: unknown): string | undefined {
-  if (typeof err !== "object" || err === null) return undefined;
-  const code: unknown = (err as { code?: unknown }).code;
-  return typeof code === "string" && ERROR_CODE_RE.test(code) ? code : undefined;
-}
-
 /**
  * Run a workflow program to completion: start the host-protocol server, extract the VERIFIED
  * artifact, drive the loader (`bootstrap` → import entry → `run(input, context)` →
@@ -310,7 +295,7 @@ export async function runWorkflowProgram(
     const hint = rawHint === undefined ? undefined : redactText(rawHint);
     // The error's own code when it has one ("VALIDATION"), else the class name ("Error"). Redacted
     // like the rest: it is read off an author-controlled throw, not trusted to be a literal.
-    const rawCode = errorCode(err);
+    const rawCode = errorCodeOf(err);
     const code =
       rawCode !== undefined
         ? redactText(rawCode)
@@ -399,9 +384,7 @@ async function invokeProgram(
       if (err instanceof HostError && err.code === "VALIDATION_FAILED") {
         // Curate the schema mismatch: message = what's wrong (the server's detail), hint = what
         // to do. The failure code rides the HostError's own code.
-        throw Object.assign(err, {
-          hint: "Return a value matching run()'s declared return type, or update the type and redeploy.",
-        });
+        throw Object.assign(err, { hint: OUTPUT_MISMATCH_HINT });
       }
       throw err;
     }

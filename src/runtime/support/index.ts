@@ -69,6 +69,21 @@ export function isAppError(err: unknown): err is AppError {
   return err instanceof AppError;
 }
 
+/** A machine-readable error code is SCREAMING_SNAKE — an engine `EngineError.code` (`VALIDATION`,
+ *  `PROVIDER_ERROR`, …), an {@link AppError} code, and a Node syscall code (`ENOENT`) all are. */
+const ERROR_CODE_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * The SEMANTIC code of a thrown value, or undefined when it carries none. Duck-typed rather than
+ * `instanceof` — errors cross package boundaries (SDK/engine dual copies), where class checks fail.
+ * The SCREAMING_SNAKE shape gate keeps prose out of a field consumers render as a code.
+ */
+export function errorCodeOf(err: unknown): string | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const code: unknown = (err as { code?: unknown }).code;
+  return typeof code === "string" && ERROR_CODE_RE.test(code) ? code : undefined;
+}
+
 // ---- leases ----
 
 /** Run-lease heartbeat period (ported from the platform's checkpoint module — the broker's

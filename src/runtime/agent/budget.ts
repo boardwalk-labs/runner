@@ -189,30 +189,37 @@ export class BudgetMeter {
   }
 
   /**
-   * Throws `AppError(BUDGET_EXCEEDED)` when any cap is breached. Call BETWEEN
-   * turns (after `addUsage` reflects the latest delta) — that way the meter
-   * tears the loop down before another LLM call is dispatched.
+   * The first breached cap (in the tokens → usd → compute order the assert has always used) with
+   * the numbers + message the `BUDGET_EXCEEDED` error carries, or null while within every cap.
+   * The one probe both {@link assertWithinCaps} and {@link capBreachReason} read from.
    */
-  assertWithinCaps(): void {
-    if (this.budget === undefined) return;
+  private firstBreach(): {
+    kind: BudgetDimension;
+    used: number;
+    cap: number;
+    message: string;
+  } | null {
+    if (this.budget === undefined) return null;
     // Cumulative across resume sessions — caps bound the whole run, not each session.
     const snap = this.cumulative();
     // `max_tokens` deliberately bounds CONVERSATION tokens (input + output) only; cache-read /
     // cache-write tokens are tracked + fully billed via costFor() and are bounded by `max_usd`,
     // not by this cap. totalTokens (snapshot/cumulative) reflects that choice.
     if (this.budget.max_tokens !== undefined && snap.totalTokens > this.budget.max_tokens) {
-      throw new AppError(
-        ErrorCode.BUDGET_EXCEEDED,
-        `Token cap exceeded: ${snap.totalTokens.toString()} > ${this.budget.max_tokens.toString()}`,
-        { kind: "tokens", used: snap.totalTokens, cap: this.budget.max_tokens },
-      );
+      return {
+        kind: "tokens",
+        used: snap.totalTokens,
+        cap: this.budget.max_tokens,
+        message: `Token cap exceeded: ${snap.totalTokens.toString()} > ${this.budget.max_tokens.toString()}`,
+      };
     }
     if (this.budget.max_usd !== undefined && snap.totalUsd > this.budget.max_usd) {
-      throw new AppError(
-        ErrorCode.BUDGET_EXCEEDED,
-        `USD cap exceeded: $${snap.totalUsd.toFixed(4)} > $${this.budget.max_usd.toFixed(4)}`,
-        { kind: "usd", used: snap.totalUsd, cap: this.budget.max_usd },
-      );
+      return {
+        kind: "usd",
+        used: snap.totalUsd,
+        cap: this.budget.max_usd,
+        message: `USD cap exceeded: $${snap.totalUsd.toFixed(4)} > $${this.budget.max_usd.toFixed(4)}`,
+      };
     }
     // max_compute_seconds bounds ACTIVE compute (turn time) — a long sleep / human-input wait
     // doesn't burn it. There is deliberately no wall-clock deadline cap (deadline_seconds was
@@ -220,13 +227,30 @@ export class BudgetMeter {
     if (this.budget.max_compute_seconds !== undefined) {
       const elapsedSeconds = Math.floor(snap.elapsedMs / 1000);
       if (elapsedSeconds > this.budget.max_compute_seconds) {
-        throw new AppError(
-          ErrorCode.BUDGET_EXCEEDED,
-          `Compute cap exceeded: ${elapsedSeconds.toString()}s > ${this.budget.max_compute_seconds.toString()}s`,
-          { kind: "compute", used: elapsedSeconds, cap: this.budget.max_compute_seconds },
-        );
+        return {
+          kind: "compute",
+          used: elapsedSeconds,
+          cap: this.budget.max_compute_seconds,
+          message: `Compute cap exceeded: ${elapsedSeconds.toString()}s > ${this.budget.max_compute_seconds.toString()}s`,
+        };
       }
     }
+    return null;
+  }
+
+  /**
+   * Throws `AppError(BUDGET_EXCEEDED)` when any cap is breached. Call BETWEEN
+   * turns (after `addUsage` reflects the latest delta) — that way the meter
+   * tears the loop down before another LLM call is dispatched.
+   */
+  assertWithinCaps(): void {
+    const breach = this.firstBreach();
+    if (breach === null) return;
+    throw new AppError(ErrorCode.BUDGET_EXCEEDED, breach.message, {
+      kind: breach.kind,
+      used: breach.used,
+      cap: breach.cap,
+    });
   }
 
   /**
@@ -265,20 +289,7 @@ export class BudgetMeter {
    * dimension or null.
    */
   capBreachReason(): BudgetDimension | null {
-    try {
-      this.assertWithinCaps();
-      return null;
-    } catch (err) {
-      if (
-        err instanceof AppError &&
-        typeof err.detail === "object" &&
-        err.detail !== null &&
-        "kind" in err.detail
-      ) {
-        return (err.detail as { kind: BudgetDimension }).kind;
-      }
-      throw err;
-    }
+    return this.firstBreach()?.kind ?? null;
   }
 
   /**

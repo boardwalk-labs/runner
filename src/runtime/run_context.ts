@@ -92,6 +92,7 @@ export function buildContextData(
   if (run.attempt === undefined) {
     log.warn("context_attempt_unavailable", { runId: run.id });
   }
+  const source = triggerSource(run.actor);
   return {
     runId: run.id,
     workflowId: run.workflowId,
@@ -103,7 +104,7 @@ export function buildContextData(
     trigger: {
       kind: triggerKind(run),
       firedAt: run.createdAt,
-      ...(triggerSource(run.actor) !== undefined ? { source: triggerSource(run.actor) } : {}),
+      ...(source !== undefined ? { source } : {}),
     },
     workspaceDir: workspaceRoot,
   };
