@@ -693,7 +693,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     // Extract the verified artifact tarball via system `tar` (same impl as workspace snapshots).
     extractArchive: (tgzPath, destDir) => new TarWorkspaceArchiver().extract(tgzPath, destDir),
     // Guarantee /workspace exists before the program runs (override-safe; the image also pre-creates
-    // it). Lets authors write to /workspace without a defensive mkdir — see WorkflowMeta.workspace.
+    // it). Lets authors write to /workspace without a defensive mkdir — see the descriptor's `workspace` field.
     ensureWorkspace: async () => {
       await mkdir(runtime.workspaceRoot, { recursive: true });
     },
