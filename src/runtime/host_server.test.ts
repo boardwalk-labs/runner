@@ -387,8 +387,8 @@ describe("WorkflowHostServer — error mapping", () => {
     expect((err as HostError).code).toBe("TypeError");
   });
 
-  it("protocolErrorOf maps a non-Error throw to INTERNAL_ERROR", () => {
-    expect(protocolErrorOf("boom")).toEqual({ code: "INTERNAL_ERROR", message: "boom" });
+  it("protocolErrorOf maps a non-Error throw to INTERNAL (engine-taxonomy fallback, same as the local engine)", () => {
+    expect(protocolErrorOf("boom")).toEqual({ code: "INTERNAL", message: "boom" });
   });
 });
 

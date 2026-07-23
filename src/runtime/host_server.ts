@@ -68,6 +68,14 @@ import { RunAbortedError } from "./run_abort.js";
 
 const log = createLogger("HostServer");
 
+/** Apply the wire's optional `since` filter (epoch-ms, inclusive) to timestamped entries. */
+function filterSince<T extends { timestamp: number }>(
+  entries: readonly T[],
+  since: number | undefined,
+): readonly T[] {
+  return since === undefined ? entries : entries.filter((e) => e.timestamp >= since);
+}
+
 /** What `workflows.call` resolves at the capability seam: the child's output plus the CALLEE's
  *  declared output schema (`null` for an untyped callee — the client passes the JSON through). */
 export interface CapabilityCallResult {
@@ -524,11 +532,13 @@ export class WorkflowHostServer {
       }
       case "computer.browser.console": {
         const p = params as HostMethodParams<"computer.browser.console">;
-        return { entries: await this.session(p.sessionId).console() };
+        const entries = await this.session(p.sessionId).console();
+        return { entries: filterSince(entries, p.since) };
       }
       case "computer.browser.network": {
         const p = params as HostMethodParams<"computer.browser.network">;
-        return { entries: await this.session(p.sessionId).network() };
+        const entries = await this.session(p.sessionId).network();
+        return { entries: filterSince(entries, p.since) };
       }
       case "computer.browser.eval": {
         const p = params as HostMethodParams<"computer.browser.eval">;
@@ -713,7 +723,9 @@ export function protocolErrorOf(err: unknown): { code: string; message: string; 
       ? rawCode
       : err instanceof Error && err.name !== ""
         ? err.name
-        : "INTERNAL_ERROR";
+        : // "INTERNAL" (the engine taxonomy's member) — the local engine's server uses the same
+          // fallback, so a program's `catch` sees one code regardless of engine.
+          "INTERNAL";
   const rawHint: unknown =
     typeof err === "object" && err !== null ? (err as { hint?: unknown }).hint : undefined;
   const dataParts: Record<string, unknown> = {};
