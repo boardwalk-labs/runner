@@ -2,10 +2,13 @@
 // failure curation, and the abort kill — end to end where possible.
 //
 // NO cross-repo dependency: the protocol is plain NDJSON JSON-RPC, so the integration tests run
-// a MINIMAL stdlib-only stub of `boardwalk._loader` (src/runtime/testdata/pyloader), placed on
-// PYTHONPATH so the runner's real spawn (`python3 -m boardwalk._loader <entry>`) resolves it.
-// They skip (clearly) when python3 is absent on the test machine; the curation + dispatch logic
-// is additionally unit-tested with no Python at all.
+// a MINIMAL stdlib-only stub of `boardwalk._loader` (src/runtime/testdata/pyloader). The runner
+// OWNS the child's PYTHONPATH (the ratified artifact layout: `.bw-src` sources + `.bw-machine/
+// site-packages` deps — inherited values are dropped), so the stub cannot ride the test env;
+// instead the tests spawn through a tiny wrapper interpreter that appends the stub dir AFTER the
+// platform-owned path — the same site-level guarantee the real image gives (`python3` with the
+// `boardwalk` package importable). They skip (clearly) when python3 is absent on the test
+// machine; the curation + dispatch logic is additionally unit-tested with no Python at all.
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -25,6 +28,7 @@ import {
   curateSpawnFailure,
   isPythonEntry,
   lineSplitter,
+  pythonModulePath,
 } from "./python_program.js";
 import { captureConsole, type LogStream } from "./program_log_capture.js";
 import { RunAbortedError } from "./run_abort.js";
@@ -94,22 +98,34 @@ afterEach(async () => {
   await Promise.all(tmpDirs.splice(0).map((d) => fs.rm(d, { recursive: true, force: true })));
 });
 
-/** Pack a one-file Python "program" whose main.py CONTENT is the fixture mode word. */
-function buildPythonArtifact(mode: string): { tarball: Uint8Array; entry: string } {
-  const tar = tarFiles([{ name: "main.py", data: Buffer.from(`${mode}\n`, "utf8") }]);
-  return { tarball: new Uint8Array(gzipSync(tar, { level: 9 })), entry: "main.py" };
+/** Pack a Python program artifact in the RATIFIED layout: sources under `.bw-src/`, frozen deps
+ *  under `.bw-machine/site-packages/` (the CLI packer's shape the runner binds to). */
+function buildPythonPackage(files: readonly { name: string; text: string }[]): Uint8Array {
+  const tar = tarFiles(files.map((f) => ({ name: f.name, data: Buffer.from(f.text, "utf8") })));
+  return new Uint8Array(gzipSync(tar, { level: 9 }));
 }
 
-/** Run a fixture-mode Python program through the REAL runner path (real tar, real socket,
- *  real python subprocess). */
-async function runPy(
+/** Pack a one-file Python "program" whose `.bw-src/main.py` CONTENT is the fixture mode word. */
+function buildPythonArtifact(mode: string): { tarball: Uint8Array; entry: string } {
+  return {
+    tarball: buildPythonPackage([{ name: ".bw-src/main.py", text: `${mode}\n` }]),
+    entry: "main.py",
+  };
+}
+
+/** The wrapper interpreter the subprocess suite's beforeAll creates (see the header comment);
+ *  `runPyArtifact` defaults to it so every spawn resolves the stub loader like the real image. */
+let pythonWrapper: string | undefined;
+
+/** Run a built Python artifact through the REAL runner path (real tar, real socket, real python
+ *  subprocess). */
+async function runPyArtifact(
   runId: string,
-  mode: string,
+  built: { tarball: Uint8Array; entry: string },
   input: unknown,
   deps: Partial<ProgramRunnerDeps> = {},
   outputSchema: Record<string, unknown> | null = null,
 ): Promise<ProgramResult> {
-  const built = buildPythonArtifact(mode);
   const workspaceRoot = deps.workspaceRoot ?? (await mkTmp("bw-pyws-"));
   const programRoot = deps.programRoot ?? (await mkTmp("bw-pyprog-"));
   return runWorkflowProgram(
@@ -127,11 +143,23 @@ async function runPy(
       extract: async (tgzPath, destDir) => {
         await tarExtract({ file: tgzPath, cwd: destDir });
       },
+      ...(pythonWrapper === undefined ? {} : { pythonInterpreter: pythonWrapper }),
       ...deps,
       workspaceRoot,
       programRoot,
     },
   );
+}
+
+/** Run a fixture-mode Python program (the one-word `.bw-src/main.py` shape). */
+async function runPy(
+  runId: string,
+  mode: string,
+  input: unknown,
+  deps: Partial<ProgramRunnerDeps> = {},
+  outputSchema: Record<string, unknown> | null = null,
+): Promise<ProgramResult> {
+  return runPyArtifact(runId, buildPythonArtifact(mode), input, deps, outputSchema);
 }
 
 const outputOf = (r: ProgramResult): unknown => (r.kind === "completed" ? r.output : undefined);
@@ -152,6 +180,20 @@ describe("isPythonEntry (the language dispatch decision)", () => {
     expect(isPythonEntry("index.ts")).toBe(false);
     expect(isPythonEntry("module.pyx")).toBe(false);
     expect(isPythonEntry("py")).toBe(false);
+  });
+});
+
+// ---- unit: the platform-owned module path -----------------------------------------------------
+
+describe("pythonModulePath", () => {
+  it("puts the author's .bw-src sources AHEAD of the frozen site-packages deps", () => {
+    const programDir = path.join(path.sep, "prog", "run-1");
+    expect(pythonModulePath(programDir)).toBe(
+      [
+        path.join(programDir, ".bw-src"),
+        path.join(programDir, ".bw-machine", "site-packages"),
+      ].join(path.delimiter),
+    );
   });
 });
 
@@ -263,6 +305,24 @@ describe("runWorkflowProgram — python interpreter missing", () => {
   });
 });
 
+// ---- integration: the containment guard (fails before any spawn — no Python needed) -----------
+
+describe("runWorkflowProgram — python entry containment", () => {
+  it("rejects a .py entry that escapes .bw-src, even into the artifact root", async () => {
+    const built = {
+      tarball: buildPythonPackage([
+        { name: "evil.py", text: "print('never runs')\n" },
+        { name: ".bw-src/main.py", text: "echo\n" },
+      ]),
+      entry: "../evil.py",
+    };
+    const res = await runPyArtifact("run_py_escape", built, null, {});
+    expect(res.kind).toBe("failed");
+    expect(errorOf(res)?.code).toBe("VALIDATION_FAILED");
+    expect(errorOf(res)?.message).toMatch(/escapes the program directory/);
+  });
+});
+
 // ---- integration: the real subprocess path (skipped when python3 is absent) -------------------
 
 if (!pythonAvailable) {
@@ -273,18 +333,26 @@ if (!pythonAvailable) {
 }
 
 describe.skipIf(!pythonAvailable)("runWorkflowProgram — the Python subprocess path", () => {
-  let savedPythonPath: string | undefined;
-  beforeAll(() => {
-    // Resolve `-m boardwalk._loader` to the stdlib-only stub — the child inherits process.env.
-    savedPythonPath = process.env.PYTHONPATH;
-    process.env.PYTHONPATH =
-      savedPythonPath === undefined
-        ? FIXTURE_PYTHONPATH
-        : `${FIXTURE_PYTHONPATH}${path.delimiter}${savedPythonPath}`;
+  // The runner OWNS the child's PYTHONPATH (inherited values are dropped), so the stub loader
+  // can't ride the test env. Stand in for the image guarantee instead: a wrapper interpreter
+  // that appends the stub dir AFTER whatever PYTHONPATH the runner set (site-level, exactly
+  // where the real image's `boardwalk` package sits relative to the platform-owned path).
+  let wrapperDir: string | undefined;
+  beforeAll(async () => {
+    wrapperDir = await fs.mkdtemp(path.join(os.tmpdir(), "bw-pywrap-"));
+    pythonWrapper = path.join(wrapperDir, "python3-with-stub-loader");
+    const script = [
+      "#!/bin/sh",
+      `PYTHONPATH="\${PYTHONPATH:+\${PYTHONPATH}${path.delimiter}}${FIXTURE_PYTHONPATH}"`,
+      "export PYTHONPATH",
+      'exec python3 "$@"',
+      "",
+    ].join("\n");
+    await fs.writeFile(pythonWrapper, script, { mode: 0o755 });
   });
-  afterAll(() => {
-    if (savedPythonPath === undefined) Reflect.deleteProperty(process.env, "PYTHONPATH");
-    else process.env.PYTHONPATH = savedPythonPath;
+  afterAll(async () => {
+    pythonWrapper = undefined;
+    if (wrapperDir !== undefined) await fs.rm(wrapperDir, { recursive: true, force: true });
   });
 
   it("bootstraps, runs with cwd + HOME = the workspace, and completes on report_return", async () => {
@@ -311,6 +379,89 @@ describe.skipIf(!pythonAvailable)("runWorkflowProgram — the Python subprocess 
     // The child disconnected after report_return and exited 0 — the clean-shutdown contract —
     // and the reported value fired onOutput exactly like the TS path.
     expect(outputs).toEqual([outputOf(res)]);
+  }, 15_000);
+
+  it("resolves the entry under .bw-src and imports siblings + frozen deps via the module path", async () => {
+    const programRoot = await mkTmp("bw-pyprog-");
+    const built = {
+      tarball: buildPythonPackage([
+        {
+          name: ".bw-src/main.py",
+          text: [
+            "# bw-exec",
+            "import os",
+            "import helper",
+            "import fakedep",
+            "import dupmod",
+            "bw_report({",
+            '    "helper": helper.VALUE,',
+            '    "fakedep": fakedep.VALUE,',
+            '    "dupmod": dupmod.VALUE,',
+            '    "pythonpath": os.environ.get("PYTHONPATH", ""),',
+            "})",
+            "",
+          ].join("\n"),
+        },
+        { name: ".bw-src/helper.py", text: 'VALUE = "from-src-helper"\n' },
+        { name: ".bw-src/dupmod.py", text: 'VALUE = "author"\n' },
+        {
+          name: ".bw-machine/site-packages/fakedep/__init__.py",
+          text: 'VALUE = "from-site-packages"\n',
+        },
+        { name: ".bw-machine/site-packages/dupmod.py", text: 'VALUE = "dependency"\n' },
+      ]),
+      entry: "main.py",
+    };
+    // An inherited PYTHONPATH must NOT reach the child — plant a sentinel to prove the drop.
+    const savedPythonPath = process.env.PYTHONPATH;
+    process.env.PYTHONPATH = "/bw-inherited-sentinel";
+    let res: ProgramResult;
+    try {
+      res = await runPyArtifact("run_py_modpath", built, null, { programRoot });
+    } finally {
+      if (savedPythonPath === undefined) Reflect.deleteProperty(process.env, "PYTHONPATH");
+      else process.env.PYTHONPATH = savedPythonPath;
+    }
+    expect(res.kind).toBe("completed");
+    const out = outputOf(res) as {
+      helper: string;
+      fakedep: string;
+      dupmod: string;
+      pythonpath: string;
+    };
+    expect(out.helper).toBe("from-src-helper");
+    expect(out.fakedep).toBe("from-site-packages");
+    // .bw-src precedes site-packages: the author's module wins the name collision.
+    expect(out.dupmod).toBe("author");
+    // The child's PYTHONPATH is platform-owned: sources first, frozen deps second, both under
+    // the extract dir; the trailing entry is the wrapper's stub-loader append (the stand-in for
+    // the image's site-level `boardwalk`), and the inherited sentinel never crossed.
+    const [srcPath = "", depsPath = "", stubPath = "", ...rest] = out.pythonpath.split(
+      path.delimiter,
+    );
+    expect(rest).toEqual([]);
+    expect(srcPath.startsWith(path.join(programRoot, ".bw-runs"))).toBe(true);
+    expect(srcPath.endsWith(`${path.sep}.bw-src`)).toBe(true);
+    expect(depsPath.startsWith(path.join(programRoot, ".bw-runs"))).toBe(true);
+    expect(depsPath.endsWith(path.join(".bw-machine", "site-packages"))).toBe(true);
+    expect(stubPath).toBe(FIXTURE_PYTHONPATH);
+    expect(out.pythonpath).not.toContain("/bw-inherited-sentinel");
+  }, 15_000);
+
+  it("runs a no-dep package (no site-packages layer at all) and tolerates a leading ./ entry", async () => {
+    const built = {
+      tarball: buildPythonPackage([
+        {
+          name: ".bw-src/main.py",
+          text: '# bw-exec\nimport helper\nbw_report({"helper": helper.VALUE})\n',
+        },
+        { name: ".bw-src/helper.py", text: 'VALUE = "no-deps"\n' },
+      ]),
+      entry: "./main.py",
+    };
+    const res = await runPyArtifact("run_py_nodeps", built, null, {});
+    expect(res.kind).toBe("completed");
+    expect(outputOf(res)).toEqual({ helper: "no-deps" });
   }, 15_000);
 
   it("pipes the child's stdout/stderr into the program log capture, line-buffered + stream-marked", async () => {

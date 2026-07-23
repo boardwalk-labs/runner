@@ -8,10 +8,13 @@
 //
 // with cwd = the run's workspace and env = the worker's env plus `BOARDWALK_HOST_SOCK`
 // (already set process-wide by the runner, re-stamped here explicitly), `HOME` = the workspace
-// (the I1 convention the TS path lives under: the workspace IS cwd + HOME for author code), and
+// (the I1 convention the TS path lives under: the workspace IS cwd + HOME for author code),
 // `PYTHONUNBUFFERED=1` so the child's prints stream line-by-line instead of arriving in one
-// buffered burst at exit. The loader module + the `boardwalk` package come from the runner
-// IMAGE (P5.3: CPython in the base image, the SDK importable) — the runner installs nothing.
+// buffered burst at exit, and the platform-owned `PYTHONPATH` binding the ratified artifact
+// layout (sources under `.bw-src/`, frozen deps under `.bw-machine/site-packages/` — see
+// {@link pythonModulePath} for the exact value + ordering rationale). The loader module + the
+// `boardwalk` package come from the runner IMAGE (P5.3: CPython in the base image, the SDK
+// importable) — the runner installs nothing.
 //
 // LIFECYCLE + FAILURE CURATION (the module's real job — the loader deliberately reports no
 // failure over the wire; see sdk-python's `_loader.py` docstring):
@@ -39,6 +42,7 @@
 
 import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
+import { delimiter, join } from "node:path";
 import { HOST_SOCK_ENV } from "@boardwalk-labs/workflow/runtime";
 import { OUTPUT_MISMATCH_HINT, type WorkflowHostServer } from "./host_server.js";
 import type { ProgramResult, ProgramRunnerDeps } from "./program_runner.js";
@@ -47,6 +51,39 @@ import { throwIfAborted } from "./run_abort.js";
 
 /** Default interpreter, resolved on PATH — the base image bakes one CPython (P5.3). */
 export const DEFAULT_PYTHON_INTERPRETER = "python3";
+
+/** Where the ratified Python artifact layout keeps the author's SOURCE tree. A stored Python
+ *  entry (`main.py`) is relative to THIS dir — Python has no bundle step, so the shipped source
+ *  is what runs (`<extractDir>/.bw-src/main.py`), never a root module like the TS `index.mjs`. */
+export const PYTHON_SOURCE_DIR = ".bw-src";
+
+/** Where the ratified layout keeps the uv-materialized frozen dependency tree (build-time
+ *  `uv lock` → `export --frozen` → `pip install --target`; never installed on the hot path). */
+export const PYTHON_SITE_PACKAGES_DIR = join(".bw-machine", "site-packages");
+
+/**
+ * The platform-owned `PYTHONPATH` for a Python program run:
+ *
+ *     <programDir>/.bw-src  <sep>  <programDir>/.bw-machine/site-packages
+ *
+ * ORDER (deliberate): the author's sources BEFORE the frozen deps, so an author module wins a
+ * name collision with a dependency. That mirrors CPython's own convention — the interpreter puts
+ * a script's directory ahead of site-packages — extended to the whole tree, which needs an
+ * explicit entry because the loader is launched `-m` style (sys.path[0] is the workspace cwd,
+ * not `.bw-src`) yet sibling imports (`import helper`) must resolve from the source tree. The
+ * file an author can SEE in the Code tab beating an invisible dep is the predictable reading.
+ *
+ * The value REPLACES any PYTHONPATH inherited from the worker's env: for a Python run the
+ * module path is platform-owned (the guest image provides python3 with the `boardwalk` loader
+ * package importable at site level; nothing from the worker's own environment may steer author
+ * import resolution). A no-dep package ships no site-packages dir at all — Python silently
+ * skips a nonexistent sys.path entry, so the value is set unconditionally, never stat-gated.
+ */
+export function pythonModulePath(programDir: string): string {
+  return [join(programDir, PYTHON_SOURCE_DIR), join(programDir, PYTHON_SITE_PACKAGES_DIR)].join(
+    delimiter,
+  );
+}
 
 /** The loader module the guest image's `boardwalk` package provides (`python -m <module> <entry>`). */
 export const PYTHON_LOADER_MODULE = "boardwalk._loader";
@@ -167,6 +204,7 @@ type SpawnOutcome =
  */
 export async function invokePythonProgram(
   entryPath: string,
+  programDir: string,
   sockPath: string,
   server: WorkflowHostServer,
   deps: ProgramRunnerDeps,
@@ -191,6 +229,8 @@ export async function invokePythonProgram(
       [HOST_SOCK_ENV]: sockPath,
       HOME: deps.workspaceRoot,
       PYTHONUNBUFFERED: "1",
+      // Platform-owned module path (REPLACES any inherited PYTHONPATH — see pythonModulePath).
+      PYTHONPATH: pythonModulePath(programDir),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

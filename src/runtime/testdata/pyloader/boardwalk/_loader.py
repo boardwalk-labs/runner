@@ -6,8 +6,10 @@ put THIS package first on ``PYTHONPATH`` so the spawn contract is exercised end 
 dependency on the sdk-python repo. The protocol is plain NDJSON JSON-RPC over the Unix socket
 in ``BOARDWALK_HOST_SOCK``: connect, ``bootstrap``, then act out the behavior named by the
 entry file's CONTENT (one word), reporting a transformed input back via ``report_return`` in
-the happy case. Failures propagate exactly like the real loader: traceback to stderr, non-zero
-exit, curated server-side by the runner.
+the happy case. An entry starting ``# bw-exec`` is instead EXECUTED as real Python (the lane
+the module-path tests use), with ``bw_report(value)`` injected for reporting. Failures
+propagate exactly like the real loader: traceback to stderr, non-zero exit, curated
+server-side by the runner.
 """
 
 import json
@@ -37,13 +39,28 @@ def _rpc(sock, reader, rpc_id, method, params):
 def main():
     entry = sys.argv[1]
     with open(entry, encoding="utf-8") as f:
-        mode = f.read().strip()
+        source = f.read()
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(os.environ["BOARDWALK_HOST_SOCK"])
     reader = sock.makefile("r", encoding="utf-8")
     boot = _rpc(sock, reader, 1, "bootstrap", {})
 
+    if source.startswith("# bw-exec"):
+        # Execute the entry as REAL Python — the lane the module-path tests use. Deliberately NO
+        # sys.path mutation here (runpy.run_path would prepend the entry's own directory and mask
+        # the runner-provided PYTHONPATH under test); imports resolve exactly as the child's env
+        # dictates. The code reports its value through the injected ``bw_report``.
+        namespace = {
+            "__name__": "__main__",
+            "__file__": entry,
+            "bw_report": lambda value: _rpc(sock, reader, 2, "report_return", {"value": value}),
+        }
+        exec(compile(source, entry, "exec"), namespace)
+        sock.close()
+        return
+
+    mode = source.strip()
     if mode == "echo":
         print("echo fixture starting")
         print("a warning line", file=sys.stderr)

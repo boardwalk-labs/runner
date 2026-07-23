@@ -49,7 +49,7 @@ import {
   type JsonValue,
 } from "@boardwalk-labs/workflow/runtime";
 import { OUTPUT_MISMATCH_HINT, WorkflowHostServer, type HostCapabilities } from "./host_server.js";
-import { invokePythonProgram, isPythonEntry } from "./python_program.js";
+import { PYTHON_SOURCE_DIR, invokePythonProgram, isPythonEntry } from "./python_program.js";
 import { AppError, ErrorCode, createLogger, errorCodeOf } from "./support/index.js";
 
 const log = createLogger("ProgramRunner");
@@ -116,6 +116,21 @@ export function resolveEntryPath(dir: string, entry: string): string {
   return resolved;
 }
 
+/**
+ * Resolve a program entry by LANGUAGE, binding the ratified artifact layout: a TS/JS entry is a
+ * BUILT module at the artifact root (`index.mjs` — the CLI bundles, the api-server type-strips);
+ * a `.py` entry is a SOURCE path under `.bw-src/` (`main.py` ⇒ `<dir>/.bw-src/main.py` — Python
+ * has no bundle step, the shipped source is what runs). A leading `./` on the stored entry is
+ * tolerated (`join` collapses it). Both lanes keep the containment guard; for Python the guard's
+ * base is the `.bw-src` tree itself, so an escaping entry (`../evil.py`) is rejected even when
+ * it would still land inside the extract dir.
+ */
+export function resolveProgramEntryPath(dir: string, entry: string): string {
+  return isPythonEntry(entry)
+    ? resolveEntryPath(join(dir, PYTHON_SOURCE_DIR), entry)
+    : resolveEntryPath(dir, entry);
+}
+
 /** Scratch filename for the in-flight artifact tarball inside a run's dir. */
 const ARTIFACT_FILE = "__program.tgz";
 
@@ -141,7 +156,9 @@ export interface RunProgramArgs {
   runId: string;
   /** The VERIFIED program artifact tarball (sha256 already checked against the pinned digest). */
   tarball: Uint8Array;
-  /** Entry module to import after extraction (a safe relative POSIX path, e.g. `index.mjs`). */
+  /** Entry module to import after extraction (a safe relative POSIX path). TS/JS: the BUILT
+   *  module at the artifact root (`index.mjs`). Python: the SOURCE path relative to the
+   *  artifact's `.bw-src/` tree (`main.py` ⇒ `.bw-src/main.py` on disk). */
   entry: string;
   /** The run's RAW JSON input (trigger payload / inline input). The revival pass is CLIENT-side. */
   input: unknown;
@@ -273,7 +290,7 @@ export async function runWorkflowProgram(
     if (!python) await ensureSdkLink(dir);
     // Re-validate the entry here even though the control plane checked it at deploy (defense-in-depth
     // for a self-hosted runner pointed at an arbitrary control plane).
-    const entryPath = resolveEntryPath(dir, args.entry);
+    const entryPath = resolveProgramEntryPath(dir, args.entry);
 
     const sockPath = await server.listen();
     // The ONE platform-owned env key a program keeps: how its SDK (and any subprocess speaking
@@ -283,7 +300,7 @@ export async function runWorkflowProgram(
     // Invoke run(input, context) to its natural completion / failure. A waiting seam freezes with
     // the VM (snapshot substrate) or holds the process — either way the await continues.
     return python
-      ? await invokePythonProgram(entryPath, sockPath, server, deps)
+      ? await invokePythonProgram(entryPath, dir, sockPath, server, deps)
       : await invokeProgram(entryPath, sockPath, server, deps);
   } catch (err) {
     const redactText = deps.redactText ?? ((s: string): string => s);

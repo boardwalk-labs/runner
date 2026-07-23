@@ -16,6 +16,7 @@ import type { ContextData } from "@boardwalk-labs/workflow/runtime";
 import { extract as tarExtract } from "tar";
 import {
   resolveEntryPath,
+  resolveProgramEntryPath,
   ensureSdkLink,
   runWorkflowProgram,
   type ProgramResult,
@@ -864,5 +865,28 @@ describe("resolveEntryPath", () => {
   });
   it("rejects an entry that resolves to the dir itself", () => {
     expect(() => resolveEntryPath(dir, "")).toThrow(/escapes/);
+  });
+});
+
+describe("resolveProgramEntryPath (language dispatch over the ratified layout)", () => {
+  const dir = "/work/.bw-runs/run-abc";
+  it("keeps a TS/JS entry at the artifact root", () => {
+    expect(resolveProgramEntryPath(dir, "index.mjs")).toBe(path.join(dir, "index.mjs"));
+    expect(resolveProgramEntryPath(dir, "dist/index.js")).toBe(path.join(dir, "dist", "index.js"));
+  });
+  it("resolves a .py entry under the artifact's .bw-src source tree", () => {
+    expect(resolveProgramEntryPath(dir, "main.py")).toBe(path.join(dir, ".bw-src", "main.py"));
+    expect(resolveProgramEntryPath(dir, "nested/tool.py")).toBe(
+      path.join(dir, ".bw-src", "nested", "tool.py"),
+    );
+  });
+  it("tolerates a leading ./ on a stored .py entry", () => {
+    expect(resolveProgramEntryPath(dir, "./main.py")).toBe(path.join(dir, ".bw-src", "main.py"));
+  });
+  it("rejects a .py entry escaping .bw-src — even one landing inside the extract dir", () => {
+    expect(() => resolveProgramEntryPath(dir, "../index.py")).toThrow(/escapes/);
+    expect(() => resolveProgramEntryPath(dir, "a/../../b.py")).toThrow(/escapes/);
+    expect(() => resolveProgramEntryPath(dir, "../../../etc/evil.py")).toThrow(/escapes/);
+    expect(() => resolveProgramEntryPath(dir, "/etc/evil.py")).toThrow(/escapes/);
   });
 });
