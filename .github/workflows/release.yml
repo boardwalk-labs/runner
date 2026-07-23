@@ -59,7 +59,15 @@ jobs:
       # provenance publisher unable to require `sigstore` (Cannot find module 'sigstore'), which
       # broke every v0.1.12 publish attempt. If the bundled npm ever drops below 11.5.1, pin a
       # specific known-good 11.x here rather than @latest.
-      - run: npm publish --provenance --access public
+      # A prerelease version (anything with a `-`) publishes under the `next` dist-tag so
+      # `latest` keeps pointing at the current stable line for plain installs.
+      - name: Publish (prereleases under --tag next)
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          case "$PKG_VERSION" in
+            *-*) npm publish --provenance --access public --tag next ;;
+            *)   npm publish --provenance --access public ;;
+          esac
 
   # The self-hosted RUN image (base + the just-published runtime). Runs AFTER publish so it installs
   # the version that landed on npm. Base + runtime layer, mirroring the hosted worker image.
