@@ -9,11 +9,11 @@ importers:
   .:
     dependencies:
       '@boardwalk-labs/engine':
-        specifier: 0.2.12
-        version: 0.2.12
+        specifier: 0.3.0-alpha.1
+        version: 0.3.0-alpha.1
       '@boardwalk-labs/workflow':
-        specifier: 0.3.0-alpha.6
-        version: 0.3.0-alpha.6
+        specifier: 0.3.0-alpha.7
+        version: 0.3.0-alpha.7
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
@@ -91,17 +91,13 @@ packages:
     resolution: {integrity: sha512-6zABk/ECA/QYSCQ1NGiVwwbQerUCZ+TQbp64Q3AgmfNvurHH0j8TtXa1qbShXA6qqkpAj4V5W8pP6mLe1mcMqA==}
     engines: {node: '>=18'}
 
-  '@boardwalk-labs/engine@0.2.12':
-    resolution: {integrity: sha512-yM0FYkuyM2mUCXCducEznMetNATfEfXx8dqvGV3nj3S/btCoRh7zfdcBYNzPhKByJnbi7I5lREsmJ52ejXV0ew==}
+  '@boardwalk-labs/engine@0.3.0-alpha.1':
+    resolution: {integrity: sha512-UbBTXSQnd5/g+jcbJ3im8JV5t8BaSuQlMIhxPxsu4wAIQo3QuuKROx/DOENEzd999XLMZHXZxMxXdfW9JkSIvQ==}
     engines: {node: '>=24.0.0'}
     hasBin: true
 
-  '@boardwalk-labs/workflow@0.2.6':
-    resolution: {integrity: sha512-oNoM8pR0EVBKWoj9Kwvh5yzmiGpDbXrHRZCZxaRFKJRrWKgj9Tk92E8nvAx1GSk9I8i4SN9yWTroj6d9XhWu5g==}
-    engines: {node: '>=24'}
-
-  '@boardwalk-labs/workflow@0.3.0-alpha.6':
-    resolution: {integrity: sha512-zcNWtsJXPjqD8NJpj1rTzxfAuvab3l5WJUA3Ea5CYUfw2vPJPVXVElxYnoNlDMeNGv9VW39Pj95Sz0zE9r8bLg==}
+  '@boardwalk-labs/workflow@0.3.0-alpha.7':
+    resolution: {integrity: sha512-pc2MgdhqwPOV5Uz09a846Lqzg0dLxzKFd56VCmiBm4Gq4y1NB53BHkGHRP/643D2wEMLKh84WcxVMSaGR9nerA==}
     engines: {node: '>=24'}
 
   '@esbuild/aix-ppc64@0.27.7':
@@ -1816,17 +1812,12 @@ snapshots:
 
   '@bcoe/v8-coverage@1.0.2': {}
 
-  '@boardwalk-labs/engine@0.2.12':
+  '@boardwalk-labs/engine@0.3.0-alpha.1':
     dependencies:
-      '@boardwalk-labs/workflow': 0.2.6
+      '@boardwalk-labs/workflow': 0.3.0-alpha.7
       zod: 4.4.3
 
-  '@boardwalk-labs/workflow@0.2.6':
-    dependencies:
-      typescript: 5.9.3
-      zod: 4.4.3
-
-  '@boardwalk-labs/workflow@0.3.0-alpha.6':
+  '@boardwalk-labs/workflow@0.3.0-alpha.7':
     dependencies:
       zod: 4.4.3
 
