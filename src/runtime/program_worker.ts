@@ -25,7 +25,7 @@ import { createLogger } from "./support/index.js";
 import type { Run } from "./wire/run.js";
 import { workflowManifestSchema, type WorkflowManifest } from "./wire/manifest.js";
 import type { HostCapabilities } from "./host_server.js";
-import { buildContextData } from "./run_context.js";
+import { buildContextData, type ClaimContextExtras } from "./run_context.js";
 import type { SecretRedactor } from "./agent/secret_redactor.js";
 // Import from the pure file (NOT the domain/workflow barrel, which pulls in `typescript`) so the
 // worker bundle stays free of the TS compiler — the worker never transpiles.
@@ -39,14 +39,16 @@ const log = createLogger("ProgramWorker");
 /** Default 5-minute lease (matches the engine spec). */
 export const DEFAULT_LEASE_MS = 5 * 60 * 1000;
 
-/** Race-safe claim surface — RunRepository satisfies it. */
+/** Race-safe claim surface — the broker claim adapter satisfies it. Returns the claimed run row
+ *  plus the claim payload's context siblings (`workflowVersion` int, `environment {id,name}|null`
+ *  — P3.7), or null when the claim was lost. */
 export interface RunClaimer {
   claimForWorker(
     runId: string,
     workerId: string,
     leaseUntil: number,
     nowMs: number,
-  ): Promise<Run | null>;
+  ): Promise<{ run: Run; context: ClaimContextExtras } | null>;
 }
 
 /** The pinned program's download reference (the worker fetches + verifies + extracts it). */
@@ -139,6 +141,10 @@ export type ProgramHostBuilder = (
    *  the program runs and flushes it on EVERY terminal path. Best-effort; absent without the desktop
    *  stack. */
   capture?: { start(): Promise<void>; stopAndFlush(): Promise<void> };
+  /** The compute-budget breach watcher (budget_gate.ts): detects a `max_compute_seconds` breach
+   *  between capability seams. The orchestrator stops it on EVERY terminal path (its interval is
+   *  unref'd, so this is hygiene, not liveness). Absent on paths without a budget gate. */
+  budgetWatch?: { stop(): void };
 }>;
 
 /** Handle to a running per-session loop (metering or credit watch); `stop()` ends + drains it. */
@@ -218,17 +224,18 @@ export async function runProgramWorker(
 
   // Runtime-billing baseline: when THIS worker session began.
   const sessionStartMs = now();
-  const claimed = await deps.runs.claimForWorker(
+  const claim = await deps.runs.claimForWorker(
     runId,
     deps.workerId,
     sessionStartMs + leaseMs,
     sessionStartMs,
   );
-  if (claimed === null) {
+  if (claim === null) {
     log.info("worker_claim_lost", { runId, workerId: deps.workerId });
     return { kind: "claim_lost" };
   }
   log.info("worker_claimed", { runId, workerId: deps.workerId });
+  const claimed = claim.run;
 
   const loaded = await loadVersion(deps, claimed);
   if (loaded === null) {
@@ -284,6 +291,7 @@ export async function runProgramWorker(
   const { capabilities, redactor, workspace, phases, activity, setProgramDir, lsp } = built;
   const browserSessions = built.browserSessions;
   const capture = built.capture;
+  const budgetWatch = built.budgetWatch;
   // Guarantee the /workspace sandbox dir exists for EVERY run (persist or not) so a program can write
   // to /workspace without a defensive mkdir. Runs before hydrate (whose extract targets the dir).
   // Best-effort — the image pre-creates the dir; a failure here would resurface at the program's write.
@@ -359,7 +367,7 @@ export async function runProgramWorker(
         // `bootstrap` (the SDK's revival pass), the output schema gates `report_return`.
         inputSchema: loaded.manifest.input_schema ?? null,
         outputSchema: loaded.manifest.output_schema ?? null,
-        context: buildContextData(claimed, deps.workspaceRoot),
+        context: buildContextData(claimed, deps.workspaceRoot, claim.context),
       },
       // redactText scrubs a thrown error's message before it is logged + finalized into run output.
       // onOutput emits the `output` activity entry into the run's log when the program returned one.
@@ -388,6 +396,8 @@ export async function runProgramWorker(
     if (cancel !== undefined) await cancel.stop();
     if (lease !== undefined) await lease.stop();
     if (runtimeFlush !== undefined) await runtimeFlush.stop();
+    // Stop the compute-budget breach watcher (sync, never throws).
+    if (budgetWatch !== undefined) budgetWatch.stop();
     // Shut down the run's language server(s) on EVERY terminal path (success/failure/throw) so no
     // language-server process leaks. `close()` is idempotent + never throws, so this best-effort call
     // is safe (it runs before the workspace snapshot, which is the slowest step).

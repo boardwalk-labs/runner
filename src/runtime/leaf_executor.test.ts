@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { AppError, ErrorCode } from "./support/index.js";
 import type { AgentOptions } from "@boardwalk-labs/workflow/runtime";
 import { BudgetMeter } from "./agent/budget.js";
+import { BudgetGate } from "./budget_gate.js";
 import { SecretRedactor } from "./agent/secret_redactor.js";
+import type { HumanInputResult } from "@boardwalk-labs/workflow";
 import { BUDGET_GUARDRAIL_RATE } from "./agent/model_rates.js";
 import { runEventSchema } from "@boardwalk-labs/workflow";
 import type { AgentIdentity, RunEvent, RunEventBody, TurnEventSink } from "./agent/events.js";
@@ -340,6 +342,68 @@ describe("EngineLeafExecutor.run — budget + metering", () => {
     expect(budget.snapshot().totalUsd).toBeCloseTo(0.2, 6);
     // Tokens still accumulate (they drive the max_tokens cap + the display aggregate).
     expect(budget.snapshot().inputTokens).toBe(1_000_000);
+  });
+
+  it("with a budget gate wired, a cap breach at reportUsage does NOT fail the leaf (it parks at the next seam)", async () => {
+    const budget = new BudgetMeter({
+      budget: { max_tokens: 10 },
+      rate: BUDGET_GUARDRAIL_RATE,
+      startedAt: 0,
+    });
+    const meterCalls: MeterUsageInput[] = [];
+    const { exec } = makeExecutor({
+      scripts: [finalTurn("done", { inputTokens: 100, outputTokens: 40 })],
+      budget,
+      meterCalls,
+      budgetGate: { clear: () => Promise.resolve() },
+    });
+    // Same breach as the no-gate test above — but the in-flight turn completes and the leaf
+    // resolves; the park happens at the NEXT model call / capability seam (SUSPEND_POLICY D1).
+    expect(await exec.run("x", OPTS)).toBe("done");
+    // The breach turn's tokens still meter to the broker — they were genuinely spent.
+    expect(meterCalls).toHaveLength(1);
+    expect(budget.capBreachReason()).toBe("tokens");
+  });
+
+  it("parks a mid-run tokens breach at the next model call and resumes on an approved raise", async () => {
+    const budget = new BudgetMeter({
+      budget: { max_tokens: 100 },
+      rate: BUDGET_GUARDRAIL_RATE,
+      startedAt: 0,
+    });
+    const parks: string[] = [];
+    const gate = new BudgetGate(budget, {
+      budgetClearance: (g: { prompt: string; inputSpec: unknown }) => {
+        parks.push(g.prompt);
+        return Promise.resolve({ value: "+1M" } as unknown as HumanInputResult);
+      },
+    });
+    // Turn 1 breaches the token cap (110 > 100) and requests a tool, so the loop must dispatch a
+    // SECOND model call — which is where the gate parks, asks, and resumes on the raised cap.
+    const breachTurn: InferenceFrame[] = [
+      {
+        kind: "result",
+        turn: {
+          text: "",
+          toolCalls: [{ id: "t1", name: "no_such_tool", input: {} }],
+          usage: { inputTokens: 90, outputTokens: 20 },
+          wantsTools: true,
+        },
+        modelRef: "boardwalk/m",
+        costMicros: 0,
+      },
+    ];
+    const { exec, requests } = makeExecutor({
+      scripts: [breachTurn, finalTurn("done", { inputTokens: 10, outputTokens: 5 })],
+      budget,
+      budgetGate: gate,
+    });
+    expect(await exec.run("x", OPTS)).toBe("done");
+    expect(parks).toHaveLength(1);
+    expect(parks[0]).toContain("max_tokens");
+    expect(requests).toHaveLength(2);
+    expect(budget.cap("tokens")).toBe(1_000_100); // 100 + 1M
+    expect(budget.capBreachReason()).toBeNull();
   });
 
   it("awaits budget clearance BEFORE each model call, so a breached run parks instead of spending", async () => {

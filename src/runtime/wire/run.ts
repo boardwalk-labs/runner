@@ -25,6 +25,9 @@ export interface Run {
   workflowId: string;
   workflowVersionId: string;
   environmentId: string | null;
+  /** 1-based crash-restart-from-top counter (context.attempt). Optional: an older backend's
+   *  claim payload may predate the column; the honest fallback is 1. */
+  attempt?: number;
   parentRunId: string | null;
   actor: RunActor;
   triggerKind: string;

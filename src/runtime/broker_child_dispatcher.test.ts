@@ -31,7 +31,10 @@ describe("BrokerChildDispatcher.call", () => {
       client: client({ startChild, getChild }),
       sleep: noSleep,
     });
-    expect(await d.call("child-wf", { x: 1 }, undefined)).toEqual({ ok: 1 });
+    expect(await d.call("child-wf", { x: 1 }, undefined)).toEqual({
+      output: { ok: 1 },
+      outputSchema: null,
+    });
     expect(getChild).not.toHaveBeenCalled(); // no poll needed
   });
 
@@ -47,7 +50,10 @@ describe("BrokerChildDispatcher.call", () => {
       client: client({ startChild, getChild }),
       sleep: noSleep,
     });
-    expect(await d.call("child-wf", null, undefined)).toEqual({ done: true });
+    expect(await d.call("child-wf", null, undefined)).toEqual({
+      output: { done: true },
+      outputSchema: null,
+    });
     expect(getChild).toHaveBeenCalledTimes(2);
   });
 

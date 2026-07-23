@@ -50,9 +50,13 @@ describe("runShell", () => {
 
   it("merges env over the process env", async () => {
     const ws = await mkTmp();
-    const result = await runShell("echo $BW_SHELL_TEST_VAR", { env: { BW_SHELL_TEST_VAR: "v1" } }, {
-      workspaceRoot: ws,
-    });
+    const result = await runShell(
+      "echo $BW_SHELL_TEST_VAR",
+      { env: { BW_SHELL_TEST_VAR: "v1" } },
+      {
+        workspaceRoot: ws,
+      },
+    );
     expect(result.stdout.trim()).toBe("v1");
   });
 
@@ -90,7 +94,10 @@ describe("runShell", () => {
   it("kills the command and rejects with the abort reason when the run is cancelled mid-flight", async () => {
     const ws = await mkTmp();
     const controller = new AbortController();
-    const running = runShell("sleep 5", undefined, { workspaceRoot: ws, signal: controller.signal });
+    const running = runShell("sleep 5", undefined, {
+      workspaceRoot: ws,
+      signal: controller.signal,
+    });
     setTimeout(() => {
       controller.abort(new RunAbortedError("cancelled"));
     }, 30);

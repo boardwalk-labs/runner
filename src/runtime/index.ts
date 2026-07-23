@@ -45,7 +45,7 @@ import type { Run } from "./wire/run.js";
 import type { WorkflowManifest } from "./wire/manifest.js";
 import { RecordingSecretResolver } from "./recording_secret_resolver.js";
 import { EngineLeafExecutor } from "./leaf_executor.js";
-import { BudgetGate, type BudgetClearancePort } from "./budget_gate.js";
+import { BudgetGate, ComputeBreachWatcher, type BudgetClearancePort } from "./budget_gate.js";
 import { parseByoProviders } from "./direct_inference.js";
 import {
   applyIdentityToEnv,
@@ -349,10 +349,11 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     // it). Workspace-rooted at the same `/workspace` the leaf + tools use. Closed on the run's teardown
     // (returned below as `lsp` → program_worker's finally) so no language-server process leaks.
     const lspService = new LspService({ workspaceDir: runtime.workspaceRoot });
-    // Budget gate (docs/SUSPEND_POLICY.md Decision 3): a `max_usd` breach PARKS the run for approval
-    // instead of failing it. The gate needs the HOST (to park) but the host is constructed below with
-    // `leaf` — a genuine cycle, broken with a late-bound ref: `clear()` only ever runs mid-run, long
-    // after both exist. Wired to `budgetHost` immediately after the host is built.
+    // Budget gate (docs/SUSPEND_POLICY.md Decision 3): a breach of ANY budget cap (`max_usd` /
+    // `max_tokens` / `max_compute_seconds`) PARKS the run for approval instead of failing it. The
+    // gate needs the HOST (to park) but the host is constructed below with `leaf` — a genuine
+    // cycle, broken with a late-bound ref: `clear()` only ever runs mid-run, long after both exist.
+    // Wired to `budgetHost` immediately after the host is built.
     let budgetHost: BudgetClearancePort | null = null;
     const budgetGate = new BudgetGate(budget, {
       budgetClearance: (gate) => {
@@ -365,6 +366,13 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
         return budgetHost.budgetClearance(gate);
       },
     });
+    // Compute burns continuously (unlike usd/tokens, which only move at model calls), so a
+    // `max_compute_seconds` breach between seams is DETECTED on this timer and logged; the park
+    // itself lands at the run's next capability seam (see the watcher's doc block for why a
+    // timer-initiated park needs fleet-host coordination that doesn't exist yet). Stopped by the
+    // orchestrator on every terminal path via the returned `budgetWatch` handle.
+    const computeWatch = new ComputeBreachWatcher(budget, { runId: run.id });
+    computeWatch.start();
     const leaf = new EngineLeafExecutor({
       inference: broker,
       // Direct BYO (D7): the claim's registry + the run's RECORDING resolver, so a provider key
@@ -533,10 +541,12 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       phases: phaseTracker,
       // The protocol's `shell` capability: host-side execution in the run's workspace (the old
       // in-process execSync moved behind the wire with the redesign).
-      shell: (cmd, opts) =>
-        runShell(cmd, opts, { workspaceRoot: runtime.workspaceRoot, signal }),
+      shell: (cmd, opts) => runShell(cmd, opts, { workspaceRoot: runtime.workspaceRoot, signal }),
       // Live budget state for `usage.get` — read off the run-level meter (run-cumulative).
       usage: () => budget.usageSnapshot(),
+      // Budget clearance at the host's blocking/spending seams (sleep/shell/workflows.call): the
+      // park points for a compute breach that lands between model calls.
+      budgetGate,
     });
     // Close the budget gate's cycle: the leaf (built above) parks THROUGH the host (built just now).
     budgetHost = host;
@@ -588,6 +598,11 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
             redactor.record(wake.api_token);
           }
           activeFlusher?.excludeIdle(wake.wall_clock_ms - freezeWallMs);
+          // The budget meter excludes the same frozen window: `max_compute_seconds` is ACTIVE
+          // on-CPU compute by definition (it "EXCLUDES sleep/wait" — the manifest schema's own
+          // words), so a sleep/humanInput/child-wait freeze must not count toward the cap any
+          // more than it counts toward billing.
+          budget.excludeIdle(wake.wall_clock_ms - freezeWallMs);
           // Only now that the frozen window is excluded may the flush timer run again.
           activeFlusher?.resume();
           // Resume capture in a fresh segment epoch (a suspend/resume boundary is a segment boundary).
@@ -616,6 +631,9 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       setProgramDir: (dir: string) => {
         programDir = dir;
       },
+      // The orchestrator stops the compute-breach watcher on every terminal path (the interval is
+      // unref'd, so this is hygiene, not liveness).
+      budgetWatch: { stop: () => computeWatch.stop() },
       // Always present now: hydrate must run BEFORE the program, but whether anything compounds
       // isn't known until the run's agent() calls have registered their memory dirs. A run that
       // selects nothing persists nothing and pays for nothing (WorkspaceStore.persist returns early).
@@ -648,7 +666,15 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
         // lifecycle transition the claim IS — the wire's `running` frame.
         runEvents.resumeAfter(claimed.lastEventCursor);
         runEvents.emit({ kind: "run_status", status: "running" });
-        return claimed.run;
+        return {
+          run: claimed.run,
+          context: {
+            ...(claimed.workflowVersion !== undefined
+              ? { workflowVersion: claimed.workflowVersion }
+              : {}),
+            ...(claimed.environment !== undefined ? { environment: claimed.environment } : {}),
+          },
+        };
       },
     },
     versions: {

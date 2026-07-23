@@ -17,6 +17,17 @@ import { AppError, ErrorCode } from "../support/index.js";
 import type { UsageSnapshot } from "@boardwalk-labs/workflow/runtime";
 import type { Budget } from "../wire/manifest.js";
 
+/** The three capped budget dimensions. Each parks at the budget gate on breach (SUSPEND_POLICY
+ *  Decision 3); `capBreachReason()` reports the first breached one. */
+export type BudgetDimension = "usd" | "tokens" | "compute";
+
+/** The manifest budget field each dimension caps. */
+const CAP_FIELD: Record<BudgetDimension, keyof Budget> = {
+  usd: "max_usd",
+  tokens: "max_tokens",
+  compute: "max_compute_seconds",
+};
+
 /** Per-million-token rates. */
 export interface ModelRate {
   /** USD per million input tokens. */
@@ -88,10 +99,14 @@ export interface BudgetSnapshot {
 }
 
 export class BudgetMeter {
-  /** NOT readonly: a budget gate (docs/SUSPEND_POLICY.md Decision 3) raises `max_usd` in place when a
-   *  responder approves more spend. The meter lives in the frozen heap, so the wake mutates this
-   *  instance and the blocked model call proceeds against the new cap. */
+  /** NOT readonly: the budget gate (docs/SUSPEND_POLICY.md Decision 3) raises a breached cap in
+   *  place when a responder approves more spend — on any dimension. The meter lives in the frozen
+   *  heap, so the wake mutates this instance and the blocked call proceeds against the new cap. */
   private budget: Budget | undefined;
+  /** Wall-clock ms excluded from the compute cap — time the run spent PARKED at the budget gate
+   *  (frozen or held). Parked time burns no `max_compute_seconds` (SUSPEND_POLICY Decision 3.4);
+   *  without this exclusion a compute park would instantly re-breach on wake, forever. */
+  private excludedIdleMs = 0;
   private readonly rate: ModelRate;
   private readonly startedAt: number;
   private readonly prior: PriorUsage;
@@ -140,8 +155,16 @@ export class BudgetMeter {
       cacheWriteTokens: this.cacheWriteTokens,
       totalTokens: this.inputTokens + this.outputTokens,
       totalUsd: this.totalUsd,
-      elapsedMs: this.now() - this.startedAt,
+      elapsedMs: Math.max(0, this.now() - this.startedAt - this.excludedIdleMs),
     };
+  }
+
+  /** Exclude `ms` of wall-clock from the compute cap — the budget gate's park window (mirrors
+   *  RuntimeFlusher.excludeIdle for billing). Called by the gate after every park, whichever
+   *  substrate: on the snapshot fleet the guest clock resyncs on wake so the measured park spans
+   *  the frozen window; on a hold substrate it spans the register-and-poll wait. */
+  excludeIdle(ms: number): void {
+    if (ms > 0) this.excludedIdleMs += ms;
   }
 
   /**
@@ -207,31 +230,41 @@ export class BudgetMeter {
   }
 
   /**
-   * Predicate variant for callers that prefer to handle the cap-hit path
-   * inline (e.g., the sleep tool rejects a sleep that would breach the
-   * duration cap). Returns the first breach reason or null.
-   */
-  /**
-   * Raise the `max_usd` cap to `usd` — the budget gate's approval path (docs/SUSPEND_POLICY.md
+   * Raise `dimension`'s cap to `value` — the budget gate's approval path (docs/SUSPEND_POLICY.md
    * Decision 3). Only ever RAISES: a value at or below the current cap is ignored, so an approval
    * can't silently tighten a cap and re-park the run on the very next call. A no-op when the
    * workflow declared no budget (nothing to breach). Returns the cap now in force, or null when
    * there is no budget.
    */
-  raiseUsdCap(usd: number): number | null {
+  raiseCap(dimension: BudgetDimension, value: number): number | null {
     if (this.budget === undefined) return null;
-    const current = this.budget.max_usd;
-    if (current !== undefined && usd <= current) return current;
-    this.budget = { ...this.budget, max_usd: usd };
-    return usd;
+    const field = CAP_FIELD[dimension];
+    const current = this.budget[field];
+    if (current !== undefined && value <= current) return current;
+    this.budget = { ...this.budget, [field]: value };
+    return value;
   }
 
-  /** The `max_usd` cap in force, or null when unset. The gate prompt reports it alongside spend. */
-  usdCap(): number | null {
-    return this.budget?.max_usd ?? null;
+  /** The cap in force for `dimension`, or null when unset. The gate prompt reports it beside spend. */
+  cap(dimension: BudgetDimension): number | null {
+    return this.budget?.[CAP_FIELD[dimension]] ?? null;
   }
 
-  capBreachReason(): "tokens" | "usd" | "compute" | null {
+  /** What `dimension` has consumed so far, on the SAME run-cumulative basis cap enforcement uses
+   *  (usd = real-cost dollars, tokens = conversation tokens, compute = active seconds). */
+  spent(dimension: BudgetDimension): number {
+    const snap = this.cumulative();
+    if (dimension === "usd") return snap.totalUsd;
+    if (dimension === "tokens") return snap.totalTokens;
+    return Math.floor(snap.elapsedMs / 1000);
+  }
+
+  /**
+   * Predicate variant of {@link assertWithinCaps} for callers that handle the cap-hit path inline
+   * (the budget gate parks on it; the legacy no-gate path throws on it). Returns the first breach
+   * dimension or null.
+   */
+  capBreachReason(): BudgetDimension | null {
     try {
       this.assertWithinCaps();
       return null;
@@ -242,7 +275,7 @@ export class BudgetMeter {
         err.detail !== null &&
         "kind" in err.detail
       ) {
-        return (err.detail as { kind: "tokens" | "usd" | "compute" }).kind;
+        return (err.detail as { kind: BudgetDimension }).kind;
       }
       throw err;
     }

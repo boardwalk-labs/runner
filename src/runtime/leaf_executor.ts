@@ -77,14 +77,17 @@ export interface EngineLeafExecutorDeps {
    *  breach so the loop terminates mid-flight (the budget authority). */
   budget: BudgetMeter;
   /**
-   * Budget clearance, awaited before EVERY model call (docs/SUSPEND_POLICY.md Decision 3). When the
-   * run's `max_usd` cap is breached this PARKS the run at a gate — the engine just sees a model call
-   * that took a long time, because the VM froze and resumed underneath it — and resolves once a
-   * responder raises the cap. Rejects with `BudgetGateCancelled` if they decline.
+   * Budget clearance, awaited before EVERY model call (docs/SUSPEND_POLICY.md Decision 3). When ANY
+   * of the run's budget caps (`max_usd` / `max_tokens` / `max_compute_seconds`) is breached this
+   * PARKS the run at a gate — the engine just sees a model call that took a long time, because the
+   * VM froze and resumed underneath it — and resolves once a responder raises the breached cap.
+   * Rejects with `BudgetGateCancelled` if they decline.
    *
    * Why here and not at the `reportUsage` breach check below: that callback is synchronous and fires
    * mid-turn, and per SUSPEND_POLICY Decision 1 a partial turn is never discarded. The model-call
    * boundary is the first safe place to park, which bounds overrun at one in-flight turn per leaf.
+   * (The workflow host adds further park points at its `sleep`/`shell`/`workflows.call` seams for
+   * the continuously-burning compute cap.)
    *
    * Absent ⇒ the legacy behavior: a breach fails the run at `reportUsage`.
    */
@@ -273,9 +276,14 @@ export class EngineLeafExecutor implements LeafExecutor {
         sink.emit(toRunEventBody(body, identity), turnId);
       },
 
-      // Usage flows to the budget authority after EVERY model call. Feed the run-level meter and, if
-      // a cap is now breached, THROW — the engine loop propagates it and the run fails BUDGET_EXCEEDED
-      // before another model call is dispatched. Also fire per-leaf, per-model metering to the broker.
+      // Usage flows to the budget authority after EVERY model call. Feed the run-level meter; what a
+      // breach then does depends on whether the budget gate is wired. With a gate (production): do
+      // NOT throw — the in-flight turn completes (its tools run; SUSPEND_POLICY Decision 1 never
+      // discards a partial turn) and the run PARKS at its next park point (the next `streamModel`
+      // clearance, or a host capability seam). Without a gate (legacy/test paths): THROW — the
+      // engine loop propagates it and the run fails BUDGET_EXCEEDED before another model call is
+      // dispatched. On the gate path the breach turn ALSO meters to the broker below — its tokens
+      // were genuinely spent and must be billed (the old always-throw path silently skipped that).
       reportUsage: (modelRefForUsage: string, usage: TokenUsage): void => {
         const delta = toUsageDelta(usage);
         // Cap on the turn's REAL upstream cost when the broker reported one (the result frame's
@@ -286,7 +294,7 @@ export class EngineLeafExecutor implements LeafExecutor {
         pendingCostMicros = null;
         this.deps.budget.addUsage(delta, realCostUsd);
         const breach = this.deps.budget.capBreachReason();
-        if (breach !== null) {
+        if (breach !== null && this.deps.budgetGate === undefined) {
           throw new EngineError(
             "BUDGET_EXCEEDED",
             `agent() leaf exceeded the run budget cap (${breach})`,

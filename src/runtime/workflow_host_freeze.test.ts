@@ -11,9 +11,15 @@ import type { SuspendSignal } from "./suspension.js";
 
 function childStub(over: Partial<ChildDispatcher> = {}): ChildDispatcher {
   return {
-    call: () => Promise.resolve({ ok: true }),
+    call: () => Promise.resolve({ output: { ok: true }, outputSchema: null }),
+    poll: () => Promise.resolve(null),
     start: () =>
-      Promise.resolve({ childRunId: "child_1", status: "completed", output: { ok: true } }),
+      Promise.resolve({
+        childRunId: "child_1",
+        status: "completed",
+        output: { ok: true },
+        outputSchema: null,
+      }),
     run: () => Promise.resolve("run_1"),
     schedule: () => Promise.resolve("sched_1"),
     ...over,
@@ -161,7 +167,13 @@ describe("WorkerWorkflowHost freeze mode", () => {
 
   it("a child wait freezes and resolves from the wake's finalized child", async () => {
     const children = childStub({
-      start: () => Promise.resolve({ childRunId: "child_9", status: "running", output: undefined }),
+      start: () =>
+        Promise.resolve({
+          childRunId: "child_9",
+          status: "running",
+          output: undefined,
+          outputSchema: null,
+        }),
     });
     const { host, freeze, requests } = makeFrozenHost({ children });
     const frozenHost = new WorkerWorkflowHost({
@@ -181,12 +193,18 @@ describe("WorkerWorkflowHost freeze mode", () => {
       kind: "workflow_call",
       child: { run_id: "child_9", status: "completed", output: { answer: 42 } },
     });
-    await expect(call).resolves.toEqual({ answer: 42 });
+    await expect(call).resolves.toEqual({ output: { answer: 42 }, outputSchema: null });
   });
 
   it("a failed child surfaces as the seam's error after the wake", async () => {
     const children = childStub({
-      start: () => Promise.resolve({ childRunId: "child_9", status: "running", output: undefined }),
+      start: () =>
+        Promise.resolve({
+          childRunId: "child_9",
+          status: "running",
+          output: undefined,
+          outputSchema: null,
+        }),
     });
     const { freeze } = makeFrozenHost();
     const host = new WorkerWorkflowHost({

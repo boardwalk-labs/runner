@@ -5,17 +5,15 @@
 //
 // The SDK's `contextDataSchema` is the wire shape (camelCase top-level, snake_case inside
 // `actor`); the client builds the live frozen `Context` from it, synthesizing `signal` from the
-// host's `cancel` notification. This module is PURE — it maps what the claim payload carries
-// TODAY onto the frozen v1 field set, with honest fallbacks (logged) for the fields the payload
-// does not yet deliver:
+// host's `cancel` notification. This module is PURE — the claim payload delivers
+// `workflowVersion` (the sequential int), `environment {id, name} | null`, and `run.attempt`
+// (P3.7, backend `d173e8f5`); each keeps an honest, LOGGED fallback for an older backend whose
+// claim predates the field (version-skew tolerance, not a design gap):
 //
-//   - `workflowVersion` — the claim carries only the version ULID, not the sequential int.
-//     Fallback 1 + a warning; the backend must add the int to the claim/version payload.
-//   - `environment` — the claim carries `environmentId` but no name, and the schema's shape is
-//     `{id, name} | null`. Rather than fabricate a name, fall back to `null` + a warning; the
-//     backend must deliver `{id, name}` on the claim.
-//   - `attempt` — needs the net-new crash-restart counter column on `runs`; until the claim
-//     carries it the honest fallback is 1 (`dispatch_attempts` is a different thing).
+//   - `workflowVersion` absent/null → 1 + a warning.
+//   - `environment` absent → `null` + a warning (a PRESENT `null` is the real org-base value —
+//     no warning).
+//   - `run.attempt` absent → 1 + a warning (`dispatch_attempts` is a different thing).
 //   - `trigger.firedAt` — approximated by the run row's `createdAt` (when the platform created
 //     the run IS when it fired it, for every current trigger path).
 
@@ -56,28 +54,52 @@ function triggerSource(actor: RunActor): string | undefined {
   }
 }
 
+/** The claim-payload siblings of the run row that feed `context` (P3.7). Fields are optional so
+ *  an older backend's claim (predating them) degrades to the logged fallbacks. */
+export interface ClaimContextExtras {
+  workflowVersion?: number | null;
+  environment?: { id: string; name: string } | null;
+}
+
 /** Build the bootstrap `context` data for a claimed run. Pure; fallbacks are logged, never thrown. */
-export function buildContextData(run: Run, workspaceRoot: string): ContextData {
-  // The claim payload has no sequential version int yet (only the version ULID) — backend gap.
-  log.warn("context_workflow_version_unavailable", {
-    runId: run.id,
-    workflowVersionId: run.workflowVersionId,
-  });
-  if (run.environmentId !== null) {
-    // The claim payload has no environment NAME yet; `{id, name} | null` can't be built honestly.
-    log.warn("context_environment_name_unavailable", {
+export function buildContextData(
+  run: Run,
+  workspaceRoot: string,
+  extras: ClaimContextExtras = {},
+): ContextData {
+  let workflowVersion = extras.workflowVersion ?? null;
+  if (workflowVersion === null) {
+    // Older backend (field absent) or a backend integrity anomaly (explicit null) — fall back.
+    log.warn("context_workflow_version_unavailable", {
       runId: run.id,
-      environmentId: run.environmentId,
+      workflowVersionId: run.workflowVersionId,
     });
+    workflowVersion = 1;
+  }
+  let environment: { id: string; name: string } | null;
+  if (extras.environment !== undefined) {
+    environment = extras.environment; // null here is the REAL org-base value.
+  } else {
+    environment = null;
+    if (run.environmentId !== null) {
+      // Older backend: an environment was selected but the claim carries no name.
+      log.warn("context_environment_name_unavailable", {
+        runId: run.id,
+        environmentId: run.environmentId,
+      });
+    }
+  }
+  if (run.attempt === undefined) {
+    log.warn("context_attempt_unavailable", { runId: run.id });
   }
   return {
     runId: run.id,
     workflowId: run.workflowId,
-    workflowVersion: 1,
+    workflowVersion,
     orgId: run.orgId,
-    environment: null,
+    environment,
     actor: toActor(run.actor),
-    attempt: 1,
+    attempt: run.attempt ?? 1,
     trigger: {
       kind: triggerKind(run),
       firedAt: run.createdAt,

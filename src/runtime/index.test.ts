@@ -224,7 +224,7 @@ describe("assembleWorkerDeps — Runner Control API (the Runner Credential Broke
     const version = await deps.versions.getById("any-version-id");
     await deps.finalizer.finalize("run-test", "completed", null);
 
-    expect(claimed?.id).toBe("01H_run");
+    expect(claimed?.run.id).toBe("01H_run");
     expect(version).toEqual({
       manifest: { name: "demo" },
       program: {

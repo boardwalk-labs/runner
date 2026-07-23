@@ -78,11 +78,20 @@ export interface ScheduleOptions {
   idempotencyKey?: string;
 }
 
-/** A child run's terminal-relevant state, as the start/poll seams return it. */
+/** A child run's terminal-relevant state, as the start/poll seams return it. `outputSchema` is
+ *  the callee's PINNED version's stored `output_schema` (what lets the SDK revive a typed child's
+ *  return); null = untyped callee or a payload that predates the field. */
 export interface ChildResult {
   childRunId: string;
   status: string;
   output: unknown;
+  outputSchema: Record<string, unknown> | null;
+}
+
+/** What `workflows.call` resolves: the completed child's output + the callee's output schema. */
+export interface ChildCallOutput {
+  output: unknown;
+  outputSchema: Record<string, unknown> | null;
 }
 
 /** Dispatches child runs: `call` holds in-process + returns the completed child's output (the
@@ -96,7 +105,11 @@ export interface ChildDispatcher {
     input: unknown,
     opts: CallOptions | undefined,
     signal?: AbortSignal,
-  ): Promise<unknown>;
+  ): Promise<ChildCallOutput>;
+  /** Poll a child run's current state (used by the freeze-wake path to fetch the callee's
+   *  output schema — the wake payload carries the output but not the schema); null = not this
+   *  run's child. */
+  poll(childRunId: string): Promise<ChildResult | null>;
   /** Start (or idempotently re-attach to) a child run; resolves its current state. */
   start(
     slug: string,
@@ -250,6 +263,16 @@ export interface WorkerWorkflowHostDeps {
   /** Live budget state for `usage.get` (the BudgetMeter's usageSnapshot in production). Absent ⇒
    *  `usage.get()` is unsupported in this runtime and rejects clearly. */
   usage?: () => UsageSnapshot;
+  /**
+   * Budget clearance (docs/SUSPEND_POLICY.md Decision 3), awaited at the host's blocking/spending
+   * capability seams — `sleep`, `shell`, `workflows.call` — in addition to the leaf executor's
+   * `streamModel` seam. `usd`/`tokens` only move at model calls, but `max_compute_seconds` burns
+   * continuously, so a breach between model calls parks at whichever capability the program touches
+   * next (the park-at-next-seam contract; see budget_gate.ts). Runs INSIDE `guarded()` so the park's
+   * `budgetClearance` work-accounting (endWork around the freeze wait) balances, exactly like the
+   * leaf seam. Absent ⇒ no host-seam parks (tests / legacy paths).
+   */
+  budgetGate?: { clear(): Promise<void> };
 }
 
 export class WorkerWorkflowHost {
@@ -534,8 +557,10 @@ export class WorkerWorkflowHost {
 
   /**
    * Park the run at a BUDGET gate and resolve with the responder's answer (docs/SUSPEND_POLICY.md
-   * Decision 3). Called by the leaf executor's `streamModel` seam when the run's `max_usd` cap is
-   * breached, i.e. from INSIDE an in-flight `agent()` — which drives two deliberate differences from
+   * Decision 3). Called when any budget cap (`max_usd` / `max_tokens` / `max_compute_seconds`) is
+   * breached — by the leaf executor's `streamModel` seam (from INSIDE an in-flight `agent()`) and by
+   * the host's own `sleep`/`shell`/`workflows.call` seams (from inside their `guarded()` bodies).
+   * Either way the caller is already work-tracked, which drives two deliberate differences from
    * {@link humanInputSeam}:
    *
    *  - **No `guarded()` wrapper.** The enclosing `agent()` seam already counted this leaf as work via
@@ -573,8 +598,17 @@ export class WorkerWorkflowHost {
     return ms === null ? null : this.now() + ms;
   }
 
-  callWorkflow(slug: string, input: unknown, opts: CallOptions | undefined): Promise<unknown> {
-    return this.guarded(() => this.callWorkflowSeam(slug, input, opts));
+  callWorkflow(
+    slug: string,
+    input: unknown,
+    opts: CallOptions | undefined,
+  ): Promise<ChildCallOutput> {
+    return this.guarded(async () => {
+      // Park BEFORE dispatching the child: a budget-breached parent doesn't get to spawn more
+      // (org-billed) work until a responder clears the breach.
+      await this.deps.budgetGate?.clear();
+      return this.callWorkflowSeam(slug, input, opts);
+    });
   }
 
   /** The `workflows.call` seam: start the child once (idempotently — the child's run row is the
@@ -585,14 +619,15 @@ export class WorkerWorkflowHost {
     slug: string,
     input: unknown,
     opts: CallOptions | undefined,
-  ): Promise<unknown> {
+  ): Promise<ChildCallOutput> {
     const freeze = this.deps.freeze;
     if (freeze === undefined) {
       // Hold path: the dispatcher's in-process hold-and-poll until the child is terminal.
       return this.deps.children.call(slug, input, opts, this.deps.signal);
     }
     const child = await this.deps.children.start(slug, input, opts, this.deps.signal);
-    if (child.status === "completed") return child.output;
+    if (child.status === "completed")
+      return { output: child.output, outputSchema: child.outputSchema };
     if (child.status === "failed" || child.status === "cancelled") {
       throw new AppError(
         ErrorCode.VALIDATION_FAILED,
@@ -623,7 +658,18 @@ export class WorkerWorkflowHost {
         { kind: "wake_mismatch", childRunId: child.childRunId },
       );
     }
-    if (woken.status === "completed") return woken.output;
+    if (woken.status === "completed") {
+      // The wake payload carries the finalized child's OUTPUT but not the callee's schema; one
+      // post-wake poll fetches it so a typed child's return still revives. Best-effort: a poll
+      // failure degrades to plain JSON (null schema), never fails the parent.
+      let outputSchema: Record<string, unknown> | null = null;
+      try {
+        outputSchema = (await this.deps.children.poll(woken.run_id))?.outputSchema ?? null;
+      } catch {
+        outputSchema = null;
+      }
+      return { output: woken.output, outputSchema };
+    }
     throw new AppError(
       ErrorCode.VALIDATION_FAILED,
       `Called workflow "${slug}" ${woken.status} (run ${woken.run_id})`,
@@ -708,7 +754,12 @@ export class WorkerWorkflowHost {
   }
 
   sleep(arg: SleepArg): Promise<void> {
-    return this.guarded(() => this.sleepSeam(arg));
+    return this.guarded(async () => {
+      // A compute-breached run parks HERE rather than sleeping first and parking later — no forward
+      // progress while a budget cap is breached (the budget-gate park-at-next-seam contract).
+      await this.deps.budgetGate?.clear();
+      return this.sleepSeam(arg);
+    });
   }
 
   /** A short sleep HOLDS the task in-process (cheaper than a snapshot round-trip); a long one
@@ -754,6 +805,8 @@ export class WorkerWorkflowHost {
       if (this.deps.shell === undefined) {
         throw new AppError(ErrorCode.VALIDATION_FAILED, "shell is not available in this runtime");
       }
+      // Compute burns hardest in long shell commands — a breach parks before starting another one.
+      await this.deps.budgetGate?.clear();
       return await this.deps.shell(cmd, opts);
     });
   }

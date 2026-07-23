@@ -126,7 +126,10 @@ function harness(
   let phaseActive = false;
 
   const runs: RunClaimer = {
-    claimForWorker: () => Promise.resolve(over.claim === undefined ? fakeRun() : over.claim),
+    claimForWorker: () => {
+      const run = over.claim === undefined ? fakeRun() : over.claim;
+      return Promise.resolve(run === null ? null : { run, context: {} });
+    },
   };
   // The program the worker fetches + verifies + runs: a per-test custom one, or the default leaf.
   const artifact =

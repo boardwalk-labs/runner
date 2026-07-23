@@ -102,6 +102,10 @@ export interface BrokerChild {
   childRunId: string;
   status: string;
   output: unknown;
+  /** The callee's PINNED version's stored `output_schema` — what lets the SDK revive a typed
+   *  child's return. `null` = untyped callee; `undefined` = a non-terminal poll, a null output,
+   *  or an older backend that predates the field. */
+  outputSchema?: Record<string, unknown> | null;
 }
 
 export class RunnerControlClient {
@@ -193,7 +197,17 @@ export class RunnerControlClient {
   async claim(
     workerId: string,
     leaseSeconds: number,
-  ): Promise<{ run: Run; lastEventCursor: number } | null> {
+  ): Promise<{
+    run: Run;
+    lastEventCursor: number;
+    /** The pinned version's SEQUENTIAL int (context.workflowVersion). `undefined` = an older
+     *  backend that predates the field (fallback 1, warned); `null` = a defensive backend
+     *  integrity anomaly. */
+    workflowVersion?: number | null;
+    /** The run's selected environment (context.environment). `undefined` = an older backend;
+     *  `null` = org base (or a deleted environment) — a REAL value, no fallback needed. */
+    environment?: { id: string; name: string } | null;
+  } | null> {
     const res = await this.controlFetch(this.url("claim"), {
       method: "POST",
       headers: this.headers(true),
@@ -204,10 +218,14 @@ export class RunnerControlClient {
     const body = (await res.json()) as {
       run: Run;
       lastEventCursor?: number;
+      workflowVersion?: number | null;
+      environment?: { id: string; name: string } | null;
     };
     return {
       run: body.run,
       lastEventCursor: body.lastEventCursor ?? 0,
+      ...(body.workflowVersion !== undefined ? { workflowVersion: body.workflowVersion } : {}),
+      ...(body.environment !== undefined ? { environment: body.environment } : {}),
     };
   }
 
@@ -552,16 +570,24 @@ export class RunnerControlClient {
   }
 
   /** Poll a child run's status/output, or null when it isn't this run's child (404). */
-  async getChild(
-    childRunId: string,
-  ): Promise<{ id: string; status: string; output: unknown } | null> {
+  async getChild(childRunId: string): Promise<{
+    id: string;
+    status: string;
+    output: unknown;
+    outputSchema?: Record<string, unknown> | null;
+  } | null> {
     const res = await this.controlFetch(this.url(`children/${encodeURIComponent(childRunId)}`), {
       method: "GET",
       headers: this.headers(false),
     });
     if (res.status === 404) return null;
     if (res.status !== 200) throw await brokerError(res, "children-get");
-    return (await res.json()) as { id: string; status: string; output: unknown };
+    return (await res.json()) as {
+      id: string;
+      status: string;
+      output: unknown;
+      outputSchema?: Record<string, unknown> | null;
+    };
   }
 
   /**

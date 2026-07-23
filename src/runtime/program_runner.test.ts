@@ -253,9 +253,14 @@ describe("runWorkflowProgram — run(input, context) invocation (P3)", () => {
         await sleep(5000);
       }
     `;
-    const res = await runSource("run_1", source, { name: "world" }, {
-      capabilities: rec.capabilities,
-    });
+    const res = await runSource(
+      "run_1",
+      source,
+      { name: "world" },
+      {
+        capabilities: rec.capabilities,
+      },
+    );
 
     expect(res.kind).toBe("completed");
     expect(outputOf(res)).toBeNull();
@@ -302,9 +307,14 @@ describe("runWorkflowProgram — run(input, context) invocation (P3)", () => {
         return { isDate: input.when instanceof Date, raw: input.when };
       }
     `;
-    const res = await runSource("run_untyped", source, { when: "2026-01-02T03:04:05.000Z" }, {
-      capabilities: recordingCapabilities().capabilities,
-    });
+    const res = await runSource(
+      "run_untyped",
+      source,
+      { when: "2026-01-02T03:04:05.000Z" },
+      {
+        capabilities: recordingCapabilities().capabilities,
+      },
+    );
     expect(outputOf(res)).toEqual({ isDate: false, raw: "2026-01-02T03:04:05.000Z" });
   });
 
@@ -337,9 +347,14 @@ describe("runWorkflowProgram — run(input, context) invocation (P3)", () => {
   });
 
   it("accepts a run() declaring fewer params (Lambda-style, optional from the right)", async () => {
-    const res = await runSource("run_zeroary", `export default function run() { return 7; }`, null, {
-      capabilities: recordingCapabilities().capabilities,
-    });
+    const res = await runSource(
+      "run_zeroary",
+      `export default function run() { return 7; }`,
+      null,
+      {
+        capabilities: recordingCapabilities().capabilities,
+      },
+    );
     expect(outputOf(res)).toBe(7);
   });
 
@@ -348,12 +363,17 @@ describe("runWorkflowProgram — run(input, context) invocation (P3)", () => {
     const source = `
       export default async function run(input) { return { echoed: input, label: "done" }; }
     `;
-    const res = await runSource("run_out", source, { n: 7 }, {
-      capabilities: recordingCapabilities().capabilities,
-      onOutput: (value) => {
-        outputs.push(value);
+    const res = await runSource(
+      "run_out",
+      source,
+      { n: 7 },
+      {
+        capabilities: recordingCapabilities().capabilities,
+        onOutput: (value) => {
+          outputs.push(value);
+        },
       },
-    });
+    );
     expect(res.kind).toBe("completed");
     expect(outputOf(res)).toEqual({ echoed: { n: 7 }, label: "done" });
     expect(outputs).toEqual([{ echoed: { n: 7 }, label: "done" }]);
@@ -361,12 +381,17 @@ describe("runWorkflowProgram — run(input, context) invocation (P3)", () => {
 
   it("persists null (and fires no onOutput) for a void return", async () => {
     const outputs: unknown[] = [];
-    const res = await runSource("run_void", `export default async function run() {}`, {}, {
-      capabilities: recordingCapabilities().capabilities,
-      onOutput: (value) => {
-        outputs.push(value);
+    const res = await runSource(
+      "run_void",
+      `export default async function run() {}`,
+      {},
+      {
+        capabilities: recordingCapabilities().capabilities,
+        onOutput: (value) => {
+          outputs.push(value);
+        },
       },
-    });
+    );
     expect(res.kind).toBe("completed");
     expect(outputOf(res)).toBeNull();
     expect(outputs).toEqual([]);
@@ -378,30 +403,42 @@ describe("runWorkflowProgram — run(input, context) invocation (P3)", () => {
         return { when: new Date("2026-01-02T03:04:05.000Z") };
       }
     `;
-    const res = await runSource("run_encode", source, null, {
-      capabilities: recordingCapabilities().capabilities,
-    }, {
-      outputSchema: {
-        type: "object",
-        required: ["when"],
-        properties: { when: { type: "string", format: "date-time" } },
+    const res = await runSource(
+      "run_encode",
+      source,
+      null,
+      {
+        capabilities: recordingCapabilities().capabilities,
       },
-    });
+      {
+        outputSchema: {
+          type: "object",
+          required: ["when"],
+          properties: { when: { type: "string", format: "date-time" } },
+        },
+      },
+    );
     expect(res.kind).toBe("completed");
     expect(outputOf(res)).toEqual({ when: "2026-01-02T03:04:05.000Z" });
   });
 
   it("fails the run (VALIDATION_FAILED + a hint) when the return does not match output_schema", async () => {
     const source = `export default async function run() { return { n: "not-a-number" }; }`;
-    const res = await runSource("run_badout", source, null, {
-      capabilities: recordingCapabilities().capabilities,
-    }, {
-      outputSchema: {
-        type: "object",
-        required: ["n"],
-        properties: { n: { type: "number" } },
+    const res = await runSource(
+      "run_badout",
+      source,
+      null,
+      {
+        capabilities: recordingCapabilities().capabilities,
       },
-    });
+      {
+        outputSchema: {
+          type: "object",
+          required: ["n"],
+          properties: { n: { type: "number" } },
+        },
+      },
+    );
     expect(res.kind).toBe("failed");
     expect(errorOf(res)?.code).toBe("VALIDATION_FAILED");
     expect(errorOf(res)?.message).toMatch(/does not match the workflow's declared output_schema/);

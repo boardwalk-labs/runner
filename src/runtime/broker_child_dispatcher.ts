@@ -7,7 +7,12 @@
 
 import { AppError, ErrorCode, createLogger } from "./support/index.js";
 import type { CallOptions } from "@boardwalk-labs/workflow/runtime";
-import type { ChildDispatcher, ChildResult, ScheduleOptions } from "./workflow_host.js";
+import type {
+  ChildCallOutput,
+  ChildDispatcher,
+  ChildResult,
+  ScheduleOptions,
+} from "./workflow_host.js";
 import type { BrokerScheduleSpec, RunnerControlClient } from "./runner_control_client.js";
 import { throwIfAborted } from "./run_abort.js";
 
@@ -39,13 +44,32 @@ export class BrokerChildDispatcher implements ChildDispatcher {
     input: unknown,
     _opts: CallOptions | undefined,
     signal?: AbortSignal,
-  ): Promise<unknown> {
+  ): Promise<ChildCallOutput> {
     throwIfAborted(signal);
     const child = await this.deps.client.startChild(slug, input);
     if (TERMINAL_CHILD_STATUSES.has(child.status)) {
-      return this.childOutput(slug, child.childRunId, child.status, child.output);
+      return this.childOutput(
+        slug,
+        child.childRunId,
+        child.status,
+        child.output,
+        child.outputSchema,
+      );
     }
     return this.pollToCompletion(slug, child.childRunId, signal);
+  }
+
+  /** Poll a child's current state (the freeze-wake path uses this to fetch the callee's output
+   *  schema); null = not this run's child. */
+  async poll(childRunId: string): Promise<ChildResult | null> {
+    const child = await this.deps.client.getChild(childRunId);
+    if (child === null) return null;
+    return {
+      childRunId: child.id,
+      status: child.status,
+      output: child.output,
+      outputSchema: child.outputSchema ?? null,
+    };
   }
 
   /** Start (or idempotently re-attach to) the child and resolve its CURRENT state — no hold. The
@@ -58,7 +82,12 @@ export class BrokerChildDispatcher implements ChildDispatcher {
   ): Promise<ChildResult> {
     throwIfAborted(signal);
     const child = await this.deps.client.startChild(slug, input);
-    return { childRunId: child.childRunId, status: child.status, output: child.output };
+    return {
+      childRunId: child.childRunId,
+      status: child.status,
+      output: child.output,
+      outputSchema: child.outputSchema ?? null,
+    };
   }
 
   /** Fire-and-forget: create (or re-attach to) the child and return its id without holding. */
@@ -83,7 +112,7 @@ export class BrokerChildDispatcher implements ChildDispatcher {
     slug: string,
     childRunId: string,
     signal?: AbortSignal,
-  ): Promise<unknown> {
+  ): Promise<ChildCallOutput> {
     for (;;) {
       throwIfAborted(signal);
       const child = await this.deps.client.getChild(childRunId);
@@ -94,7 +123,7 @@ export class BrokerChildDispatcher implements ChildDispatcher {
         );
       }
       if (TERMINAL_CHILD_STATUSES.has(child.status)) {
-        return this.childOutput(slug, child.id, child.status, child.output);
+        return this.childOutput(slug, child.id, child.status, child.output, child.outputSchema);
       }
       await this.sleep(this.pollIntervalMs);
       // Re-check after the wait so an abort during the inter-poll sleep stops within one interval.
@@ -103,8 +132,14 @@ export class BrokerChildDispatcher implements ChildDispatcher {
   }
 
   /** A completed child returns its output; a failed/cancelled child rejects the parent's await. */
-  private childOutput(slug: string, childRunId: string, status: string, output: unknown): unknown {
-    if (status === "completed") return output;
+  private childOutput(
+    slug: string,
+    childRunId: string,
+    status: string,
+    output: unknown,
+    outputSchema: Record<string, unknown> | null | undefined,
+  ): ChildCallOutput {
+    if (status === "completed") return { output, outputSchema: outputSchema ?? null };
     log.warn("child_workflow_nonterminal_output", { slug, childRunId, status });
     throw new AppError(
       ErrorCode.INTERNAL_ERROR,

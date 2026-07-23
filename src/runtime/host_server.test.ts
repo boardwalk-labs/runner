@@ -50,7 +50,8 @@ function makeCaps(overrides: Partial<HostCapabilities> = {}): CapsRecorder {
       return fallback(...args);
     };
   const capabilities: HostCapabilities = {
-    agent: overrides.agent ?? record("agent", (prompt: string) => Promise.resolve(`leaf:${prompt}`)),
+    agent:
+      overrides.agent ?? record("agent", (prompt: string) => Promise.resolve(`leaf:${prompt}`)),
     callWorkflow:
       overrides.callWorkflow ??
       record("callWorkflow", () => Promise.resolve({ output: { ok: true }, outputSchema: null })),
@@ -61,7 +62,8 @@ function makeCaps(overrides: Partial<HostCapabilities> = {}): CapsRecorder {
     humanInput:
       overrides.humanInput ??
       record("humanInput", () => Promise.resolve({ value: "approve", isOther: false })),
-    getSecret: overrides.getSecret ?? record("getSecret", (name: string) => Promise.resolve(`sek:${name}`)),
+    getSecret:
+      overrides.getSecret ?? record("getSecret", (name: string) => Promise.resolve(`sek:${name}`)),
     writeArtifact:
       overrides.writeArtifact ??
       record("writeArtifact", (name: string) =>
@@ -70,7 +72,9 @@ function makeCaps(overrides: Partial<HostCapabilities> = {}): CapsRecorder {
     openBrowser: overrides.openBrowser ?? (() => notStubbed("openBrowser")),
     shell:
       overrides.shell ??
-      record("shell", (cmd: string) => Promise.resolve({ exitCode: 0, stdout: `ran:${cmd}`, stderr: "" })),
+      record("shell", (cmd: string) =>
+        Promise.resolve({ exitCode: 0, stdout: `ran:${cmd}`, stderr: "" }),
+      ),
     phase: overrides.phase ?? record("phase", () => undefined),
     idToken: overrides.idToken ?? record("idToken", (aud: string) => Promise.resolve(`jwt:${aud}`)),
     apiToken: overrides.apiToken ?? record("apiToken", () => Promise.resolve("api-token")),

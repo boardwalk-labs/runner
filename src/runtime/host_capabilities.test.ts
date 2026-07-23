@@ -9,14 +9,17 @@ import type { WorkerWorkflowHost } from "./workflow_host.js";
 /** A duck-typed host: the adapter only calls these members. */
 function fakeHost(calls: string[]): WorkerWorkflowHost {
   const record =
-    <T,>(name: string, value: T) =>
+    <T>(name: string, value: T) =>
     (...args: unknown[]): T => {
       calls.push(`${name}:${JSON.stringify(args[0] ?? null)}`);
       return value;
     };
   return {
     agent: record("agent", Promise.resolve("leaf")),
-    callWorkflow: record("callWorkflow", Promise.resolve({ childOut: 1 })),
+    callWorkflow: record(
+      "callWorkflow",
+      Promise.resolve({ output: { childOut: 1 }, outputSchema: { type: "object" } }),
+    ),
     runWorkflow: record("runWorkflow", Promise.resolve("run_2")),
     scheduleWorkflow: record("scheduleWorkflow", Promise.resolve("sched_2")),
     sleep: record("sleep", Promise.resolve(undefined)),
@@ -76,12 +79,12 @@ describe("buildHostCapabilities", () => {
     ]);
   });
 
-  it("returns workflows.call output with an HONEST null output_schema (broker gap)", async () => {
+  it("passes workflows.call output + the callee's output schema through", async () => {
     const calls: string[] = [];
     const caps = buildHostCapabilities(fakeHost(calls));
     const first = await caps.callWorkflow("child", { x: 1 }, undefined);
     const second = await caps.callWorkflow("child", { x: 2 }, undefined);
-    expect(first).toEqual({ output: { childOut: 1 }, outputSchema: null });
-    expect(second.outputSchema).toBeNull();
+    expect(first).toEqual({ output: { childOut: 1 }, outputSchema: { type: "object" } });
+    expect(second.outputSchema).toEqual({ type: "object" });
   });
 });

@@ -29,9 +29,15 @@ import { RunAbortedError } from "./run_abort.js";
  *  only overrides the method it exercises. */
 function childStub(over: Partial<ChildDispatcher> = {}): ChildDispatcher {
   return {
-    call: () => Promise.resolve({ ok: true }),
+    call: () => Promise.resolve({ output: { ok: true }, outputSchema: null }),
+    poll: () => Promise.resolve(null),
     start: () =>
-      Promise.resolve({ childRunId: "child_1", status: "completed", output: { ok: true } }),
+      Promise.resolve({
+        childRunId: "child_1",
+        status: "completed",
+        output: { ok: true },
+        outputSchema: null,
+      }),
     run: () => Promise.resolve("run_1"),
     schedule: () => Promise.resolve("sched_1"),
     ...over,
@@ -59,6 +65,7 @@ function makeHost(
     browserSessions: BrowserSessionManager;
     shell: NonNullable<WorkerWorkflowHostDeps["shell"]>;
     usage: NonNullable<WorkerWorkflowHostDeps["usage"]>;
+    budgetGate: NonNullable<WorkerWorkflowHostDeps["budgetGate"]>;
   }> = {},
 ): { host: WorkerWorkflowHost; held: number[] } {
   const held: number[] = [];
@@ -93,6 +100,7 @@ function makeHost(
     ...(over.browserSessions ? { browserSessions: over.browserSessions } : {}),
     ...(over.shell ? { shell: over.shell } : {}),
     ...(over.usage ? { usage: over.usage } : {}),
+    ...(over.budgetGate ? { budgetGate: over.budgetGate } : {}),
   });
   return { host, held };
 }
@@ -126,12 +134,12 @@ describe("WorkerWorkflowHost — delegation", () => {
       children: childStub({
         call: (slug, input, opts) => {
           calls.push({ slug, input, opts });
-          return Promise.resolve("child-out");
+          return Promise.resolve({ output: "child-out", outputSchema: null });
         },
       }),
     });
     const out = await host.callWorkflow("child", { a: 1 }, { idempotencyKey: "k" });
-    expect(out).toBe("child-out");
+    expect(out).toEqual({ output: "child-out", outputSchema: null });
     expect(calls).toEqual([{ slug: "child", input: { a: 1 }, opts: { idempotencyKey: "k" } }]);
   });
 
@@ -351,7 +359,7 @@ describe("WorkerWorkflowHost — cooperative cancellation", () => {
       children: childStub({
         call: (_s, _i, _o, signal) => {
           childSignal = signal;
-          return Promise.resolve("out");
+          return Promise.resolve({ output: "out", outputSchema: null });
         },
       }),
       signal: c.signal,
@@ -379,11 +387,16 @@ describe("WorkerWorkflowHost — cooperative cancellation", () => {
         children: childStub({
           call: () => {
             record("call");
-            return Promise.resolve(null);
+            return Promise.resolve({ output: null, outputSchema: null });
           },
           start: () => {
             record("call");
-            return Promise.resolve({ childRunId: "c", status: "running", output: null });
+            return Promise.resolve({
+              childRunId: "c",
+              status: "running",
+              output: null,
+              outputSchema: null,
+            });
           },
           run: () => {
             record("run");
@@ -596,10 +609,13 @@ describe("parseTimeoutMs", () => {
 
 describe("WorkerWorkflowHost — callWorkflow (hold path)", () => {
   it("holds in-process via the dispatcher's call() and returns the child's output", async () => {
-    const call = vi.fn(() => Promise.resolve({ said: "child-done" }));
+    const call = vi.fn(() =>
+      Promise.resolve({ output: { said: "child-done" }, outputSchema: null }),
+    );
     const { host } = makeHost({ children: childStub({ call }) });
     expect(await host.callWorkflow("child-wf", { a: 1 }, undefined)).toEqual({
-      said: "child-done",
+      output: { said: "child-done" },
+      outputSchema: null,
     });
     expect(call).toHaveBeenCalledWith("child-wf", { a: 1 }, undefined, undefined);
   });
@@ -713,5 +729,93 @@ describe("WorkerWorkflowHost — the redesign's protocol capabilities (shell / u
     const { host } = makeHost({ signal: abortedSignal() });
     await expect(host.idToken("aud")).rejects.toBeInstanceOf(RunAbortedError);
     await expect(host.apiToken()).rejects.toBeInstanceOf(RunAbortedError);
+  });
+});
+
+describe("WorkerWorkflowHost — budget-gate park points (sleep / shell / workflows.call)", () => {
+  /** A gate stub that records clearances and can reject like a declined budget gate. */
+  function gateStub(fail = false): { clear(): Promise<void>; cleared: number[] } {
+    const stub = {
+      cleared: [] as number[],
+      clear: (): Promise<void> => {
+        stub.cleared.push(1);
+        return fail
+          ? Promise.reject(new Error("Run cancelled at the budget gate."))
+          : Promise.resolve();
+      },
+    };
+    return stub;
+  }
+
+  it("sleep() awaits budget clearance BEFORE holding", async () => {
+    const gate = gateStub();
+    const { host, held } = makeHost({ budgetGate: gate });
+    await host.sleep(5);
+    expect(gate.cleared).toHaveLength(1);
+    expect(held).toEqual([5]);
+  });
+
+  it("shell() awaits budget clearance BEFORE starting the command", async () => {
+    const order: string[] = [];
+    const { host } = makeHost({
+      budgetGate: {
+        clear: () => {
+          order.push("clear");
+          return Promise.resolve();
+        },
+      },
+      shell: (cmd) => {
+        order.push(`shell:${cmd}`);
+        return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+      },
+    });
+    await host.shell("sleep 10000", undefined);
+    expect(order).toEqual(["clear", "shell:sleep 10000"]);
+  });
+
+  it("workflows.call awaits budget clearance BEFORE dispatching the child", async () => {
+    const gate = gateStub();
+    const calls: string[] = [];
+    const { host } = makeHost({
+      budgetGate: gate,
+      children: {
+        call: (slug: string) => {
+          calls.push(slug);
+          return Promise.resolve({ output: "child-out", outputSchema: null });
+        },
+        poll: () => Promise.reject(new Error("unused")),
+        start: () => Promise.reject(new Error("unused")),
+        run: () => Promise.reject(new Error("unused")),
+        schedule: () => Promise.reject(new Error("unused")),
+      },
+    });
+    await expect(host.callWorkflow("child", {}, undefined)).resolves.toEqual({
+      output: "child-out",
+      outputSchema: null,
+    });
+    expect(gate.cleared).toHaveLength(1);
+    expect(calls).toEqual(["child"]);
+  });
+
+  it("a declined gate (cancel) rejects the seam and never starts the work", async () => {
+    const gate = gateStub(true);
+    const seen: string[] = [];
+    const { host, held } = makeHost({
+      budgetGate: gate,
+      shell: (cmd) => {
+        seen.push(cmd);
+        return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+      },
+    });
+    await expect(host.sleep(5)).rejects.toThrow(/cancelled at the budget gate/);
+    await expect(host.shell("echo hi", undefined)).rejects.toThrow(/cancelled at the budget gate/);
+    expect(held).toEqual([]); // never slept
+    expect(seen).toEqual([]); // never ran
+  });
+
+  it("without a gate wired, the seams behave exactly as before", async () => {
+    const { host, held } = makeHost();
+    await host.sleep(5);
+    expect(held).toEqual([5]);
   });
 });
