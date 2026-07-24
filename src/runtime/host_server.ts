@@ -35,7 +35,7 @@ import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rm } from "node:fs/promises";
-import { Ajv, type ValidateFunction } from "ajv";
+import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 import {
   clientToHostRequests,
   clientToHostNotifications,
@@ -719,12 +719,14 @@ export function protocolErrorOf(err: unknown): { code: string; message: string; 
 }
 
 /** Compile the output-schema validator: structural (formats off — same honesty as the revive
- *  pass), lax about unknown keywords (`contentEncoding` etc.). A schema that will not compile is
- *  a platform bug in the deriver — warned and skipped (fail-soft), never a run failure. */
+ *  pass), lax about unknown keywords (`contentEncoding` etc.), and in the DERIVER'S DIALECT —
+ *  JSON Schema draft 2020-12 (Ajv2020): a draft-07 Ajv ignores `prefixItems` and applies a
+ *  tuple's `items: false` to every element, failing ALL tuples. A schema that will not compile
+ *  is a platform bug in the deriver — warned and skipped (fail-soft), never a run failure. */
 function compileOutputValidator(schema: Record<string, unknown> | null): ValidateFunction | null {
   if (schema === null) return null;
   try {
-    const ajv = new Ajv({ strict: false, validateFormats: false });
+    const ajv = new Ajv2020({ strict: false, validateFormats: false });
     return ajv.compile(schema);
   } catch (err) {
     log.warn("host_server_output_schema_uncompilable", {

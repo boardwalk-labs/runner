@@ -174,6 +174,31 @@ describe("WorkflowHostServer — loader methods", () => {
     expect(server.reportedReturn()).toEqual({ n: 7 });
   });
 
+  it("accepts a draft-2020 tuple (prefixItems + items:false) — the deriver's dialect", async () => {
+    // The deriver emits JSON Schema draft 2020-12. A draft-07 validator ignores `prefixItems`
+    // and applies `items: false` to EVERY element, failing all tuples (found live on the first
+    // prod browse-gate run: "/titles/0 boolean schema is false").
+    const { server, sockPath } = await startServer(
+      {},
+      {
+        outputSchema: {
+          type: "object",
+          required: ["titles"],
+          properties: {
+            titles: {
+              type: "array",
+              prefixItems: [{ type: "string" }, { type: "string" }],
+              items: false,
+            },
+          },
+        },
+      },
+    );
+    const client = await connect(sockPath);
+    await client.reportReturn({ titles: ["a", "b"] });
+    expect(server.reportedReturn()).toEqual({ titles: ["a", "b"] });
+  });
+
   it("skips validation for a null (void) return", async () => {
     const { server, sockPath } = await startServer(
       {},
