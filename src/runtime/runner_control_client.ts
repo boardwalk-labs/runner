@@ -16,6 +16,7 @@ import type { McpTokenResult } from "@boardwalk-labs/engine/core";
 import type { Run } from "./wire/run.js";
 import type { WebSearchOutput } from "./tools/web_search.js";
 import type { WorkspacePersistGrant } from "./workspace_store.js";
+import { workspaceFileKeySuffix } from "./workspace_delta.js";
 import type {
   ArtifactCommitInput,
   ArtifactPresignInput,
@@ -387,6 +388,61 @@ export class RunnerControlClient {
     };
   }
 
+  // ---- Delta workspace sync (docs/WORKSPACE_PERSISTENCE.md §5.2) ----
+  // The body carries path DIGESTS, never keys: the broker derives every key from the run token's
+  // org + workflow + environment, so a run can only ever touch its own scope.
+
+  /** Presign a GET for this scope's manifest. `null` when not eligible; a scope that was never
+   *  delta-persisted gets a URL whose GET 404s, which the store reads as "no manifest". */
+  async workspaceManifestGetUrl(): Promise<string | null> {
+    const res = await this.controlFetch(this.url("workspace/manifest/get-url"), {
+      method: "POST",
+      headers: this.headers(false),
+    });
+    if (res.status !== 200) throw await brokerError(res, "workspace/manifest/get-url");
+    return ((await res.json()) as { url: string | null }).url;
+  }
+
+  /** Presign a PUT for this scope's manifest, gating on the scope's WHOLE footprint. */
+  async workspaceManifestPutUrl(totalBytes: number): Promise<WorkspacePersistGrant> {
+    const body = await this.postJson<{
+      url: string | null;
+      contentType?: string;
+      reason?: string;
+    }>("workspace/manifest/put-url", "workspace/manifest/put-url", { totalBytes });
+    if (body.url !== null) return { url: body.url, contentType: body.contentType ?? "" };
+    return {
+      url: null,
+      reason: body.reason === "storage_limit" ? "storage_limit" : "not_eligible",
+    };
+  }
+
+  /** Presign PUT or GET for a batch of per-path objects, returned keyed by workspace path. */
+  async workspaceFileUrls(
+    op: "put" | "get",
+    paths: readonly string[],
+  ): Promise<Record<string, string>> {
+    const body = await this.postJson<{ urls?: Record<string, string> }>(
+      "workspace/files/presign",
+      "workspace/files/presign",
+      { op, paths: digestPaths(paths) },
+    );
+    return body.urls ?? {};
+  }
+
+  /** Delete the objects for paths the run removed. */
+  async workspaceDeleteFiles(paths: readonly string[]): Promise<void> {
+    if (paths.length === 0) return;
+    const res = await this.controlFetch(this.url("workspace/files/delete"), {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify({ paths: digestPaths(paths) }),
+    });
+    if (res.status !== 204 && res.status !== 200) {
+      throw await brokerError(res, "workspace/files/delete");
+    }
+  }
+
   /** Download bytes from a presigned S3 URL (workspace hydrate). `null` on 404 (no snapshot yet —
    *  e.g. the workflow's first run); throws on any other non-2xx. Goes straight to S3, not the broker. */
   async downloadBytes(url: string): Promise<Uint8Array | null> {
@@ -740,4 +796,13 @@ async function inferenceHttpError(res: Response): Promise<Error> {
   }
   log.warn("broker_inference_failed", { status: res.status });
   return new Error(message);
+}
+
+/** `{ <workspacePath>: <sha256 of that path> }` — the broker needs the digest to build the key and
+ *  the path to key the response, and deriving it here keeps path→key deterministic on both sides
+ *  without ever putting a raw path in an S3 key. */
+function digestPaths(paths: readonly string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const p of paths) out[p] = workspaceFileKeySuffix(p);
+  return out;
 }
