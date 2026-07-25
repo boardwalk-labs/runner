@@ -15,6 +15,7 @@ import { createLogger } from "./support/index.js";
 import type { McpTokenResult } from "@boardwalk-labs/engine/core";
 import type { Run } from "./wire/run.js";
 import type { WebSearchOutput } from "./tools/web_search.js";
+import type { WorkspacePersistGrant } from "./workspace_store.js";
 import type {
   ArtifactCommitInput,
   ArtifactPresignInput,
@@ -364,18 +365,23 @@ export class RunnerControlClient {
   }
 
   /** Mint a presigned PUT URL to snapshot this workflow's `/workspace` (the worker uploads the tarball
-   *  straight to S3). `null` when the run isn't eligible. `sizeBytes` is the archive's on-disk size
-   *  (the worker tars BEFORE requesting the URL) — the broker records it for the org storage counter +
-   *  daily meter; the snapshot overwrites one per-workflow key, so it's the workflow's full footprint. */
-  async workspacePersistUrl(
-    sizeBytes: number,
-  ): Promise<{ url: string; contentType: string } | null> {
-    const body = await this.postJson<{ url: string | null; contentType?: string }>(
-      "workspace/persist-url",
-      "workspace/persist-url",
-      { sizeBytes },
-    );
-    return body.url === null ? null : { url: body.url, contentType: body.contentType ?? "" };
+   *  straight to S3). `sizeBytes` is the archive's on-disk size (the worker tars BEFORE requesting the
+   *  URL) — the broker records it for the org storage counter + daily meter; the snapshot overwrites
+   *  one per-workflow key, so it's the workflow's full footprint.
+   *
+   *  When no URL is minted the result carries WHY. The broker used to answer a bare `{ url: null }` for
+   *  two very different things — an ordinary self-hosted no-op, and a REFUSAL because the org is over
+   *  its storage ceiling — so the runner logged a thrown-away snapshot as "not eligible" and the author
+   *  was never told their compounding state had stopped compounding. `reason` defaults to
+   *  `not_eligible` so an older broker (which omits the field) keeps its previous meaning. */
+  async workspacePersistUrl(sizeBytes: number): Promise<WorkspacePersistGrant> {
+    const body = await this.postJson<{
+      url: string | null;
+      contentType?: string;
+      reason?: string;
+    }>("workspace/persist-url", "workspace/persist-url", { sizeBytes });
+    if (body.url !== null) return { url: body.url, contentType: body.contentType ?? "" };
+    return { url: null, reason: body.reason === "storage_limit" ? "storage_limit" : "not_eligible" };
   }
 
   /** Download bytes from a presigned S3 URL (workspace hydrate). `null` on 404 (no snapshot yet —

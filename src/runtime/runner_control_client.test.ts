@@ -294,7 +294,7 @@ describe("RunnerControlClient workspace", () => {
     expect(await client(f2).workspaceHydrateUrl()).toBeNull();
   });
 
-  it("workspacePersistUrl sends the snapshot size + returns the url, or null when ineligible", async () => {
+  it("workspacePersistUrl sends the snapshot size + returns the url when granted", async () => {
     const { fetchImpl, calls } = fakeFetch(() =>
       json(200, { url: "https://s3/put?sig", contentType: "application/gzip" }),
     );
@@ -303,8 +303,25 @@ describe("RunnerControlClient workspace", () => {
       contentType: "application/gzip",
     });
     expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({ sizeBytes: 2048 });
-    const { fetchImpl: f2 } = fakeFetch(() => json(200, { url: null }));
-    expect(await client(f2).workspacePersistUrl(0)).toBeNull();
+  });
+
+  it("workspacePersistUrl carries WHY no url was minted, so a refusal isn't read as a no-op", async () => {
+    const { fetchImpl } = fakeFetch(() => json(200, { url: null, reason: "storage_limit" }));
+    expect(await client(fetchImpl).workspacePersistUrl(0)).toEqual({
+      url: null,
+      reason: "storage_limit",
+    });
+  });
+
+  // An older broker answers a bare `{ url: null }`. That has to keep meaning what it used to —
+  // the ordinary no-op — or a deploy-order skew would spam authors with false "state dropped"
+  // reports on every self-hosted run.
+  it("workspacePersistUrl defaults a reason-less null to not_eligible (older broker)", async () => {
+    const { fetchImpl } = fakeFetch(() => json(200, { url: null }));
+    expect(await client(fetchImpl).workspacePersistUrl(0)).toEqual({
+      url: null,
+      reason: "not_eligible",
+    });
   });
 
   it("downloadBytes returns the bytes, null on 404, throws otherwise", async () => {

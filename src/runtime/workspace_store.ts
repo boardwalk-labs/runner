@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { extract as tarExtract } from "tar";
 import { createLogger } from "./support/index.js";
+import type { RunEventBody } from "./agent/events.js";
 
 const log = createLogger("WorkspaceStore");
 const exec = promisify(execFile);
@@ -65,14 +66,33 @@ export interface WorkspaceArchiver {
   extract(srcPath: string, dir: string): Promise<void>;
 }
 
+/**
+ * The broker's answer: a grant, or a refusal that says WHY. A union rather than `| null` because the
+ * two refusals are not interchangeable — `not_eligible` is an ordinary no-op (self-hosted keeps the
+ * workspace on the customer's disk), while `storage_limit` means the run produced a snapshot and the
+ * platform threw it away, which the author has to be told about.
+ */
+export type WorkspacePersistGrant =
+  | { url: string; contentType: string }
+  | { url: null; reason: "not_eligible" | "storage_limit" };
+
 /** The broker surface the store needs (RunnerControlClient satisfies it). */
 export interface WorkspaceBrokerTransport {
   workspaceHydrateUrl(): Promise<string | null>;
   /** `sizeBytes` is the archive's on-disk size — the worker tars BEFORE presigning so the broker can
-   *  record the workflow's storage footprint. `null` when the run isn't eligible. */
-  workspacePersistUrl(sizeBytes: number): Promise<{ url: string; contentType: string } | null>;
+   *  record the workflow's storage footprint. */
+  workspacePersistUrl(sizeBytes: number): Promise<WorkspacePersistGrant>;
   uploadBytes(url: string, headers: Record<string, string>, body: Uint8Array): Promise<void>;
   downloadBytes(url: string): Promise<Uint8Array | null>;
+}
+
+/**
+ * Emit-only view of the run's event emitter, for telling the AUTHOR a snapshot was dropped. Required
+ * rather than optional on purpose: an optional sink is one a future construction site forgets to
+ * pass, which reintroduces the exact invisibility this seam exists to fix.
+ */
+export interface WorkspaceEventSink {
+  emit(body: RunEventBody): unknown;
 }
 
 /** Minimal fs surface (so the store is unit-tested without touching disk). */
@@ -90,6 +110,8 @@ export interface WorkspaceStoreDeps {
   broker: WorkspaceBrokerTransport;
   archiver: WorkspaceArchiver;
   fs: WorkspaceFs;
+  /** Where a dropped snapshot is reported to the author (see {@link WorkspaceEventSink}). */
+  events: WorkspaceEventSink;
   /** The `/workspace` root to snapshot/restore. */
   workspaceRoot: string;
   /** What to persist, read AT PERSIST TIME (see {@link resolvePersistSelection}) — the run's memory
@@ -157,12 +179,18 @@ export class WorkspaceStore {
       if (size > this.maxSnapshotBytes) {
         await this.deps.fs.rm(this.tmpPath);
         log.warn("workspace_persist_too_large", { bytes: size, maxBytes: this.maxSnapshotBytes });
+        this.reportSkipped({ reason: "too_large", bytes: size, maxBytes: this.maxSnapshotBytes });
         return 0;
       }
       const presign = await this.deps.broker.workspacePersistUrl(size);
-      if (presign === null) {
-        // Not eligible (e.g. self-hosted) — discard the archive we speculatively built.
+      if (presign.url === null) {
+        // Discard the archive we speculatively built. Only a REFUSAL is worth reporting —
+        // `not_eligible` is self-hosted, where the workspace lives on the customer's disk.
         await this.deps.fs.rm(this.tmpPath);
+        if (presign.reason === "storage_limit") {
+          log.warn("workspace_persist_over_storage_limit", { bytes: size });
+          this.reportSkipped({ reason: "storage_limit", bytes: size });
+        }
         return 0;
       }
       const bytes = await this.deps.fs.readFile(this.tmpPath);
@@ -175,8 +203,26 @@ export class WorkspaceStore {
       log.info("workspace_persisted", { bytes: size });
       return size;
     } catch (err) {
+      // Best-effort must never fail the run — but that was being used to justify swallowing the
+      // failure outright. The run still succeeds; the author now learns state didn't carry forward.
       log.warn("workspace_persist_failed", { error: errMsg(err) });
+      this.reportSkipped({ reason: "error", detail: errMsg(err) });
       return 0;
+    }
+  }
+
+  /** Put a dropped snapshot on the run's event stream. Swallows its own errors: failing to REPORT a
+   *  failure must not escalate into failing the run. The `log.warn` at each call site is the backstop. */
+  private reportSkipped(detail: {
+    reason: "too_large" | "storage_limit" | "error";
+    bytes?: number;
+    maxBytes?: number;
+    detail?: string;
+  }): void {
+    try {
+      this.deps.events.emit({ kind: "workspace_persist_skipped", ...detail });
+    } catch (err) {
+      log.warn("workspace_persist_skipped_report_failed", { error: errMsg(err) });
     }
   }
 

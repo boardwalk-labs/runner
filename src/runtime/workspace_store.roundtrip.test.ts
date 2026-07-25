@@ -53,6 +53,8 @@ function makeStore(
     workspaceRoot,
     tmpPath,
     selection: () => selection,
+    // This suite exercises the real tar round-trip, not the reporting path.
+    events: { emit: () => undefined },
   });
 }
 

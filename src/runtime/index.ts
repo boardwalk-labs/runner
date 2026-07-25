@@ -468,6 +468,9 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
             fs: new NodeWorkspaceFs(),
             workspaceRoot: runtime.workspaceRoot,
             selection,
+            // A dropped snapshot rides the run's ONE ordered event stream, so "your state did not
+            // carry forward" lands in the run history next to the work that produced it.
+            events: runEvents,
           });
     // The run's identity + on-demand public-API bearer, surfaced to the program via `import { runtime }`.
     // ids come from the claimed run; the bearer is the captured (scrubbed-from-env) api token, already

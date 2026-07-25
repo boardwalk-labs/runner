@@ -13,7 +13,9 @@ import {
   type WorkspaceArchiver,
   type WorkspaceBrokerTransport,
   type WorkspaceFs,
+  type WorkspacePersistGrant,
 } from "./workspace_store.js";
+import type { RunEventBody } from "./agent/events.js";
 
 interface Recorder {
   broker: WorkspaceBrokerTransport;
@@ -25,13 +27,15 @@ interface Recorder {
   archives: { dir: string; dest: string; paths?: readonly string[] | undefined }[];
   writes: { path: string; bytes: number }[];
   rms: string[];
+  /** Every `workspace_persist_skipped` frame the store put on the run stream. */
+  events: RunEventBody[];
 }
 
 function recorder(
   over: {
     hydrateUrl?: string | null;
     download?: Uint8Array | null;
-    persistUrl?: { url: string; contentType: string } | null;
+    persistUrl?: WorkspacePersistGrant;
     archiveThrows?: boolean;
     archiveSize?: number;
     /** Workspace-relative paths the fake fs reports as ABSENT (a declared-but-never-written dir). */
@@ -44,6 +48,7 @@ function recorder(
   const archives: Recorder["archives"] = [];
   const writes: Recorder["writes"] = [];
   const rms: string[] = [];
+  const events: RunEventBody[] = [];
   const broker: WorkspaceBrokerTransport = {
     workspaceHydrateUrl: () =>
       Promise.resolve(over.hydrateUrl === undefined ? "https://s3/get" : over.hydrateUrl),
@@ -88,7 +93,7 @@ function recorder(
     // Every declared dir exists unless a test says otherwise.
     exists: (path) => Promise.resolve(!(over.absentPaths ?? []).some((p) => path.endsWith(p))),
   };
-  return { broker, archiver, fs, uploads, downloads, extracts, archives, writes, rms };
+  return { broker, archiver, fs, uploads, downloads, extracts, archives, writes, rms, events };
 }
 
 /** `selection` defaults to `true` (persist the whole workspace) — the form these tests predate the
@@ -101,6 +106,7 @@ function store(r: Recorder, selection: PersistSelection = true): WorkspaceStore 
     workspaceRoot: "/workspace",
     tmpPath: "/tmp/ws.tgz",
     selection: () => selection,
+    events: { emit: (body) => r.events.push(body) },
   });
 }
 
@@ -141,7 +147,7 @@ describe("WorkspaceStore.persist", () => {
   });
 
   it("no-ops when the run isn't eligible (null persist URL), returning 0 bytes", async () => {
-    const r = recorder({ persistUrl: null });
+    const r = recorder({ persistUrl: { url: null, reason: "not_eligible" } });
     expect(await store(r).persist()).toBe(0);
     // The archive is built BEFORE the presign (its size travels on the request), then discarded when
     // the URL comes back null (e.g. self-hosted) — so it's archived + cleaned up, but never uploaded.
@@ -170,6 +176,75 @@ describe("WorkspaceStore.persist", () => {
     expect(r.uploads).toHaveLength(1);
   });
 
+  // docs/WORKSPACE_PERSISTENCE.md §8.1. Each of these paths used to end at a `log.warn` only we could
+  // read, so state stopped compounding with no trace — surfacing weeks later as "the agent got worse".
+  describe("reports a dropped snapshot to the author", () => {
+    it("emits workspace_persist_skipped with the size and the ceiling when over the cap", async () => {
+      const r = recorder({ archiveSize: WORKSPACE_SNAPSHOT_MAX_BYTES + 1 });
+      await store(r).persist();
+      expect(r.events).toEqual([
+        {
+          kind: "workspace_persist_skipped",
+          reason: "too_large",
+          bytes: WORKSPACE_SNAPSHOT_MAX_BYTES + 1,
+          maxBytes: WORKSPACE_SNAPSHOT_MAX_BYTES,
+        },
+      ]);
+    });
+
+    it("emits when the BROKER refuses on the org storage ceiling", async () => {
+      const r = recorder({ persistUrl: { url: null, reason: "storage_limit" } });
+      await store(r).persist();
+      expect(r.events).toEqual([
+        { kind: "workspace_persist_skipped", reason: "storage_limit", bytes: 42 },
+      ]);
+    });
+
+    // Nothing was lost (self-hosted keeps it on the customer's disk), and warning anyway would train
+    // authors to ignore the event — costing it its meaning in the case that matters.
+    it("stays SILENT for an ordinary not-eligible no-op", async () => {
+      const r = recorder({ persistUrl: { url: null, reason: "not_eligible" } });
+      await store(r).persist();
+      expect(r.events).toEqual([]);
+    });
+
+    it("emits with the underlying message when archiving or upload throws", async () => {
+      const r = recorder({ archiveThrows: true });
+      await store(r).persist();
+      expect(r.events).toHaveLength(1);
+      expect(r.events[0]).toMatchObject({
+        kind: "workspace_persist_skipped",
+        reason: "error",
+        detail: expect.stringContaining("tar failed") as unknown as string,
+      });
+    });
+
+    it("emits nothing on the happy path", async () => {
+      const r = recorder();
+      expect(await store(r).persist()).toBe(42);
+      expect(r.events).toEqual([]);
+    });
+
+    // Failing to REPORT a failure must not escalate into failing the run.
+    it("a throwing event sink does not fail the run", async () => {
+      const r = recorder({ archiveSize: WORKSPACE_SNAPSHOT_MAX_BYTES + 1 });
+      const s = new WorkspaceStore({
+        broker: r.broker,
+        archiver: r.archiver,
+        fs: r.fs,
+        workspaceRoot: "/workspace",
+        tmpPath: "/tmp/ws.tgz",
+        selection: () => true,
+        events: {
+          emit: () => {
+            throw new Error("publisher down");
+          },
+        },
+      });
+      await expect(s.persist()).resolves.toBe(0);
+    });
+  });
+
   it("honors an injected maxSnapshotBytes override", async () => {
     const r = recorder({ archiveSize: 100 });
     const s = new WorkspaceStore({
@@ -180,6 +255,7 @@ describe("WorkspaceStore.persist", () => {
       tmpPath: "/tmp/ws.tgz",
       maxSnapshotBytes: 50,
       selection: () => true,
+      events: { emit: (body) => r.events.push(body) },
     });
     expect(await s.persist()).toBe(0);
     expect(r.uploads).toEqual([]);
@@ -195,6 +271,7 @@ describe("WorkspaceStore default scratch path", () => {
       fs: r.fs,
       workspaceRoot: "/workspace",
       selection: () => true,
+      events: { emit: (body) => r.events.push(body) },
       // no tmpPath → default
     });
     await s.persist();
