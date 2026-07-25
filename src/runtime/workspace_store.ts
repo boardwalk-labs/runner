@@ -16,10 +16,18 @@ import { promisify } from "node:util";
 import { stat, lstat, readdir, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, isAbsolute } from "node:path";
 import { extract as tarExtract } from "tar";
 import { createLogger } from "./support/index.js";
 import type { RunEventBody } from "./agent/events.js";
+import {
+  diffWorkspace,
+  parseWorkspaceManifest,
+  serializeWorkspaceManifest,
+  MAX_DELTA_FILES,
+  type WorkspaceFileEntry,
+  type WorkspaceManifest,
+} from "./workspace_delta.js";
 
 const log = createLogger("WorkspaceStore");
 const exec = promisify(execFile);
@@ -32,6 +40,12 @@ const exec = promisify(execFile);
  *  workspace never enters memory. NOT a security boundary (tenant isolation is the per-workflow key);
  *  purely a guardrail, like the run budget's `max_usd`. */
 export const WORKSPACE_SNAPSHOT_MAX_BYTES = 512 * 1024 * 1024;
+
+/** Parallel per-file transfers in a delta. Bounded so a wide delta can't open a socket per file. */
+const DELTA_UPLOAD_CONCURRENCY = 16;
+
+/** Per-path workspace objects are opaque bytes — the manifest, not the object, carries the metadata. */
+const WORKSPACE_FILE_CONTENT_TYPE = "application/octet-stream";
 
 /** What a run persists: the WHOLE workspace, or exactly these workspace-relative dirs (possibly none). */
 export type PersistSelection = true | readonly string[];
@@ -77,6 +91,9 @@ export type WorkspacePersistGrant =
   | { url: string; contentType: string }
   | { url: null; reason: "not_eligible" | "storage_limit" };
 
+/** Presigned URLs for a batch of per-path workspace objects, keyed by workspace-relative path. */
+export type WorkspaceFileUrls = Record<string, string>;
+
 /** The broker surface the store needs (RunnerControlClient satisfies it). */
 export interface WorkspaceBrokerTransport {
   workspaceHydrateUrl(): Promise<string | null>;
@@ -85,6 +102,21 @@ export interface WorkspaceBrokerTransport {
   workspacePersistUrl(sizeBytes: number): Promise<WorkspacePersistGrant>;
   uploadBytes(url: string, headers: Record<string, string>, body: Uint8Array): Promise<void>;
   downloadBytes(url: string): Promise<Uint8Array | null>;
+
+  // ---- Delta sync (docs/WORKSPACE_PERSISTENCE.md §5.2) ----
+  // Absent on an older broker; the store feature-detects and falls back to the whole-tarball path,
+  // so a runner ahead of the control plane still persists correctly, just not incrementally.
+
+  /** Presign a GET for this scope's manifest. `null` when the run isn't eligible. */
+  workspaceManifestGetUrl?(): Promise<string | null>;
+  /** Presign a PUT for this scope's manifest. `totalBytes` is the scope's whole footprint (the sum
+   *  of its files), which the broker gates and records exactly as it does a tarball's size. */
+  workspaceManifestPutUrl?(totalBytes: number): Promise<WorkspacePersistGrant>;
+  /** Presign PUT or GET for a batch of per-path objects. Batched because a delta touches many. */
+  workspaceFileUrls?(op: "put" | "get", paths: readonly string[]): Promise<WorkspaceFileUrls>;
+  /** Delete the objects for paths no longer on disk. Without this a persisted workspace grows
+   *  monotonically as an agent creates and removes scratch files. */
+  workspaceDeleteFiles?(paths: readonly string[]): Promise<void>;
 }
 
 /**
@@ -114,6 +146,11 @@ export interface WorkspaceFs {
    *  created — `tar` fails the whole archive on one missing member, and a declared-but-unused dir is
    *  normal (a workflow declares `["cache", "index"]` and only writes `cache` on its first run). */
   exists(path: string): Promise<boolean>;
+  /** Every regular file under the selection, with the size + mtime the delta diffs on. Absent ⇒ the
+   *  store stays on the whole-tarball path. */
+  walk?(root: string, paths: readonly string[] | undefined): Promise<WorkspaceFileEntry[]>;
+  /** Write `data` to a workspace-relative path, creating parent dirs (delta hydrate). */
+  writeUnder?(root: string, relPath: string, data: Uint8Array): Promise<void>;
 }
 
 export interface WorkspaceStoreDeps {
@@ -142,6 +179,9 @@ export class WorkspaceStore {
    *  performed — never from hydrate, where the selection isn't known yet (memory dirs register as
    *  the run's agent calls happen), so a hydrate-time fingerprint could cover the wrong file set. */
   private lastStoredFingerprint: string | null = null;
+  /** This run's view of the stored manifest. `undefined` = not read yet; `null` = no manifest for
+   *  this scope (a first persist, or one still on the tarball). */
+  private storedManifest: WorkspaceManifest | null | undefined = undefined;
   constructor(private readonly deps: WorkspaceStoreDeps) {
     // Scratch tarball path. Default to os.tmpdir() (which honors TMPDIR) rather than a machine-global
     // `/tmp/workspace-snapshot.tgz`: on a self-hosted runner the daemon points TMPDIR at the PER-RUN
@@ -156,6 +196,11 @@ export class WorkspaceStore {
    *  when there's nothing to restore (not eligible, or a first run with no snapshot yet). */
   async hydrate(): Promise<void> {
     try {
+      // A scope written by the delta path has a manifest; one written before it (or by the
+      // too-many-files fallback) has only the tarball. Try the manifest first and fall through, so
+      // an upgrade migrates a scope on its next persist with no restore gap in between.
+      if (await this.hydrateDelta()) return;
+
       const url = await this.deps.broker.workspaceHydrateUrl();
       if (url === null) return; // not eligible (not opted-in / self-hosted)
       const bytes = await this.deps.broker.downloadBytes(url);
@@ -186,6 +231,11 @@ export class WorkspaceStore {
       const selection = this.deps.selection();
       const paths = selection === true ? undefined : await this.presentPaths(selection);
       if (paths !== undefined && paths.length === 0) return 0;
+
+      // Delta path: upload only what changed. Falls through to the whole-tarball path below when the
+      // broker or fs lacks the seam, or when the tree is too large to address per-file.
+      const delta = await this.persistDelta(paths);
+      if (delta !== null) return delta;
 
       // persist() runs before EVERY sleep and freeze, not just at the end, so a long agent that
       // sleeps in a loop re-tars and re-uploads its whole workspace once per iteration. Skip when
@@ -235,6 +285,164 @@ export class WorkspaceStore {
       log.warn("workspace_persist_failed", { error: errMsg(err) });
       this.reportSkipped({ reason: "error", detail: errMsg(err) });
       return 0;
+    }
+  }
+
+  /**
+   * Restore from the per-path objects a manifest describes. Returns true when it handled the
+   * restore; false means "no manifest for this scope" and the caller falls back to the tarball.
+   */
+  private async hydrateDelta(): Promise<boolean> {
+    const b = this.deps.broker;
+    if (b.workspaceFileUrls === undefined || this.deps.fs.writeUnder === undefined) return false;
+    const manifest = await this.loadStoredManifest();
+    if (manifest === null) return false;
+    // An empty manifest is a real, restorable state (the scope was emptied), not a missing one — and
+    // it must not fall through to the tarball, which would restore files the run deleted.
+    if (manifest.files.length === 0) {
+      log.info("workspace_hydrated", { mode: "delta", files: 0 });
+      return true;
+    }
+
+    const urls = await b.workspaceFileUrls(
+      "get",
+      manifest.files.map((e) => e.p),
+    );
+    const queue = [...manifest.files];
+    let restored = 0;
+    const workers = Array.from({ length: Math.min(DELTA_UPLOAD_CONCURRENCY, queue.length) }, () =>
+      (async (): Promise<void> => {
+        for (let e = queue.pop(); e !== undefined; e = queue.pop()) {
+          const url = urls[e.p];
+          if (url === undefined) continue;
+          const bytes = await this.deps.broker.downloadBytes(url);
+          if (bytes === null) continue; // object vanished — the run re-creates it, as with no snapshot
+          await this.deps.fs.writeUnder?.(this.deps.workspaceRoot, e.p, bytes);
+          restored += 1;
+        }
+      })(),
+    );
+    await Promise.all(workers);
+    log.info("workspace_hydrated", { mode: "delta", files: restored, of: manifest.files.length });
+    return true;
+  }
+
+  /**
+   * Persist by uploading only what changed. Returns the scope's byte size, or `null` meaning "not
+   * applicable — use the whole-tarball path".
+   *
+   * Returns null (rather than throwing) for every reason the delta can't run: an older broker
+   * without the seams, an fs without `walk`, or a tree past {@link MAX_DELTA_FILES}. Falling back
+   * keeps a runner that is ahead of its control plane persisting correctly, just not incrementally.
+   */
+  private async persistDelta(paths: readonly string[] | undefined): Promise<number | null> {
+    const b = this.deps.broker;
+    if (
+      b.workspaceManifestGetUrl === undefined ||
+      b.workspaceManifestPutUrl === undefined ||
+      b.workspaceFileUrls === undefined ||
+      b.workspaceDeleteFiles === undefined ||
+      this.deps.fs.walk === undefined
+    ) {
+      return null;
+    }
+
+    const local = await this.deps.fs.walk(this.deps.workspaceRoot, paths);
+    if (local.length > MAX_DELTA_FILES) {
+      // One request per file would turn a single upload into tens of thousands. Degrade to the
+      // tarball rather than optimize for the documented anti-pattern (persist: true over a
+      // dependency tree).
+      log.info("workspace_delta_too_many_files", { files: local.length, max: MAX_DELTA_FILES });
+      return null;
+    }
+
+    const previous = await this.loadStoredManifest();
+    const delta = diffWorkspace(local, previous);
+
+    // Nothing moved: skip the manifest write too. This is the delta's own version of the unchanged
+    // skip, and it subsumes the fingerprint one whenever the delta path is live.
+    if (delta.upload.length === 0 && delta.delete.length === 0 && previous !== null) {
+      log.info("workspace_persist_unchanged", { mode: "delta" });
+      return delta.totalBytes;
+    }
+
+    // Gate + record the scope's FULL footprint before writing anything, so an over-limit scope is
+    // refused exactly as an over-limit tarball is — and reported to the author the same way.
+    const grant = await b.workspaceManifestPutUrl(delta.totalBytes);
+    if (grant.url === null) {
+      if (grant.reason === "storage_limit") {
+        log.warn("workspace_persist_over_storage_limit", { bytes: delta.totalBytes });
+        this.reportSkipped({ reason: "storage_limit", bytes: delta.totalBytes });
+      }
+      return 0;
+    }
+
+    if (delta.upload.length > 0) {
+      const urls = await b.workspaceFileUrls(
+        "put",
+        delta.upload.map((e) => e.p),
+      );
+      await this.uploadFiles(delta.upload, urls);
+    }
+    // Delete BEFORE the manifest lands: a crash between them leaves objects the next manifest no
+    // longer references, which is wasted bytes. The reverse order would leave the manifest pointing
+    // at objects that are already gone, which is a failed hydrate.
+    if (delta.delete.length > 0) await b.workspaceDeleteFiles(delta.delete);
+
+    await b.uploadBytes(
+      grant.url,
+      { "content-type": grant.contentType },
+      serializeWorkspaceManifest(delta.next),
+    );
+    this.storedManifest = delta.next;
+    log.info("workspace_persisted", {
+      mode: "delta",
+      bytes: delta.totalBytes,
+      uploaded: delta.upload.length,
+      deleted: delta.delete.length,
+    });
+    return delta.totalBytes;
+  }
+
+  /** Upload each changed file, bounded so a wide delta can't open thousands of sockets at once. */
+  private async uploadFiles(
+    entries: readonly WorkspaceFileEntry[],
+    urls: WorkspaceFileUrls,
+  ): Promise<void> {
+    const queue = [...entries];
+    const workers = Array.from({ length: Math.min(DELTA_UPLOAD_CONCURRENCY, queue.length) }, () =>
+      (async (): Promise<void> => {
+        for (let e = queue.pop(); e !== undefined; e = queue.pop()) {
+          const url = urls[e.p];
+          if (url === undefined) continue; // broker declined this path — the manifest still lists it
+          const body = await this.deps.fs.readFile(join(this.deps.workspaceRoot, e.p));
+          await this.deps.broker.uploadBytes(
+            url,
+            { "content-type": WORKSPACE_FILE_CONTENT_TYPE },
+            body,
+          );
+        }
+      })(),
+    );
+    await Promise.all(workers);
+  }
+
+  /** This run's view of what is stored: the manifest read at hydrate, or written by the last persist.
+   *  `null` means unknown, which makes the next diff upload everything — work, never data loss. */
+  private async loadStoredManifest(): Promise<WorkspaceManifest | null> {
+    if (this.storedManifest !== undefined) return this.storedManifest;
+    const b = this.deps.broker;
+    if (b.workspaceManifestGetUrl === undefined) return null;
+    try {
+      const url = await b.workspaceManifestGetUrl();
+      if (url === null) return null;
+      const bytes = await this.deps.broker.downloadBytes(url);
+      const parsed = bytes === null ? null : parseWorkspaceManifest(bytes);
+      this.storedManifest = parsed;
+      return parsed;
+    } catch (err) {
+      log.warn("workspace_manifest_read_failed", { error: errMsg(err) });
+      return null;
     }
   }
 
@@ -352,6 +560,46 @@ export class NodeWorkspaceFs implements WorkspaceFs {
   async exists(path: string): Promise<boolean> {
     return (await stat(path).catch(() => null)) !== null;
   }
+
+  async walk(root: string, paths: readonly string[] | undefined): Promise<WorkspaceFileEntry[]> {
+    const roots = paths === undefined ? [root] : paths.map((p) => join(root, p));
+    const out: WorkspaceFileEntry[] = [];
+    for (const dir of roots) await collectFiles(dir, root, out);
+    // Sorted so a manifest is stable across walks — a reordered file list would otherwise churn the
+    // stored JSON on every persist even when nothing changed.
+    out.sort((a, b) => (a.p < b.p ? -1 : a.p > b.p ? 1 : 0));
+    return out;
+  }
+
+  async writeUnder(root: string, relPath: string, data: Uint8Array): Promise<void> {
+    const target = join(root, relPath);
+    // The manifest is ours, but it round-trips through S3, so treat its paths as untrusted: a `..`
+    // entry must not let a restore write outside the workspace.
+    const rel = relative(root, target);
+    if (rel.startsWith("..") || isAbsolute(rel)) {
+      throw new Error(`workspace path escapes the workspace root: ${relPath}`);
+    }
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, data);
+  }
+}
+
+/** Walk `target`, appending one entry per regular file. Symlinks are skipped rather than followed:
+ *  a link's target is either inside the selection (already walked) or outside it (not ours to copy),
+ *  and following one is how a link loop hangs the walk. */
+async function collectFiles(
+  target: string,
+  root: string,
+  out: WorkspaceFileEntry[],
+): Promise<void> {
+  const st = await lstat(target).catch(() => null);
+  if (st === null) return; // vanished mid-walk
+  if (st.isDirectory()) {
+    for (const name of await readdir(target)) await collectFiles(join(target, name), root, out);
+    return;
+  }
+  if (!st.isFile()) return;
+  out.push({ p: relative(root, target), s: st.size, m: st.mtimeMs });
 }
 
 function errMsg(err: unknown): string {
