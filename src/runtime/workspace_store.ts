@@ -13,7 +13,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { stat, lstat, readdir, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { stat, lstat, readdir, mkdir, readFile, writeFile, rm, utimes } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, isAbsolute } from "node:path";
@@ -149,8 +149,10 @@ export interface WorkspaceFs {
   /** Every regular file under the selection, with the size + mtime the delta diffs on. Absent ⇒ the
    *  store stays on the whole-tarball path. */
   walk?(root: string, paths: readonly string[] | undefined): Promise<WorkspaceFileEntry[]>;
-  /** Write `data` to a workspace-relative path, creating parent dirs (delta hydrate). */
-  writeUnder?(root: string, relPath: string, data: Uint8Array): Promise<void>;
+  /** Write `data` to a workspace-relative path, creating parent dirs (delta hydrate). `mtimeMs`
+   *  restores the recorded modification time, which is what keeps the next diff from seeing every
+   *  restored file as changed. */
+  writeUnder?(root: string, relPath: string, data: Uint8Array, mtimeMs?: number): Promise<void>;
 }
 
 export interface WorkspaceStoreDeps {
@@ -367,7 +369,11 @@ export class WorkspaceStore {
           const bytes = await this.deps.broker.downloadBytes(url);
           if (bytes === null) continue; // object vanished — the run re-creates it, as with no snapshot
           try {
-            await this.deps.fs.writeUnder?.(this.deps.workspaceRoot, e.p, bytes);
+            // Restore the recorded mtime with the bytes. Without it every restored file looks NEW to
+            // the next diff — the whole workspace re-uploads on every run and the delta only ever
+            // saves work WITHIN a run, which is most of the point gone. `tar` preserves mtimes, so
+            // the tarball path never had this; per-file writes have to do it explicitly.
+            await this.deps.fs.writeUnder?.(this.deps.workspaceRoot, e.p, bytes, e.m);
           } catch (err) {
             // Same rule as the tarball path: once a restore has begun writing, a failure leaves a
             // tree that must never be persisted back over the stored snapshot.
@@ -627,7 +633,12 @@ export class NodeWorkspaceFs implements WorkspaceFs {
     return out;
   }
 
-  async writeUnder(root: string, relPath: string, data: Uint8Array): Promise<void> {
+  async writeUnder(
+    root: string,
+    relPath: string,
+    data: Uint8Array,
+    mtimeMs?: number,
+  ): Promise<void> {
     const target = join(root, relPath);
     // The manifest is ours, but it round-trips through S3, so treat its paths as untrusted: a `..`
     // entry must not let a restore write outside the workspace.
@@ -637,6 +648,10 @@ export class NodeWorkspaceFs implements WorkspaceFs {
     }
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, data);
+    if (mtimeMs !== undefined) {
+      const seconds = mtimeMs / 1000;
+      await utimes(target, seconds, seconds);
+    }
   }
 }
 

@@ -26,8 +26,9 @@ interface Harness {
   remote: Remote;
   /** The local tree the fake fs reports. */
   local: Map<string, WorkspaceFileEntry>;
-  /** Files written back to disk by hydrate. */
+  /** Files written back to disk by hydrate, with the mtime the restore applied. */
   written: string[];
+  restoredMtimes: Map<string, number | undefined>;
   puts: string[];
   deletes: string[];
   manifestGrant: WorkspacePersistGrant | null;
@@ -38,6 +39,7 @@ function harness(opts: { delta?: boolean } = {}): Harness {
   const remote: Remote = { objects: new Map(), manifest: null };
   const local = new Map<string, WorkspaceFileEntry>();
   const written: string[] = [];
+  const restoredMtimes = new Map<string, number | undefined>();
   const puts: string[] = [];
   const deletes: string[] = [];
   const h: Partial<Harness> = { manifestGrant: null };
@@ -99,8 +101,9 @@ function harness(opts: { delta?: boolean } = {}): Harness {
     rm: () => Promise.resolve(),
     exists: () => Promise.resolve(true),
     walk: () => Promise.resolve([...local.values()]),
-    writeUnder: (_root: string, rel: string) => {
+    writeUnder: (_root: string, rel: string, _data: Uint8Array, mtimeMs?: number) => {
       written.push(rel);
+      restoredMtimes.set(rel, mtimeMs);
       return Promise.resolve();
     },
   };
@@ -110,7 +113,7 @@ function harness(opts: { delta?: boolean } = {}): Harness {
     extract: () => Promise.resolve(),
   };
 
-  Object.assign(h, { broker, fs, archiver, remote, local, written, puts, deletes });
+  Object.assign(h, { broker, fs, archiver, remote, local, written, restoredMtimes, puts, deletes });
   return h as Harness;
 }
 
@@ -318,6 +321,65 @@ describe("WorkspaceStore — a partial restore disarms persistence", () => {
     set(h, "a.txt", 3, 100);
     // Nothing was half-written, so this run's state is real and must be saved.
     expect(await s.persist()).toBeGreaterThan(0);
+  });
+});
+
+// Caught on dev after the delta first ran for real: hydrate wrote each file fresh, so every restored
+// file got a NEW mtime, the next diff saw the whole tree as changed, and a run that touched one byte
+// re-uploaded everything. The delta then only saved work WITHIN a run — most of the point gone.
+// `tar` preserves mtimes, so the tarball path never had this; per-file writes must do it explicitly.
+describe("WorkspaceStore — a restore preserves mtime, so the next diff is honest", () => {
+  it("restores each file with the mtime the manifest recorded", async () => {
+    const h = harness();
+    set(h, "a.txt", 3, 111_000);
+    set(h, "big.bin", 5_000_000, 222_000);
+    await store(h).persist();
+
+    const fresh = harness();
+    fresh.remote.manifest = h.remote.manifest;
+    for (const [k, v] of h.remote.objects) fresh.remote.objects.set(k, v);
+    await store(fresh).hydrate();
+
+    expect(fresh.restoredMtimes.get("a.txt")).toBe(111_000);
+    expect(fresh.restoredMtimes.get("big.bin")).toBe(222_000);
+  });
+
+  it("a run that hydrates and changes NOTHING uploads nothing", async () => {
+    const h = harness();
+    set(h, "a.txt", 3, 111_000);
+    set(h, "big.bin", 5_000_000, 222_000);
+    await store(h).persist();
+
+    // A second run: same stored scope, and the restore puts the same (size, mtime) back on disk.
+    const next = harness();
+    next.remote.manifest = h.remote.manifest;
+    for (const [k, v] of h.remote.objects) next.remote.objects.set(k, v);
+    set(next, "a.txt", 3, 111_000);
+    set(next, "big.bin", 5_000_000, 222_000);
+    const s = store(next);
+    await s.hydrate();
+    await s.persist();
+
+    expect(next.puts).toEqual([]);
+    expect(next.deletes).toEqual([]);
+  });
+
+  it("a run that hydrates and edits ONE file uploads only that file", async () => {
+    const h = harness();
+    set(h, "a.txt", 3, 111_000);
+    set(h, "big.bin", 5_000_000, 222_000);
+    await store(h).persist();
+
+    const next = harness();
+    next.remote.manifest = h.remote.manifest;
+    for (const [k, v] of h.remote.objects) next.remote.objects.set(k, v);
+    set(next, "a.txt", 9, 999_000); // the run edited it
+    set(next, "big.bin", 5_000_000, 222_000); // untouched by the run
+    const s = store(next);
+    await s.hydrate();
+    await s.persist();
+
+    expect(next.puts).toEqual(["a.txt"]);
   });
 });
 
