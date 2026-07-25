@@ -381,7 +381,10 @@ export class RunnerControlClient {
       reason?: string;
     }>("workspace/persist-url", "workspace/persist-url", { sizeBytes });
     if (body.url !== null) return { url: body.url, contentType: body.contentType ?? "" };
-    return { url: null, reason: body.reason === "storage_limit" ? "storage_limit" : "not_eligible" };
+    return {
+      url: null,
+      reason: body.reason === "storage_limit" ? "storage_limit" : "not_eligible",
+    };
   }
 
   /** Download bytes from a presigned S3 URL (workspace hydrate). `null` on 404 (no snapshot yet —
