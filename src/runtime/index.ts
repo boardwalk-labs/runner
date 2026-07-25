@@ -96,6 +96,7 @@ import {
   TarWorkspaceArchiver,
   NodeWorkspaceFs,
   StatWorkspaceFingerprinter,
+  WORKSPACE_MAX_DECOMPRESSION_RATIO,
   resolvePersistSelection,
   type PersistSelection,
 } from "./workspace_store.js";
@@ -465,7 +466,11 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
           })
         : new WorkspaceStore({
             broker,
-            archiver: new TarWorkspaceArchiver(),
+            // The workspace archive is one WE wrote, restored into the tenant's own guest, so the
+            // bomb guard protects nothing here while its firing costs the author their state.
+            archiver: new TarWorkspaceArchiver({
+              maxDecompressionRatio: WORKSPACE_MAX_DECOMPRESSION_RATIO,
+            }),
             fs: new NodeWorkspaceFs(),
             workspaceRoot: runtime.workspaceRoot,
             selection,
@@ -697,7 +702,10 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       if (bytes === null) throw new Error("program artifact download returned no body");
       return bytes;
     },
-    // Extract the verified artifact tarball via system `tar` (same impl as workspace snapshots).
+    // Extract the verified artifact tarball. Same impl as workspace snapshots but DELIBERATELY with
+    // node-tar's default decompression-ratio guard: a program artifact is the untrusted-input case
+    // the guard exists for (an arbitrary control plane on a self-hosted runner). Only the workspace
+    // raises it — see WORKSPACE_MAX_DECOMPRESSION_RATIO.
     extractArchive: (tgzPath, destDir) => new TarWorkspaceArchiver().extract(tgzPath, destDir),
     // Guarantee /workspace exists before the program runs (override-safe; the image also pre-creates
     // it). Lets authors write to /workspace without a defensive mkdir — see the descriptor's `workspace` field.

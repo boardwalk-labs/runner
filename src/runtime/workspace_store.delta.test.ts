@@ -1,6 +1,12 @@
 import { describe, it, expect } from "vitest";
+import * as os from "node:os";
+import * as path from "node:path";
+import { mkdtemp, mkdir, writeFile, stat, rm } from "node:fs/promises";
+import { create as tarCreate } from "tar";
 import {
   WorkspaceStore,
+  TarWorkspaceArchiver,
+  WORKSPACE_MAX_DECOMPRESSION_RATIO,
   type WorkspaceArchiver,
   type WorkspaceBrokerTransport,
   type WorkspaceFileUrls,
@@ -297,8 +303,11 @@ describe("WorkspaceStore — a partial restore disarms persistence", () => {
     await storeWithEvents(h, events).hydrate();
     expect(events).toHaveLength(1);
     expect(events[0]?.kind).toBe("workspace_persist_skipped");
-    expect(events[0]?.detail).toContain("TAR_ABORT");
     expect(events[0]?.detail).toContain("will not save");
+    // node-tar's raw abort text is meaningless to an author, so the ratio case is translated into
+    // the actual condition rather than echoed.
+    expect(events[0]?.detail).not.toContain("TAR_ABORT");
+    expect(events[0]?.detail).toContain("compresses far beyond");
   });
 
   it("stays disarmed for EVERY later persist, not just the first", async () => {
@@ -431,5 +440,40 @@ describe("WorkspaceStore delta hydrate", () => {
     for (const [k, v] of h.remote.objects) fresh.remote.objects.set(k, v);
     await store(fresh).hydrate();
     expect(fresh.written).toEqual(["b.txt"]);
+  });
+});
+
+// The bomb guard fired on a real dev workspace and made it unrestorable. It is raised for the
+// WORKSPACE only — a program artifact is the untrusted-input case the guard exists for.
+describe("TarWorkspaceArchiver decompression-ratio guard", () => {
+  /** A tarball whose single member is 20 MiB of one repeated byte — ~1019:1, over node-tar's 1000. */
+  async function bombTgz(): Promise<{ tgz: string; dir: string; cleanup: () => Promise<void> }> {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "bw-ratio-"));
+    const src = path.join(dir, "src");
+    await mkdir(src, { recursive: true });
+    await writeFile(path.join(src, "big.bin"), Buffer.alloc(20 * 1024 * 1024, 7));
+    const tgz = path.join(dir, "a.tgz");
+    await tarCreate({ gzip: true, file: tgz, cwd: src }, ["big.bin"]);
+    return { tgz, dir, cleanup: () => rm(dir, { recursive: true, force: true }) };
+  }
+
+  it("DEFAULT (program artifact) still refuses a bomb", async () => {
+    const { tgz, dir, cleanup } = await bombTgz();
+    const out = path.join(dir, "out-default");
+    await expect(new TarWorkspaceArchiver().extract(tgz, out)).rejects.toThrow(/ratio/i);
+    await cleanup();
+  });
+
+  // This is the case that was broken in production: the archive is ours, restored into the tenant's
+  // own guest, and the guard only cost them their state.
+  it("RAISED (workspace) restores it whole", async () => {
+    const { tgz, dir, cleanup } = await bombTgz();
+    const out = path.join(dir, "out-raised");
+    const archiver = new TarWorkspaceArchiver({
+      maxDecompressionRatio: WORKSPACE_MAX_DECOMPRESSION_RATIO,
+    });
+    await archiver.extract(tgz, out);
+    expect((await stat(path.join(out, "big.bin"))).size).toBe(20 * 1024 * 1024);
+    await cleanup();
   });
 });

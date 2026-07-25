@@ -246,9 +246,15 @@ export class WorkspaceStore {
   private disarmAfterPartialRestore(err: unknown): void {
     this.restoreFailure = errMsg(err);
     log.warn("workspace_restore_partial", { error: this.restoreFailure });
+    // node-tar's raw abort text means nothing to an author, so name the actual condition. This
+    // should be unreachable now that the workspace raises the ratio, but a scope big enough to stay
+    // on the tarball path can still find it, and an opaque TAR_ABORT is a dead end.
+    const cause = /decompression ratio/i.test(this.restoreFailure)
+      ? "your stored workspace compresses far beyond what the archive path allows (usually a large zero-filled or highly repetitive file)"
+      : this.restoreFailure;
     this.reportSkipped({
       reason: "error",
-      detail: `restore failed partway (${this.restoreFailure}); this run will not save its workspace, to avoid overwriting the stored snapshot with a partially restored one`,
+      detail: `restore failed partway (${cause}); this run will not save its workspace, to avoid overwriting the stored snapshot with a partially restored one`,
     });
   }
 
@@ -548,7 +554,32 @@ export class WorkspaceStore {
 }
 
 /** Production archiver — shells out to the runner image's `tar` (the runner has full shell tooling). */
+/**
+ * node-tar aborts past this decompression ratio, and 20 MiB of a repeated byte is ~1019:1 — so a
+ * zero-filled or highly repetitive workspace could not be restored (observed on dev 2026-07-25).
+ *
+ * Raised for the WORKSPACE only, never for a program artifact. The guard defends against a
+ * decompression bomb in UNTRUSTED input, and that is exactly the program-artifact case (an arbitrary
+ * control plane on a self-hosted runner). A workspace snapshot is an archive we created ourselves,
+ * from our own org-scoped key, restored into the tenant's OWN guest — attacker and victim are the
+ * same tenant, who already runs arbitrary code there and could fill that disk directly. So the guard
+ * buys nothing on this path while its firing costs a user their compounding state.
+ *
+ * Not a principled number: a *ratio* is the wrong bound here at all (the real constraint is guest
+ * disk, which node-tar can't express). It is a sanity backstop against accidental blowup, and the
+ * partial-restore disarm (§5.3) is what makes any remaining trip loud and non-destructive.
+ */
+export const WORKSPACE_MAX_DECOMPRESSION_RATIO = 100_000;
+
+export interface TarWorkspaceArchiverOptions {
+  /** Override node-tar's decompression-ratio guard. Omit to keep its default — do that for anything
+   *  extracting untrusted input. See {@link WORKSPACE_MAX_DECOMPRESSION_RATIO}. */
+  maxDecompressionRatio?: number;
+}
+
 export class TarWorkspaceArchiver implements WorkspaceArchiver {
+  constructor(private readonly options: TarWorkspaceArchiverOptions = {}) {}
+
   async archive(dir: string, destPath: string, paths?: readonly string[]): Promise<number> {
     // `-C dir <members>` archives relative to dir, so extract restores in place either way: `.` for
     // the whole tree (`persist: true`), or exactly the named dirs (`persist: [...]` ∪ memory dirs).
@@ -568,7 +599,12 @@ export class TarWorkspaceArchiver implements WorkspaceArchiver {
     // paths and `..` members, and refuses to write THROUGH a symlink (unlinking it first), closing
     // the traversal/symlink-escape gaps that differ between GNU tar and bsdtar. Same behavior on
     // macOS and Linux, no dependency on which `tar` the OS ships.
-    await tarExtract({ file: srcPath, cwd: dir });
+    const ratio = this.options.maxDecompressionRatio;
+    await tarExtract({
+      file: srcPath,
+      cwd: dir,
+      ...(ratio === undefined ? {} : { maxDecompressionRatio: ratio }),
+    });
   }
 }
 
