@@ -198,8 +198,13 @@ export class WorkspaceStore {
     try {
       // A scope written by the delta path has a manifest; one written before it (or by the
       // too-many-files fallback) has only the tarball. Try the manifest first and fall through, so
-      // an upgrade migrates a scope on its next persist with no restore gap in between.
-      if (await this.hydrateDelta()) return;
+      // an upgrade migrates a scope on its next persist with no restore gap in between. A failure
+      // here (e.g. a control plane without the endpoints) also falls through rather than aborting.
+      try {
+        if (await this.hydrateDelta()) return;
+      } catch (err) {
+        log.warn("workspace_delta_hydrate_failed_falling_back", { error: errMsg(err) });
+      }
 
       const url = await this.deps.broker.workspaceHydrateUrl();
       if (url === null) return; // not eligible (not opted-in / self-hosted)
@@ -233,8 +238,15 @@ export class WorkspaceStore {
       if (paths !== undefined && paths.length === 0) return 0;
 
       // Delta path: upload only what changed. Falls through to the whole-tarball path below when the
-      // broker or fs lacks the seam, or when the tree is too large to address per-file.
-      const delta = await this.persistDelta(paths);
+      // broker or fs lacks the seam, when the tree is too large to address per-file, or when the
+      // delta itself fails — a runner whose control plane hasn't deployed the endpoints yet gets
+      // 404s here, and that must cost a full tarball persist, never a lost one.
+      let delta: number | null = null;
+      try {
+        delta = await this.persistDelta(paths);
+      } catch (err) {
+        log.warn("workspace_delta_failed_falling_back", { error: errMsg(err) });
+      }
       if (delta !== null) return delta;
 
       // persist() runs before EVERY sleep and freeze, not just at the end, so a long agent that

@@ -212,6 +212,40 @@ describe("WorkspaceStore delta persist", () => {
     expect(await store(h).persist()).toBe(42); // the archiver's size — the legacy path ran
     expect(h.puts).toEqual([]);
   });
+
+  // The deploy-order hazard: the client implements these methods, so a runner that reaches a backend
+  // without the routes gets a 404. That must cost a full tarball persist, never a lost one.
+  it("falls back to the tarball when a delta endpoint throws (404 from an undeployed broker)", async () => {
+    const h = harness();
+    h.broker.workspaceManifestPutUrl = () => Promise.reject(new Error("404 Not Found"));
+    set(h, "a.txt", 3, 100);
+    const events: unknown[] = [];
+    const s = new WorkspaceStore({
+      broker: h.broker,
+      archiver: h.archiver,
+      fs: h.fs,
+      workspaceRoot: "/workspace",
+      tmpPath: "/tmp/ws.tgz",
+      selection: () => true,
+      events: { emit: (b) => events.push(b) },
+    });
+    expect(await s.persist()).toBe(42); // the tarball ran
+    // And it is NOT reported as dropped state — nothing was lost.
+    expect(events).toEqual([]);
+  });
+
+  it("falls back to the tarball when hydrate's delta path throws", async () => {
+    const h = harness();
+    h.broker.workspaceManifestGetUrl = () => Promise.reject(new Error("404 Not Found"));
+    let extracted = false;
+    h.archiver.extract = () => {
+      extracted = true;
+      return Promise.resolve();
+    };
+    h.broker.downloadBytes = () => Promise.resolve(new Uint8Array([1, 2, 3]));
+    await store(h).hydrate();
+    expect(extracted).toBe(true);
+  });
 });
 
 describe("WorkspaceStore delta hydrate", () => {
