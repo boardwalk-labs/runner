@@ -284,44 +284,81 @@ describe("RunnerControlClient.checkCancelled", () => {
 });
 
 describe("RunnerControlClient workspace", () => {
-  it("workspaceHydrateUrl POSTs and returns the url (or null when ineligible)", async () => {
-    const { fetchImpl, calls } = fakeFetch(() => json(200, { url: "https://s3/get?sig" }));
-    expect(await client(fetchImpl).workspaceHydrateUrl()).toBe("https://s3/get?sig");
-    expect(calls[0]?.url).toBe(
-      "https://api.boardwalk.sh/runner/v1/runs/run_1/workspace/hydrate-url",
-    );
-    const { fetchImpl: f2 } = fakeFetch(() => json(200, { url: null }));
-    expect(await client(f2).workspaceHydrateUrl()).toBeNull();
+  it("reserve gates the projected footprint before any bytes move", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => json(200, { ok: true }));
+    expect(await client(fetchImpl).workspaceReserve(2048)).toEqual({ ok: true });
+    expect(calls[0]?.url).toBe("https://api.boardwalk.sh/runner/v1/runs/run_1/workspace/reserve");
+    expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({ totalBytes: 2048 });
   });
 
-  it("workspacePersistUrl sends the snapshot size + returns the url when granted", async () => {
-    const { fetchImpl, calls } = fakeFetch(() =>
-      json(200, { url: "https://s3/put?sig", contentType: "application/gzip" }),
+  it("reserve carries WHY it refused, so a refusal isn't read as a no-op", async () => {
+    // `not_eligible` (self-hosted, nothing lost) and `storage_limit` (we threw away what the run
+    // produced) both store nothing, which is exactly why they must not look alike on the wire.
+    const { fetchImpl } = fakeFetch(() =>
+      json(200, { ok: false, reason: "storage_limit", maxBytes: 100 }),
     );
-    expect(await client(fetchImpl).workspacePersistUrl(2048)).toEqual({
-      url: "https://s3/put?sig",
-      contentType: "application/gzip",
-    });
-    expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({ sizeBytes: 2048 });
-  });
-
-  it("workspacePersistUrl carries WHY no url was minted, so a refusal isn't read as a no-op", async () => {
-    const { fetchImpl } = fakeFetch(() => json(200, { url: null, reason: "storage_limit" }));
-    expect(await client(fetchImpl).workspacePersistUrl(0)).toEqual({
-      url: null,
+    expect(await client(fetchImpl).workspaceReserve(999)).toEqual({
+      ok: false,
       reason: "storage_limit",
+      maxBytes: 100,
     });
   });
 
-  // An older broker answers a bare `{ url: null }`. That has to keep meaning what it used to —
-  // the ordinary no-op — or a deploy-order skew would spam authors with false "state dropped"
-  // reports on every self-hosted run.
-  it("workspacePersistUrl defaults a reason-less null to not_eligible (older broker)", async () => {
-    const { fetchImpl } = fakeFetch(() => json(200, { url: null }));
-    expect(await client(fetchImpl).workspacePersistUrl(0)).toEqual({
-      url: null,
-      reason: "not_eligible",
+  it("reads the manifest with the generation a conditional write needs", async () => {
+    const { fetchImpl, calls } = fakeFetch(() =>
+      json(200, { manifest: '{"v":2}', generation: '"etag-3"' }),
+    );
+    expect(await client(fetchImpl).workspaceManifestRead()).toEqual({
+      manifest: '{"v":2}',
+      generation: '"etag-3"',
     });
+    expect(calls[0]?.url).toBe(
+      "https://api.boardwalk.sh/runner/v1/runs/run_1/workspace/manifest/read",
+    );
+  });
+
+  it("writes the manifest conditionally and returns the new generation", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => json(200, { ok: true, generation: '"etag-4"' }));
+    expect(await client(fetchImpl).workspaceManifestWrite("{}", '"etag-3"', 42)).toEqual({
+      ok: true,
+      generation: '"etag-4"',
+    });
+    expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({
+      manifest: "{}",
+      expected: '"etag-3"',
+      totalBytes: 42,
+    });
+  });
+
+  it("surfaces a conflict rather than pretending the write landed", async () => {
+    const { fetchImpl } = fakeFetch(() => json(200, { ok: false, conflict: true }));
+    expect(await client(fetchImpl).workspaceManifestWrite("{}", '"stale"', 0)).toEqual({
+      ok: false,
+      conflict: true,
+    });
+  });
+
+  it("asks which packs already exist, and skips the round trip for an empty set", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => json(200, { existing: ["aa"] }));
+    expect(await client(fetchImpl).workspacePacksExist(["aa", "bb"])).toEqual(["aa"]);
+    expect(await client(fetchImpl).workspacePacksExist([])).toEqual([]);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("presigns packs by DIGEST — the body never names a key", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => json(200, { urls: { aa: "https://s3/aa" } }));
+    expect(await client(fetchImpl).workspacePackUrls("put", ["aa"])).toEqual({
+      aa: "https://s3/aa",
+    });
+    expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({ op: "put", digests: ["aa"] });
+  });
+
+  it("deletes packs, and skips the round trip when there is nothing to reclaim", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response(null, { status: 204 }));
+    await client(fetchImpl).workspacePacksDelete(["aa"]);
+    await client(fetchImpl).workspacePacksDelete([]);
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({ digests: ["aa"] });
   });
 
   it("downloadBytes returns the bytes, null on 404, throws otherwise", async () => {

@@ -15,8 +15,7 @@ import { createLogger } from "./support/index.js";
 import type { McpTokenResult } from "@boardwalk-labs/engine/core";
 import type { Run } from "./wire/run.js";
 import type { WebSearchOutput } from "./tools/web_search.js";
-import type { WorkspacePersistGrant } from "./workspace_store.js";
-import { workspaceFileKeySuffix } from "./workspace_delta.js";
+import type { WorkspaceReservation, ManifestWriteResult } from "./workspace_sync.js";
 import type {
   ArtifactCommitInput,
   ArtifactPresignInput,
@@ -354,92 +353,91 @@ export class RunnerControlClient {
       .answers;
   }
 
-  /** Mint a presigned GET URL to restore this workflow's last `/workspace` snapshot (workspace
-   *  persistence). `null` when the run isn't eligible (not opted-in, or self-hosted). */
-  async workspaceHydrateUrl(): Promise<string | null> {
-    const res = await this.controlFetch(this.url("workspace/hydrate-url"), {
-      method: "POST",
-      headers: this.headers(false),
-    });
-    if (res.status !== 200) throw await brokerError(res, "workspace/hydrate-url");
-    return ((await res.json()) as { url: string | null }).url;
-  }
+  // ---- Workspace persistence (docs/WORKSPACE_PERSISTENCE.md §5.2) ----
+  //
+  // The body carries pack DIGESTS, never keys: the broker derives every key from the run token's scope
+  // (org + workflow + environment + workspace key), so a run can only ever touch its own scope.
+  //
+  // Pack BYTES go straight to S3 by presigned URL (they are large). The MANIFEST goes through the
+  // broker, because only a server-side write can be CONDITIONAL — the mechanism that stops two
+  // concurrent runs of one scope from silently dropping each other's merge (§6).
 
-  /** Mint a presigned PUT URL to snapshot this workflow's `/workspace` (the worker uploads the tarball
-   *  straight to S3). `sizeBytes` is the archive's on-disk size (the worker tars BEFORE requesting the
-   *  URL) — the broker records it for the org storage counter + daily meter; the snapshot overwrites
-   *  one per-workflow key, so it's the workflow's full footprint.
-   *
-   *  When no URL is minted the result carries WHY. The broker used to answer a bare `{ url: null }` for
-   *  two very different things — an ordinary self-hosted no-op, and a REFUSAL because the org is over
-   *  its storage ceiling — so the runner logged a thrown-away snapshot as "not eligible" and the author
-   *  was never told their compounding state had stopped compounding. `reason` defaults to
-   *  `not_eligible` so an older broker (which omits the field) keeps its previous meaning. */
-  async workspacePersistUrl(sizeBytes: number): Promise<WorkspacePersistGrant> {
-    const body = await this.postJson<{
-      url: string | null;
-      contentType?: string;
-      reason?: string;
-    }>("workspace/persist-url", "workspace/persist-url", { sizeBytes });
-    if (body.url !== null) return { url: body.url, contentType: body.contentType ?? "" };
+  /** Gate the scope's projected footprint before any bytes move. A refusal carries WHY: `not_eligible`
+   *  (self-hosted — nothing was lost) versus `storage_limit` (we REFUSED a snapshot the run made). A
+   *  wire that conflated the two is how persistence stopped silently once before (§8, path 6). */
+  async workspaceReserve(totalBytes: number): Promise<WorkspaceReservation> {
+    const body = await this.postJson<{ ok: boolean; reason?: string; maxBytes?: number }>(
+      "workspace/reserve",
+      "workspace/reserve",
+      { totalBytes },
+    );
+    if (body.ok) return { ok: true };
     return {
-      url: null,
+      ok: false,
       reason: body.reason === "storage_limit" ? "storage_limit" : "not_eligible",
+      ...(typeof body.maxBytes === "number" ? { maxBytes: body.maxBytes } : {}),
     };
   }
 
-  // ---- Delta workspace sync (docs/WORKSPACE_PERSISTENCE.md §5.2) ----
-  // The body carries path DIGESTS, never keys: the broker derives every key from the run token's
-  // org + workflow + environment, so a run can only ever touch its own scope.
-
-  /** Presign a GET for this scope's manifest. `null` when not eligible; a scope that was never
-   *  delta-persisted gets a URL whose GET 404s, which the store reads as "no manifest". */
-  async workspaceManifestGetUrl(): Promise<string | null> {
-    const res = await this.controlFetch(this.url("workspace/manifest/get-url"), {
-      method: "POST",
-      headers: this.headers(false),
-    });
-    if (res.status !== 200) throw await brokerError(res, "workspace/manifest/get-url");
-    return ((await res.json()) as { url: string | null }).url;
+  /** This scope's manifest plus the generation token a conditional write compares against. */
+  async workspaceManifestRead(): Promise<{ manifest: string | null; generation: string | null }> {
+    return await this.postJson<{ manifest: string | null; generation: string | null }>(
+      "workspace/manifest/read",
+      "workspace/manifest/read",
+      {},
+    );
   }
 
-  /** Presign a PUT for this scope's manifest, gating on the scope's WHOLE footprint. */
-  async workspaceManifestPutUrl(totalBytes: number): Promise<WorkspacePersistGrant> {
-    const body = await this.postJson<{
-      url: string | null;
-      contentType?: string;
-      reason?: string;
-    }>("workspace/manifest/put-url", "workspace/manifest/put-url", { totalBytes });
-    if (body.url !== null) return { url: body.url, contentType: body.contentType ?? "" };
-    return {
-      url: null,
-      reason: body.reason === "storage_limit" ? "storage_limit" : "not_eligible",
-    };
+  /** Compare-and-swap this scope's manifest. `expected: null` asserts it does not exist yet. */
+  async workspaceManifestWrite(
+    manifest: string,
+    expected: string | null,
+    totalBytes: number,
+  ): Promise<ManifestWriteResult> {
+    const body = await this.postJson<{ ok: boolean; generation?: string; conflict?: boolean }>(
+      "workspace/manifest/write",
+      "workspace/manifest/write",
+      { manifest, expected, totalBytes },
+    );
+    if (body.ok) return { ok: true, generation: body.generation ?? null };
+    return { ok: false, conflict: true };
   }
 
-  /** Presign PUT or GET for a batch of per-path objects, returned keyed by workspace path. */
-  async workspaceFileUrls(
+  /** Which of these packs the scope already holds — the skip-upload check for a retried persist. */
+  async workspacePacksExist(digests: readonly string[]): Promise<string[]> {
+    if (digests.length === 0) return [];
+    const body = await this.postJson<{ existing?: string[] }>(
+      "workspace/packs/exists",
+      "workspace/packs/exists",
+      { digests },
+    );
+    return body.existing ?? [];
+  }
+
+  /** Presign PUT or GET for a batch of packs, returned keyed by digest. */
+  async workspacePackUrls(
     op: "put" | "get",
-    paths: readonly string[],
+    digests: readonly string[],
   ): Promise<Record<string, string>> {
     const body = await this.postJson<{ urls?: Record<string, string> }>(
-      "workspace/files/presign",
-      "workspace/files/presign",
-      { op, paths: digestPaths(paths) },
+      "workspace/packs/presign",
+      "workspace/packs/presign",
+      { op, digests },
     );
     return body.urls ?? {};
   }
 
-  /** Delete the objects for paths the run removed. */
-  async workspaceDeleteFiles(paths: readonly string[]): Promise<void> {
-    if (paths.length === 0) return;
-    const res = await this.controlFetch(this.url("workspace/files/delete"), {
+  /** Reclaim packs nothing references any more. Called AFTER the manifest naming the survivors has
+   *  landed, so a crash between the two leaves unreferenced bytes rather than a broken manifest. */
+  async workspacePacksDelete(digests: readonly string[]): Promise<void> {
+    if (digests.length === 0) return;
+    const res = await this.controlFetch(this.url("workspace/packs/delete"), {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ paths: digestPaths(paths) }),
+      body: JSON.stringify({ digests }),
     });
     if (res.status !== 204 && res.status !== 200) {
-      throw await brokerError(res, "workspace/files/delete");
+      throw await brokerError(res, "workspace/packs/delete");
     }
   }
 
@@ -798,13 +796,4 @@ async function inferenceHttpError(res: Response): Promise<Error> {
   }
   log.warn("broker_inference_failed", { status: res.status });
   return new Error(message);
-}
-
-/** `{ <workspacePath>: <sha256 of that path> }` — the broker needs the digest to build the key and
- *  the path to key the response, and deriving it here keeps path→key deterministic on both sides
- *  without ever putting a raw path in an S3 key. */
-function digestPaths(paths: readonly string[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const p of paths) out[p] = workspaceFileKeySuffix(p);
-  return out;
 }

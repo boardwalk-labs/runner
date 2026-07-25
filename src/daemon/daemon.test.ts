@@ -21,6 +21,7 @@ const CLAIM: ClaimResponse = {
   run_id: "01H_run",
   workflow_id: "01H_workflow",
   environment_id: null,
+  workspace_key: null,
   lease_expires_at: 300_000,
   control_plane: {
     base_url: "https://api.example",

@@ -10,7 +10,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import * as path from "node:path";
 import type { AssignmentOffer, ClaimResponse } from "../contract.js";
-import { localScopeDir } from "../runtime/local_workspace_store.js";
+import { localScopeDir } from "../runtime/local_workspace_backend.js";
 import { createLogger, type Logger } from "../runtime/support/index.js";
 import type { PoolClient } from "./pool_client.js";
 
@@ -103,13 +103,15 @@ export function startDaemon(deps: DaemonDeps): DaemonController {
     const runDir = path.join(deps.workDir, "runs", claim.run_id);
     const workspaceRoot = path.join(runDir, "workspace");
     await mkdir(workspaceRoot, { recursive: true });
-    // This run's durable workspace, keyed per (workflow, environment) and living OUTSIDE the per-run
-    // dir (which is scratch, removed with the run). Created up front because the container lane binds
-    // it as a mount, and docker would otherwise create it root-owned.
+    // This run's durable workspace, keyed per (workflow, environment, workspace key) and living
+    // OUTSIDE the per-run dir (which is scratch, removed with the run). Created up front because the
+    // container lane binds it as a mount, and docker would otherwise create it root-owned — which is
+    // also why the scope has to be known BEFORE the run starts, and therefore rides the claim.
     const persistScopeDir = localScopeDir(
       path.join(deps.workDir, "persist"),
       claim.workflow_id,
       claim.environment_id,
+      claim.workspace_key,
     );
     await mkdir(persistScopeDir, { recursive: true });
     const child = deps.spawn({

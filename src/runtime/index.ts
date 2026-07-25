@@ -93,14 +93,12 @@ import { RuntimeFlusher } from "./runtime_flusher.js";
 
 import {
   WorkspaceStore,
-  TarWorkspaceArchiver,
-  NodeWorkspaceFs,
-  StatWorkspaceFingerprinter,
-  WORKSPACE_MAX_DECOMPRESSION_RATIO,
   resolvePersistSelection,
   type PersistSelection,
 } from "./workspace_store.js";
-import { LocalWorkspaceStore } from "./local_workspace_store.js";
+import { LocalWorkspaceBackend } from "./local_workspace_backend.js";
+import { BrokerWorkspaceBackend } from "./broker_workspace_backend.js";
+import { extractTarball } from "./tar_archive.js";
 import { PhaseTracker } from "./phase_tracker.js";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -451,36 +449,24 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     const memoryDirs = new Set<string>();
     const selection = (): PersistSelection =>
       resolvePersistSelection(manifest.workspace?.persist, memoryDirs);
-    // TWO stores, ONE contract (WORKSPACE_PERSISTENCE.md I3): `runs_on` decides WHERE the bytes live,
-    // never WHETHER persistence happens. A runner with its OWN durable root (a self-hosted daemon,
-    // which sets PERSIST_ROOT) keeps state on the customer's disk and never touches our S3 — the
-    // broker returns null URLs for self-hosted runs by design. Hosted runners have no local disk that
-    // outlives the VM, so they push a tarball through the broker. Before this, "don't upload it" was
-    // implemented as "don't persist it", so self-hosted runs silently forgot everything.
-    const workspaceStore =
-      runtime.persistScopeDir !== undefined
-        ? new LocalWorkspaceStore({
-            scopeDir: runtime.persistScopeDir,
-            workspaceRoot: runtime.workspaceRoot,
-            selection,
-          })
-        : new WorkspaceStore({
-            broker,
-            // The workspace archive is one WE wrote, restored into the tenant's own guest, so the
-            // bomb guard protects nothing here while its firing costs the author their state.
-            archiver: new TarWorkspaceArchiver({
-              maxDecompressionRatio: WORKSPACE_MAX_DECOMPRESSION_RATIO,
-            }),
-            fs: new NodeWorkspaceFs(),
-            workspaceRoot: runtime.workspaceRoot,
-            selection,
-            // A dropped snapshot rides the run's ONE ordered event stream, so "your state did not
-            // carry forward" lands in the run history next to the work that produced it.
-            events: runEvents,
-            // Skip re-uploading an unchanged workspace: persist() fires before every sleep and
-            // freeze, so a long agent looping on sleep otherwise pays a full tar+upload per iteration.
-            fingerprinter: new StatWorkspaceFingerprinter(),
-          });
+    // ONE store, ONE algorithm, TWO backends (WORKSPACE_PERSISTENCE.md I3 + I6): `runs_on` decides
+    // WHERE the bytes live, never WHETHER persistence happens and never HOW. A runner with its own
+    // durable root (a self-hosted daemon, which sets PERSIST_ROOT) keeps state on the customer's disk
+    // and never touches our S3; a hosted runner has no disk that outlives the VM, so it goes through
+    // the broker. Everything above the backend — the diff, the packs, the three-way merge, the
+    // reporting — is the same code on both, which is the point: the lanes that differed are exactly
+    // where every silent data-loss path hid.
+    const workspaceStore = new WorkspaceStore({
+      backend:
+        runtime.persistScopeDir !== undefined
+          ? new LocalWorkspaceBackend(runtime.persistScopeDir)
+          : new BrokerWorkspaceBackend(broker),
+      workspaceRoot: runtime.workspaceRoot,
+      selection,
+      // A dropped snapshot rides the run's ONE ordered event stream, so "your state did not carry
+      // forward" lands in the run history next to the work that produced it.
+      events: runEvents,
+    });
     // The run's identity + on-demand public-API bearer, surfaced to the program via `import { runtime }`.
     // ids come from the claimed run; the bearer is the captured (scrubbed-from-env) api token, already
     // recorded in this run's redactor above — so threading it into an MCP header keeps it out of LLM
@@ -702,11 +688,11 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       if (bytes === null) throw new Error("program artifact download returned no body");
       return bytes;
     },
-    // Extract the verified artifact tarball. Same impl as workspace snapshots but DELIBERATELY with
-    // node-tar's default decompression-ratio guard: a program artifact is the untrusted-input case
-    // the guard exists for (an arbitrary control plane on a self-hosted runner). Only the workspace
-    // raises it — see WORKSPACE_MAX_DECOMPRESSION_RATIO.
-    extractArchive: (tgzPath, destDir) => new TarWorkspaceArchiver().extract(tgzPath, destDir),
+    // Extract the verified artifact tarball. The runner's only remaining tar use: workspaces are packs
+    // now, but a deployed program is still delivered as a tarball. Keeps node-tar's default
+    // decompression-ratio guard — a program artifact from an arbitrary control plane on a self-hosted
+    // runner is exactly the untrusted input that guard exists for (see tar_archive.ts).
+    extractArchive: (tgzPath, destDir) => extractTarball(tgzPath, destDir),
     // Guarantee /workspace exists before the program runs (override-safe; the image also pre-creates
     // it). Lets authors write to /workspace without a defensive mkdir — see the descriptor's `workspace` field.
     ensureWorkspace: async () => {

@@ -161,6 +161,11 @@ export const claimResponseSchema = z.strictObject({
    */
   workflow_id: id,
   environment_id: id.nullable(),
+  /** Resolved `workspace.key` (null = the workflow's single scope). Part of the workspace SCOPE
+   *  alongside `environment_id`, and needed BEFORE the run starts for the same reason: under container
+   *  isolation the scope dir is a bind mount chosen at `docker run` time, and mounting only that scope
+   *  is what stops a program reading another scope's state. */
+  workspace_key: z.string().nullable(),
   /** Heartbeat before this or the lease expires and the run is recovered elsewhere. */
   lease_expires_at: epochMs,
   /**
