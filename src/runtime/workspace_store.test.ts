@@ -214,11 +214,11 @@ describe("WorkspaceStore.persist", () => {
       const r = recorder({ archiveThrows: true });
       await store(r).persist();
       expect(r.events).toHaveLength(1);
-      expect(r.events[0]).toMatchObject({
-        kind: "workspace_persist_skipped",
-        reason: "error",
-        detail: expect.stringContaining("tar failed") as unknown as string,
-      });
+      const [first] = r.events;
+      expect(first?.kind).toBe("workspace_persist_skipped");
+      if (first?.kind !== "workspace_persist_skipped") throw new Error("unreachable");
+      expect(first.reason).toBe("error");
+      expect(first.detail).toContain("tar failed");
     });
 
     it("emits nothing on the happy path", async () => {
