@@ -14,6 +14,8 @@ import {
   type WorkspaceBrokerTransport,
   type WorkspaceFs,
   type WorkspacePersistGrant,
+  type WorkspaceFingerprinter,
+  StatWorkspaceFingerprinter,
 } from "./workspace_store.js";
 import type { RunEventBody } from "./agent/events.js";
 
@@ -245,6 +247,103 @@ describe("WorkspaceStore.persist", () => {
     });
   });
 
+  // persist() fires before every sleep and freeze, so a loop that sleeps re-uploaded the whole
+  // workspace per iteration. The skip is what makes long sleep-heavy runs affordable.
+  describe("skips a persist whose bytes are already stored", () => {
+    /** A fingerprinter whose value the test drives directly. */
+    function fp(values: (string | null)[]): WorkspaceFingerprinter {
+      let i = 0;
+      return {
+        fingerprint: () => Promise.resolve(values[Math.min(i++, values.length - 1)] ?? null),
+      };
+    }
+
+    function storeWith(r: Recorder, fingerprinter: WorkspaceFingerprinter): WorkspaceStore {
+      return new WorkspaceStore({
+        broker: r.broker,
+        archiver: r.archiver,
+        fs: r.fs,
+        workspaceRoot: "/workspace",
+        tmpPath: "/tmp/ws.tgz",
+        selection: () => true,
+        events: { emit: (body) => r.events.push(body) },
+        fingerprinter,
+      });
+    }
+
+    it("uploads once, then skips while the workspace is unchanged", async () => {
+      const r = recorder();
+      const s = storeWith(r, fp(["same"]));
+      expect(await s.persist()).toBe(42);
+      expect(await s.persist()).toBe(0);
+      expect(await s.persist()).toBe(0);
+      expect(r.uploads).toHaveLength(1);
+      // The skip is total: no tar either, which is the expensive half on a big workspace.
+      expect(r.archives).toHaveLength(1);
+    });
+
+    it("uploads again as soon as the workspace changes", async () => {
+      const r = recorder();
+      const s = storeWith(r, fp(["a", "a", "b"]));
+      await s.persist();
+      await s.persist();
+      await s.persist();
+      expect(r.uploads).toHaveLength(2);
+    });
+
+    // The first persist of a run always happens: the selection isn't known at hydrate time (memory
+    // dirs register as agent calls run), so there is no trustworthy pre-persist fingerprint.
+    it("never skips the first persist of a run", async () => {
+      const r = recorder();
+      expect(await storeWith(r, fp(["x"])).persist()).toBe(42);
+      expect(r.uploads).toHaveLength(1);
+    });
+
+    it("persists when the fingerprint is unavailable — an unknown answer never skips", async () => {
+      const r = recorder();
+      const s = storeWith(r, fp([null]));
+      await s.persist();
+      await s.persist();
+      expect(r.uploads).toHaveLength(2);
+    });
+
+    it("persists when the fingerprinter throws", async () => {
+      const r = recorder();
+      const s = storeWith(r, {
+        fingerprint: () => Promise.reject(new Error("walk failed")),
+      });
+      await s.persist();
+      await s.persist();
+      expect(r.uploads).toHaveLength(2);
+    });
+
+    // A dropped snapshot must not be remembered as stored, or the retry at the next suspend point
+    // would skip and the state would be lost for the rest of the run.
+    it("does NOT remember a snapshot the broker refused", async () => {
+      const r = recorder({ persistUrl: { url: null, reason: "storage_limit" } });
+      const s = storeWith(r, fp(["same"]));
+      await s.persist();
+      await s.persist();
+      expect(r.archives).toHaveLength(2); // retried, not skipped
+    });
+
+    it("does NOT remember an over-cap snapshot", async () => {
+      const r = recorder({ archiveSize: WORKSPACE_SNAPSHOT_MAX_BYTES + 1 });
+      const s = storeWith(r, fp(["same"]));
+      await s.persist();
+      await s.persist();
+      expect(r.archives).toHaveLength(2);
+    });
+
+    it("is disabled when no fingerprinter is injected", async () => {
+      const r = recorder();
+      const s = store(r);
+      await s.persist();
+      await s.persist();
+      expect(r.uploads).toHaveLength(2);
+    });
+  });
+
   it("honors an injected maxSnapshotBytes override", async () => {
     const r = recorder({ archiveSize: 100 });
     const s = new WorkspaceStore({
@@ -390,5 +489,61 @@ describe("WorkspaceStore.persist — honoring the selection", () => {
     const r = recorder({ absentPaths: ["cache"] });
     expect(await store(r, ["cache"]).persist()).toBe(0);
     expect(r.uploads).toEqual([]);
+  });
+});
+
+describe("StatWorkspaceFingerprinter (real filesystem)", () => {
+  async function tree(): Promise<string> {
+    const root = await mkdtemp(path.join(os.tmpdir(), "bw-fp-"));
+    await mkdir(path.join(root, "cache"), { recursive: true });
+    await writeFile(path.join(root, "cache", "a.txt"), "aaa");
+    await writeFile(path.join(root, "notes.md"), "hello");
+    return root;
+  }
+
+  it("is stable across calls when nothing changes", async () => {
+    const root = await tree();
+    const f = new StatWorkspaceFingerprinter();
+    expect(await f.fingerprint(root, undefined)).toBe(await f.fingerprint(root, undefined));
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("changes when a file's content length changes", async () => {
+    const root = await tree();
+    const f = new StatWorkspaceFingerprinter();
+    const before = await f.fingerprint(root, undefined);
+    await writeFile(path.join(root, "notes.md"), "hello world");
+    expect(await f.fingerprint(root, undefined)).not.toBe(before);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("changes when a file is added or removed", async () => {
+    const root = await tree();
+    const f = new StatWorkspaceFingerprinter();
+    const before = await f.fingerprint(root, undefined);
+    await writeFile(path.join(root, "new.txt"), "x");
+    const added = await f.fingerprint(root, undefined);
+    expect(added).not.toBe(before);
+    await rm(path.join(root, "new.txt"));
+    expect(await f.fingerprint(root, undefined)).toBe(before);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  // The `persist: [...]` form must not be perturbed by scratch churn outside the selection, or the
+  // skip would never fire for the workflows that opted into a narrow list.
+  it("scopes to the selected paths, ignoring changes elsewhere in the workspace", async () => {
+    const root = await tree();
+    const f = new StatWorkspaceFingerprinter();
+    const before = await f.fingerprint(root, ["cache"]);
+    await writeFile(path.join(root, "notes.md"), "unrelated scratch churn");
+    expect(await f.fingerprint(root, ["cache"])).toBe(before);
+    await writeFile(path.join(root, "cache", "b.txt"), "b");
+    expect(await f.fingerprint(root, ["cache"])).not.toBe(before);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("returns a value (not a throw) for a path that does not exist", async () => {
+    const f = new StatWorkspaceFingerprinter();
+    await expect(f.fingerprint("/nope/does/not/exist", undefined)).resolves.not.toThrow();
   });
 });

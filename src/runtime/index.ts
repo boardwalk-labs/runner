@@ -95,6 +95,7 @@ import {
   WorkspaceStore,
   TarWorkspaceArchiver,
   NodeWorkspaceFs,
+  StatWorkspaceFingerprinter,
   resolvePersistSelection,
   type PersistSelection,
 } from "./workspace_store.js";
@@ -471,6 +472,9 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
             // A dropped snapshot rides the run's ONE ordered event stream, so "your state did not
             // carry forward" lands in the run history next to the work that produced it.
             events: runEvents,
+            // Skip re-uploading an unchanged workspace: persist() fires before every sleep and
+            // freeze, so a long agent looping on sleep otherwise pays a full tar+upload per iteration.
+            fingerprinter: new StatWorkspaceFingerprinter(),
           });
     // The run's identity + on-demand public-API bearer, surfaced to the program via `import { runtime }`.
     // ids come from the claimed run; the bearer is the captured (scrubbed-from-env) api token, already

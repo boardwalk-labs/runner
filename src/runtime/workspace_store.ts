@@ -13,9 +13,10 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { stat, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { stat, lstat, readdir, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { extract as tarExtract } from "tar";
 import { createLogger } from "./support/index.js";
 import type { RunEventBody } from "./agent/events.js";
@@ -95,6 +96,15 @@ export interface WorkspaceEventSink {
   emit(body: RunEventBody): unknown;
 }
 
+/**
+ * Cheap summary of what a selection currently holds, used to skip a persist that would rewrite bytes
+ * we already stored. `null` means "could not tell" — the caller then persists rather than risk
+ * skipping a real change, so a broken walk costs work, never data.
+ */
+export interface WorkspaceFingerprinter {
+  fingerprint(root: string, paths: readonly string[] | undefined): Promise<string | null>;
+}
+
 /** Minimal fs surface (so the store is unit-tested without touching disk). */
 export interface WorkspaceFs {
   readFile(path: string): Promise<Uint8Array>;
@@ -112,6 +122,8 @@ export interface WorkspaceStoreDeps {
   fs: WorkspaceFs;
   /** Where a dropped snapshot is reported to the author (see {@link WorkspaceEventSink}). */
   events: WorkspaceEventSink;
+  /** Change detection for the unchanged-persist skip. Omit to disable the skip (always persist). */
+  fingerprinter?: WorkspaceFingerprinter;
   /** The `/workspace` root to snapshot/restore. */
   workspaceRoot: string;
   /** What to persist, read AT PERSIST TIME (see {@link resolvePersistSelection}) — the run's memory
@@ -126,6 +138,10 @@ export interface WorkspaceStoreDeps {
 export class WorkspaceStore {
   private readonly tmpPath: string;
   private readonly maxSnapshotBytes: number;
+  /** Fingerprint of the last snapshot THIS run actually stored. Seeded only from a persist we
+   *  performed — never from hydrate, where the selection isn't known yet (memory dirs register as
+   *  the run's agent calls happen), so a hydrate-time fingerprint could cover the wrong file set. */
+  private lastStoredFingerprint: string | null = null;
   constructor(private readonly deps: WorkspaceStoreDeps) {
     // Scratch tarball path. Default to os.tmpdir() (which honors TMPDIR) rather than a machine-global
     // `/tmp/workspace-snapshot.tgz`: on a self-hosted runner the daemon points TMPDIR at the PER-RUN
@@ -171,6 +187,16 @@ export class WorkspaceStore {
       const paths = selection === true ? undefined : await this.presentPaths(selection);
       if (paths !== undefined && paths.length === 0) return 0;
 
+      // persist() runs before EVERY sleep and freeze, not just at the end, so a long agent that
+      // sleeps in a loop re-tars and re-uploads its whole workspace once per iteration. Skip when
+      // nothing changed since the snapshot we already stored: identical bytes, and on the freeze
+      // path this copy is only crash insurance anyway (the VM snapshot carries the real workspace).
+      const fingerprint = await this.fingerprintNow(paths);
+      if (fingerprint !== null && fingerprint === this.lastStoredFingerprint) {
+        log.info("workspace_persist_unchanged");
+        return 0;
+      }
+
       await mkdir(dirname(this.tmpPath), { recursive: true }); // per-run TMPDIR may not exist yet
       const size = await this.deps.archiver.archive(this.deps.workspaceRoot, this.tmpPath, paths);
       // Guardrail: an oversized snapshot is dropped (logged), never read into memory or uploaded — the
@@ -200,6 +226,7 @@ export class WorkspaceStore {
         bytes,
       );
       await this.deps.fs.rm(this.tmpPath);
+      this.lastStoredFingerprint = fingerprint;
       log.info("workspace_persisted", { bytes: size });
       return size;
     } catch (err) {
@@ -208,6 +235,18 @@ export class WorkspaceStore {
       log.warn("workspace_persist_failed", { error: errMsg(err) });
       this.reportSkipped({ reason: "error", detail: errMsg(err) });
       return 0;
+    }
+  }
+
+  /** Fingerprint the selection, or `null` when we can't (no fingerprinter, or the walk failed).
+   *  `null` always means "persist" — never skip on a fingerprint we don't trust. */
+  private async fingerprintNow(paths: readonly string[] | undefined): Promise<string | null> {
+    if (this.deps.fingerprinter === undefined) return null;
+    try {
+      return await this.deps.fingerprinter.fingerprint(this.deps.workspaceRoot, paths);
+    } catch (err) {
+      log.warn("workspace_fingerprint_failed", { error: errMsg(err) });
+      return null;
     }
   }
 
@@ -264,6 +303,42 @@ export class TarWorkspaceArchiver implements WorkspaceArchiver {
 }
 
 /** Production fs — node's fs/promises. */
+/**
+ * Fingerprints a selection as the sorted set of (relative path, size, mtime) over its files.
+ *
+ * Same change-detection heuristic rsync and incremental tar use by default, and it inherits the same
+ * caveat: a file rewritten to the SAME byte length whose mtime is then restored reads as unchanged.
+ * That needs deliberate effort (agents append, create, and rewrite, all of which move mtime), and the
+ * alternative — hashing every byte before every sleep — reintroduces the O(total bytes) cost this
+ * exists to remove. Any failure returns null, which persists rather than skips.
+ */
+export class StatWorkspaceFingerprinter implements WorkspaceFingerprinter {
+  async fingerprint(root: string, paths: readonly string[] | undefined): Promise<string | null> {
+    try {
+      const roots = paths === undefined ? [root] : paths.map((p) => join(root, p));
+      const entries: string[] = [];
+      for (const dir of roots) await collectEntries(dir, root, entries);
+      entries.sort();
+      return createHash("sha256").update(entries.join("\n")).digest("hex");
+    } catch {
+      return null; // unreadable tree — persist rather than risk skipping a real change
+    }
+  }
+}
+
+/** Walk `target` (file or dir), appending one `path\0size\0mtime` line per regular file. Symlinks are
+ *  recorded by their own metadata and never followed, so a link loop can't hang the walk. */
+async function collectEntries(target: string, root: string, out: string[]): Promise<void> {
+  const st = await lstat(target).catch(() => null);
+  if (st === null) return; // vanished mid-walk — the archive step is the source of truth
+  if (st.isDirectory()) {
+    const names = await readdir(target);
+    for (const name of names) await collectEntries(join(target, name), root, out);
+    return;
+  }
+  out.push(`${relative(root, target)}\0${st.size}\0${st.mtimeMs}`);
+}
+
 export class NodeWorkspaceFs implements WorkspaceFs {
   readFile(path: string): Promise<Uint8Array> {
     return readFile(path);
