@@ -182,6 +182,9 @@ export class WorkspaceStore {
   /** This run's view of the stored manifest. `undefined` = not read yet; `null` = no manifest for
    *  this scope (a first persist, or one still on the tarball). */
   private storedManifest: WorkspaceManifest | null | undefined = undefined;
+  /** Set when a restore died partway through writing the workspace. Non-null DISARMS persist for the
+   *  rest of the run — see {@link hydrate}. */
+  private restoreFailure: string | null = null;
   constructor(private readonly deps: WorkspaceStoreDeps) {
     // Scratch tarball path. Default to os.tmpdir() (which honors TMPDIR) rather than a machine-global
     // `/tmp/workspace-snapshot.tgz`: on a self-hosted runner the daemon points TMPDIR at the PER-RUN
@@ -192,8 +195,17 @@ export class WorkspaceStore {
     this.maxSnapshotBytes = deps.maxSnapshotBytes ?? WORKSPACE_SNAPSHOT_MAX_BYTES;
   }
 
-  /** Restore the workflow's last `/workspace` snapshot at run start. No-op (logged) on any failure or
-   *  when there's nothing to restore (not eligible, or a first run with no snapshot yet). */
+  /**
+   * Restore the workflow's last `/workspace` snapshot at run start. A no-op when there is nothing to
+   * restore (not eligible, or a first run with no snapshot yet).
+   *
+   * A restore that fails AFTER it began writing is the dangerous case, and it is not hypothetical:
+   * node-tar aborts a gzip stream past `maxDecompressionRatio` (1000:1), which a zero-filled or
+   * highly repetitive workspace can trip, leaving the tree half-extracted. The damage was never the
+   * bad read — it was that the run's next persist wrote that half-extracted tree back as the new
+   * stored baseline, turning a failed restore into permanent corruption. So a partial restore now
+   * DISARMS persistence for the rest of the run (§5.3).
+   */
   async hydrate(): Promise<void> {
     try {
       // A scope written by the delta path has a manifest; one written before it (or by the
@@ -212,12 +224,30 @@ export class WorkspaceStore {
       if (bytes === null) return; // 404 — no snapshot yet (the workflow's first run)
       await mkdir(dirname(this.tmpPath), { recursive: true }); // per-run TMPDIR may not exist yet
       await this.deps.fs.writeFile(this.tmpPath, bytes);
-      await this.deps.archiver.extract(this.tmpPath, this.deps.workspaceRoot);
+      // Everything above is safe to fail — nothing has touched the workspace yet. The extract is the
+      // first step that WRITES there, so a throw past this point may leave a half-restored tree.
+      try {
+        await this.deps.archiver.extract(this.tmpPath, this.deps.workspaceRoot);
+      } catch (err) {
+        this.disarmAfterPartialRestore(err);
+        return;
+      }
       await this.deps.fs.rm(this.tmpPath);
       log.info("workspace_hydrated", { bytes: bytes.length });
     } catch (err) {
       log.warn("workspace_hydrate_failed", { error: errMsg(err) });
     }
+  }
+
+  /** A restore died partway through writing the workspace. Refuse to persist for the rest of the run
+   *  so the half-restored tree can't overwrite the good stored snapshot, and tell the author. */
+  private disarmAfterPartialRestore(err: unknown): void {
+    this.restoreFailure = errMsg(err);
+    log.warn("workspace_restore_partial", { error: this.restoreFailure });
+    this.reportSkipped({
+      reason: "error",
+      detail: `restore failed partway (${this.restoreFailure}); this run will not save its workspace, to avoid overwriting the stored snapshot with a partially restored one`,
+    });
   }
 
   /** Snapshot `/workspace` to durable storage. Best-effort; no-op when the run isn't eligible.
@@ -229,6 +259,13 @@ export class WorkspaceStore {
    *  manifest opts into persistence, so archiving-first never runs for a non-persist workflow; the
    *  only redundant archive is a self-hosted+persist run, where the broker returns a null URL. */
   async persist(): Promise<number> {
+    // A restore that died partway left a tree that is NOT this scope's state. Writing it back would
+    // convert a failed restore into permanent corruption, so the stored snapshot wins: we keep it and
+    // lose this run's changes. hydrate() already told the author why (§5.3).
+    if (this.restoreFailure !== null) {
+      log.warn("workspace_persist_disarmed", { reason: this.restoreFailure });
+      return 0;
+    }
     try {
       // What this run actually compounds: the manifest's declaration ∪ the memory dirs it used.
       // Nothing selected is the common case (a workflow that opted into neither) — return before any
@@ -329,7 +366,14 @@ export class WorkspaceStore {
           if (url === undefined) continue;
           const bytes = await this.deps.broker.downloadBytes(url);
           if (bytes === null) continue; // object vanished — the run re-creates it, as with no snapshot
-          await this.deps.fs.writeUnder?.(this.deps.workspaceRoot, e.p, bytes);
+          try {
+            await this.deps.fs.writeUnder?.(this.deps.workspaceRoot, e.p, bytes);
+          } catch (err) {
+            // Same rule as the tarball path: once a restore has begun writing, a failure leaves a
+            // tree that must never be persisted back over the stored snapshot.
+            this.disarmAfterPartialRestore(err);
+            return;
+          }
           restored += 1;
         }
       })(),

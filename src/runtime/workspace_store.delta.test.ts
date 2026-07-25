@@ -248,6 +248,79 @@ describe("WorkspaceStore delta persist", () => {
   });
 });
 
+// The bug this closes, found live on dev 2026-07-25: node-tar aborts a gzip stream past its 1000:1
+// maxDecompressionRatio, so a zero-filled or highly repetitive workspace half-extracts. The damage
+// was never the bad read — the run's next persist wrote that half-extracted tree back as the new
+// stored baseline, making a failed restore permanent.
+describe("WorkspaceStore — a partial restore disarms persistence", () => {
+  function storeWithEvents(h: Harness, events: unknown[]): WorkspaceStore {
+    return new WorkspaceStore({
+      broker: h.broker,
+      archiver: h.archiver,
+      fs: h.fs,
+      workspaceRoot: "/workspace",
+      tmpPath: "/tmp/ws.tgz",
+      selection: () => true,
+      events: { emit: (b) => events.push(b) },
+    });
+  }
+
+  /** A scope with only a legacy tarball, whose extract blows up the way node-tar does. */
+  function tarballHarnessWithFailingExtract(): Harness {
+    const h = harness();
+    h.broker.workspaceManifestGetUrl = () => Promise.resolve(null); // no manifest → tarball path
+    h.broker.downloadBytes = () => Promise.resolve(new Uint8Array([1, 2, 3]));
+    h.archiver.extract = () =>
+      Promise.reject(new Error("TAR_ABORT: max decompression ratio exceeded: 1000.57 > 1000"));
+    return h;
+  }
+
+  it("does NOT persist after a restore died partway", async () => {
+    const h = tarballHarnessWithFailingExtract();
+    const events: unknown[] = [];
+    const s = storeWithEvents(h, events);
+    await s.hydrate();
+    set(h, "a.txt", 3, 100);
+
+    // The stored snapshot must survive: keeping it and losing this run's changes is the safe trade.
+    expect(await s.persist()).toBe(0);
+    expect(h.puts).toEqual([]);
+    expect(h.remote.manifest).toBeNull();
+  });
+
+  it("tells the author, naming the cause and what it means", async () => {
+    const h = tarballHarnessWithFailingExtract();
+    const events: { kind?: string; reason?: string; detail?: string }[] = [];
+    await storeWithEvents(h, events).hydrate();
+    expect(events).toHaveLength(1);
+    expect(events[0]?.kind).toBe("workspace_persist_skipped");
+    expect(events[0]?.detail).toContain("TAR_ABORT");
+    expect(events[0]?.detail).toContain("will not save");
+  });
+
+  it("stays disarmed for EVERY later persist, not just the first", async () => {
+    const h = tarballHarnessWithFailingExtract();
+    const s = storeWithEvents(h, []);
+    await s.hydrate();
+    // persist() runs before every sleep and freeze; one of them slipping through would be enough
+    // to overwrite the stored snapshot.
+    expect(await s.persist()).toBe(0);
+    expect(await s.persist()).toBe(0);
+    expect(h.puts).toEqual([]);
+  });
+
+  it("a restore that merely finds NOTHING leaves persistence armed", async () => {
+    const h = harness();
+    h.broker.workspaceManifestGetUrl = () => Promise.resolve(null);
+    h.broker.downloadBytes = () => Promise.resolve(null); // 404 — first run, nothing stored
+    const s = storeWithEvents(h, []);
+    await s.hydrate();
+    set(h, "a.txt", 3, 100);
+    // Nothing was half-written, so this run's state is real and must be saved.
+    expect(await s.persist()).toBeGreaterThan(0);
+  });
+});
+
 describe("WorkspaceStore delta hydrate", () => {
   it("restores every file the manifest lists", async () => {
     const h = harness();
