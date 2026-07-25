@@ -237,6 +237,16 @@ export async function runProgramWorker(
   log.info("worker_claimed", { runId, workerId: deps.workerId });
   const claimed = claim.run;
 
+  /** Drain the buffered event stream BEFORE the terminal write. Finalize flips the run terminal on
+   *  the control plane, and from that instant the fleet reconciler may classify this still-running
+   *  VM as a zombie and destroy it — so anything observable still sitting in the telemetry buffer
+   *  when finalize lands can be lost forever (found live 2026-07-24: a destroy 89ms after finalize
+   *  ate a run's whole post-wake event tail). Nothing observable may remain unflushed once the run
+   *  turns terminal. Best-effort like every telemetry path — never fails the run. */
+  const drainEventsBeforeFinalize = async (): Promise<void> => {
+    await deps.flushTelemetry?.().catch(() => undefined);
+  };
+
   /** Pre-flight/setup failure: no program ran (and none will) — finalize failed and exit. */
   const failEarly = async (
     reason: string,
@@ -244,6 +254,7 @@ export async function runProgramWorker(
     logEvent: string,
     logFields: Record<string, unknown>,
   ): Promise<ProgramWorkerOutcome> => {
+    await drainEventsBeforeFinalize();
     await deps.finalizer.finalize(runId, "failed", { error });
     log.error(logEvent, { runId, ...logFields });
     return { kind: "failed", reason };
@@ -467,6 +478,7 @@ export async function runProgramWorker(
   if (controller.signal.aborted) {
     const reason = abortReason(controller.signal) ?? "cancelled";
     phases?.close("failed");
+    await drainEventsBeforeFinalize();
     await deps.finalizer.finalize(runId, "failed", {
       error: { code: "RUN_ABORTED", reason, message: `Run stopped: ${reason}` },
     });
@@ -476,10 +488,12 @@ export async function runProgramWorker(
 
   if (result.kind === "completed") {
     phases?.close("completed");
+    await drainEventsBeforeFinalize();
     await deps.finalizer.finalize(runId, "completed", result.output);
     return { kind: "completed" };
   }
   phases?.close("failed");
+  await drainEventsBeforeFinalize();
   await deps.finalizer.finalize(runId, "failed", { error: result.error });
   return { kind: "failed", reason: result.error.code };
 }

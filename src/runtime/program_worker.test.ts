@@ -86,6 +86,9 @@ interface Harness {
   ensured: { count: number };
   /** Ordered log of workspace-prep steps ("ensure" then "hydrate") to assert ordering. */
   order: string[];
+  /** Ordered log of the terminal sequence ("flush_telemetry" / "finalize") — asserts the event
+   *  buffer drains BEFORE the terminal write (the zombie-destroy race, found live 2026-07-24). */
+  terminalOrder: string[];
 }
 
 function harness(
@@ -121,6 +124,7 @@ function harness(
   const browser = { closed: 0 };
   const ensured = { count: 0 };
   const order: string[] = [];
+  const terminalOrder: string[] = [];
   const hostCalls = { agent: [] as string[], sleeps: [] as unknown[], phases: [] as string[] };
   const phaseCloses: string[] = [];
   let phaseActive = false;
@@ -151,6 +155,7 @@ function harness(
   const finalizer: RunFinalizer = {
     finalize: (_id, status, output) => {
       finalized.push({ status, output });
+      terminalOrder.push("finalize");
       return Promise.resolve();
     },
   };
@@ -202,6 +207,7 @@ function harness(
     browser,
     ensured,
     order,
+    terminalOrder,
     deps: {
       runs,
       versions,
@@ -220,6 +226,10 @@ function harness(
           : Promise.resolve();
       },
       finalizer,
+      flushTelemetry: () => {
+        terminalOrder.push("flush_telemetry");
+        return Promise.resolve();
+      },
       buildHost: () =>
         Promise.resolve({
           capabilities,
@@ -337,6 +347,24 @@ describe("runProgramWorker — happy path", () => {
     // Token metering is now per-leaf (see leaf_executor `meterUsage`), so there is no run-level
     // metering loop here; the credit watcher still ran for the session and was stopped at terminal.
     expect(h.credit).toEqual({ started: 1, stopped: 1 });
+  });
+
+  it("drains the event buffer BEFORE the terminal write (completed path)", async () => {
+    // Finalize flips the run terminal, and from that instant the fleet reconciler may destroy this
+    // still-running VM as a zombie — any event still buffered at finalize can be lost forever
+    // (found live 2026-07-24: a destroy 89ms after finalize ate a run's whole post-wake tail).
+    const h = harness();
+    await runProgramWorker("run_1", h.deps);
+    expect(h.terminalOrder).toEqual(["flush_telemetry", "finalize"]);
+  });
+
+  it("drains the event buffer BEFORE the terminal write (failed path)", async () => {
+    const h = harness({
+      programSource: `export default async function run() { throw new Error("boom"); }`,
+    });
+    const outcome = await runProgramWorker("run_1", h.deps);
+    expect(outcome.kind).toBe("failed");
+    expect(h.terminalOrder).toEqual(["flush_telemetry", "finalize"]);
   });
 
   it("injects the trigger input into the program", async () => {
