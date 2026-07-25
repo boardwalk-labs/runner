@@ -60,6 +60,11 @@ export interface SuspendSignal {
   leafCheckpoint?: LeafCheckpoint;
   /** Relative wait (ms) for `reason: "sleep"`; the broker computes the absolute wake time. */
   durationMs?: number;
+  /** Absolute deadline (ms since epoch) for `reason: "sleep"`, stamped when the seam was
+   *  REACHED. Authoritative over `durationMs`: a sleep that composed with other waits (or
+   *  re-froze after an abort) must still land on its own deadline, not one rebased to whenever
+   *  the freeze was finally requested. */
+  wakeAtMs?: number;
   /** The child run id for `reason: "workflow_call"` — the parent suspends `waiting_for_child` and is
    *  woken when this child finalizes (the sweep wakes a parent whose child is terminal). */
   childRunId?: string;

@@ -564,11 +564,13 @@ export class RunnerControlClient {
   }
 
   /** Create (or idempotently re-attach to) a child run for `workflows.call`. */
-  async startChild(slug: string, input: unknown): Promise<BrokerChild> {
+  async startChild(slug: string, input: unknown, ordinal = 0): Promise<BrokerChild> {
     const res = await this.controlFetch(this.url("children"), {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ slug, input }),
+      // `ordinal` distinguishes repeat calls to the same target with the same input, so a fan-out
+      // of identical calls gets one child EACH while a restart still re-attaches to all of them.
+      body: JSON.stringify({ slug, input, ordinal }),
     });
     // The broker returns 201 for a fresh child, 200 for an idempotent re-attach.
     if (res.status !== 200 && res.status !== 201) throw await brokerError(res, "children");

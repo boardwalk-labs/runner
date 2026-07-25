@@ -73,7 +73,26 @@ function makeFrozenHost(
   return { host, freeze, requests, held };
 }
 
-const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
+/** Two macrotask hops: one for the coordinator's drain (it lets queued continuations start work
+ *  before committing to a freeze), one for the work that follows. */
+const tick = async (): Promise<void> => {
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+};
+
+/** The suspension seqs the last suspend request is waiting on, keyed by what they wait FOR — the
+ *  host assigns seqs in seam-arrival order, so tests must read them rather than assume them. */
+function waitSeqs(requests: unknown[]): Map<string, number> {
+  const last = requests[requests.length - 1] as {
+    broker_signal: { waits: { reason: string; seq: number; childRunId?: string }[] };
+  };
+  return new Map(
+    last.broker_signal.waits.map((w) => [
+      w.reason === "sleep" ? "sleep" : (w.childRunId ?? ""),
+      w.seq,
+    ]),
+  );
+}
 
 function wake(freeze: FreezeCoordinator, value: Record<string, unknown>): void {
   freeze.onWake({ run_token: "fresh", wall_clock_ms: 2_000, wake: value });
@@ -230,6 +249,36 @@ describe("WorkerWorkflowHost freeze mode", () => {
     await expect(call).rejects.toThrow(/failed \(run child_9\)/);
   });
 
+  it("a wake naming a DIFFERENT child than this call awaits fails loudly", async () => {
+    const children = childStub({
+      start: () =>
+        Promise.resolve({
+          childRunId: "child_9",
+          status: "running",
+          output: undefined,
+          outputSchema: null,
+        }),
+    });
+    const { host, freeze } = makeFrozenHost({ children });
+    const call = host.callWorkflow("child-flow", {}, undefined);
+    await tick();
+    // Routed to this seam's seq (so the coordinator hands it over) but carrying someone else's
+    // child. Returning that output would be a silent wrong answer, so the seam refuses it.
+    wake(freeze, {
+      kind: "workflow_call",
+      satisfied: [
+        {
+          seq: 1,
+          kind: "workflow_call",
+          child: { run_id: "child_OTHER", status: "completed", output: "not mine" },
+        },
+      ],
+    });
+    await expect(call).rejects.toThrow(
+      /carries child run child_OTHER, but this call awaits child_9/,
+    );
+  });
+
   it("a sibling agent leaf delays the freeze until it finishes (the gate, through the host)", async () => {
     let releaseLeaf: () => void = () => undefined;
     const leaf: LeafExecutor = {
@@ -337,5 +386,215 @@ describe("WorkerWorkflowHost freeze mode", () => {
 
     wake(freeze, { kind: "human_input", answers: { approve: { value: "no", isOther: false } } });
     await expect(gate).resolves.toEqual({ value: "no", isOther: false });
+  });
+});
+
+// A concurrent fan-out of durable children — `Promise.all([workflows.call(a), workflows.call(b)])`
+// — is the shape the compound wake exists for (docs/SUSPEND_POLICY.md §1.1). These drive the REAL
+// host and REAL coordinator together, so they pin the whole path: every child is dispatched before
+// anything freezes, ONE freeze covers the set, and each await gets its own child's output.
+describe("WorkerWorkflowHost freeze mode — concurrent workflows.call", () => {
+  /** A dispatcher that hands out one child per (slug) and records dispatch order. */
+  function fanOutChildren(started: string[]): ChildDispatcher {
+    return childStub({
+      start: (slug: string) => {
+        started.push(slug);
+        return Promise.resolve({
+          childRunId: `child_${slug}`,
+          status: "running",
+          output: undefined,
+          outputSchema: null,
+        });
+      },
+      poll: () => Promise.resolve(null),
+    });
+  }
+
+  it("dispatches every child, then freezes ONCE for the whole set", async () => {
+    const started: string[] = [];
+    const { host, requests } = makeFrozenHost({ children: fanOutChildren(started) });
+
+    const calls = Promise.all([
+      host.callWorkflow("a", { i: 1 }, undefined),
+      host.callWorkflow("b", { i: 2 }, undefined),
+      host.callWorkflow("c", { i: 3 }, undefined),
+    ]);
+    await tick();
+
+    // All three children are running BEFORE the parent suspends — the fan-out is genuinely
+    // concurrent, not one child per freeze/wake cycle.
+    expect(started).toEqual(["a", "b", "c"]);
+    expect(requests).toHaveLength(1);
+    const req = requests[0] as { broker_signal: { waits: { childRunId?: string }[] } };
+    expect(req.broker_signal.waits.map((w) => w.childRunId)).toEqual([
+      "child_a",
+      "child_b",
+      "child_c",
+    ]);
+    void calls;
+  });
+
+  it("resolves each await with its own child's output from one compound wake", async () => {
+    const { host, freeze, requests } = makeFrozenHost({ children: fanOutChildren([]) });
+    const calls = Promise.all([
+      host.callWorkflow("a", {}, undefined),
+      host.callWorkflow("b", {}, undefined),
+    ]);
+    await tick();
+    const seqs = waitSeqs(requests);
+
+    wake(freeze, {
+      kind: "workflow_call",
+      satisfied: [
+        {
+          seq: seqs.get("child_a"),
+          kind: "workflow_call",
+          child: { run_id: "child_a", status: "completed", output: "A" },
+        },
+        {
+          seq: seqs.get("child_b"),
+          kind: "workflow_call",
+          child: { run_id: "child_b", status: "completed", output: "B" },
+        },
+      ],
+    });
+
+    expect(await calls).toEqual([
+      { output: "A", outputSchema: null },
+      { output: "B", outputSchema: null },
+    ]);
+  });
+
+  it("re-freezes on the remainder when only one child has finished", async () => {
+    const { host, freeze, requests } = makeFrozenHost({ children: fanOutChildren([]) });
+    const first = host.callWorkflow("a", {}, undefined);
+    const second = host.callWorkflow("b", {}, undefined);
+    await tick();
+    expect(requests).toHaveLength(1);
+    const seqs = waitSeqs(requests);
+
+    wake(freeze, {
+      kind: "workflow_call",
+      satisfied: [
+        {
+          seq: seqs.get("child_a"),
+          kind: "workflow_call",
+          child: { run_id: "child_a", status: "completed", output: "A" },
+        },
+      ],
+    });
+    expect(await first).toEqual({ output: "A", outputSchema: null });
+    await tick();
+
+    // The finished child is gone from the condition; the outstanding one is the whole of it.
+    expect(requests).toHaveLength(2);
+    const again = requests[1] as { broker_signal: { waits: { childRunId?: string }[] } };
+    expect(again.broker_signal.waits.map((w) => w.childRunId)).toEqual(["child_b"]);
+
+    wake(freeze, {
+      kind: "workflow_call",
+      satisfied: [
+        {
+          seq: seqs.get("child_b"),
+          kind: "workflow_call",
+          child: { run_id: "child_b", status: "completed", output: "B" },
+        },
+      ],
+    });
+    expect(await second).toEqual({ output: "B", outputSchema: null });
+  });
+
+  it("a woken call's continuation runs before the next freeze (a pool keeps dispatching)", async () => {
+    const started: string[] = [];
+    const { host, freeze, requests } = makeFrozenHost({ children: fanOutChildren(started) });
+
+    // The worker-pool shape: when one child lands, that worker immediately starts the next task.
+    // The freeze must not slam shut on the continuation, or the pool stalls with tasks undispatched.
+    const worker = (async (): Promise<unknown> => {
+      const one = await host.callWorkflow("a", {}, undefined);
+      const two = await host.callWorkflow("next", {}, undefined);
+      return [one, two];
+    })();
+    const sibling = host.callWorkflow("b", {}, undefined);
+    await tick();
+    expect(started).toEqual(["a", "b"]);
+    const first = waitSeqs(requests);
+
+    wake(freeze, {
+      kind: "workflow_call",
+      satisfied: [
+        {
+          seq: first.get("child_a"),
+          kind: "workflow_call",
+          child: { run_id: "child_a", status: "completed", output: "A" },
+        },
+      ],
+    });
+    await tick();
+    await tick();
+
+    // The continuation dispatched its follow-up task, and the next freeze waits on BOTH the
+    // outstanding sibling and the newly started child.
+    expect(started).toEqual(["a", "b", "next"]);
+    const again = requests[requests.length - 1] as {
+      broker_signal: { waits: { childRunId?: string }[] };
+    };
+    expect(again.broker_signal.waits.map((w) => w.childRunId).sort()).toEqual([
+      "child_b",
+      "child_next",
+    ]);
+
+    const second = waitSeqs(requests);
+    wake(freeze, {
+      kind: "workflow_call",
+      satisfied: [
+        {
+          seq: second.get("child_b"),
+          kind: "workflow_call",
+          child: { run_id: "child_b", status: "completed", output: "B" },
+        },
+        {
+          seq: second.get("child_next"),
+          kind: "workflow_call",
+          child: { run_id: "child_next", status: "completed", output: "N" },
+        },
+      ],
+    });
+    expect(await worker).toEqual([
+      { output: "A", outputSchema: null },
+      { output: "N", outputSchema: null },
+    ]);
+    expect(await sibling).toEqual({ output: "B", outputSchema: null });
+  });
+
+  it("composes a child wait with a long sleep in one freeze", async () => {
+    const { host, freeze, requests } = makeFrozenHost({ children: fanOutChildren([]) });
+    const call = host.callWorkflow("a", {}, undefined);
+    const napping = host.sleep(600_000);
+    await tick();
+
+    expect(requests).toHaveLength(1);
+    const req = requests[0] as {
+      reason: string;
+      wake: { waits: { kind: string }[] };
+    };
+    // The child wait outranks the timer for the run's displayed status.
+    expect(req.reason).toBe("workflow_call");
+    expect(req.wake.waits.map((w) => w.kind).sort()).toEqual(["sleep", "workflow_call"]);
+
+    const seqs = waitSeqs(requests);
+    wake(freeze, {
+      kind: "sleep",
+      satisfied: [
+        { seq: seqs.get("sleep"), kind: "sleep" },
+        {
+          seq: seqs.get("child_a"),
+          kind: "workflow_call",
+          child: { run_id: "child_a", status: "completed", output: "A" },
+        },
+      ],
+    });
+    await expect(napping).resolves.toBeUndefined();
+    expect(await call).toEqual({ output: "A", outputSchema: null });
   });
 });

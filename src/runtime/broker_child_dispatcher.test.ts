@@ -5,7 +5,7 @@ import type { BrokerChild, RunnerControlClient } from "./runner_control_client.j
 import { RunAbortedError } from "./run_abort.js";
 
 function client(over: {
-  startChild?: (slug: string, input: unknown) => Promise<BrokerChild>;
+  startChild?: (slug: string, input: unknown, ordinal?: number) => Promise<BrokerChild>;
   getChild?: (id: string) => Promise<{ id: string; status: string; output: unknown } | null>;
   scheduleWorkflow?: (slug: string, input: unknown, spec: unknown) => Promise<string>;
 }): RunnerControlClient {
@@ -121,8 +121,77 @@ describe("BrokerChildDispatcher.run", () => {
       sleep: noSleep,
     });
     expect(await d.run("child-wf", { a: 1 }, undefined)).toBe("c9");
-    expect(startChild).toHaveBeenCalledWith("child-wf", { a: 1 });
+    expect(startChild).toHaveBeenCalledWith("child-wf", { a: 1 }, 0);
     expect(getChild).not.toHaveBeenCalled();
+  });
+});
+
+describe("BrokerChildDispatcher — call ordinals", () => {
+  /** Records the (slug, input, ordinal) of every child this run asked for. */
+  function recordingClient(): {
+    client: RunnerControlClient;
+    calls: { slug: string; input: unknown; ordinal: number | undefined }[];
+  } {
+    const calls: { slug: string; input: unknown; ordinal: number | undefined }[] = [];
+    let n = 0;
+    const startChild = (slug: string, input: unknown, ordinal?: number): Promise<BrokerChild> => {
+      calls.push({ slug, input, ordinal });
+      n += 1;
+      return Promise.resolve({ childRunId: `c${String(n)}`, status: "pending", output: null });
+    };
+    return { client: client({ startChild }), calls };
+  }
+
+  it("numbers repeat calls to the same target with the same input", async () => {
+    const { client: c, calls } = recordingClient();
+    const d = new BrokerChildDispatcher({ client: c, sleep: noSleep });
+    await d.run("task", { id: 1 }, undefined);
+    await d.run("task", { id: 1 }, undefined);
+    await d.run("task", { id: 1 }, undefined);
+    expect(calls.map((x) => x.ordinal)).toEqual([0, 1, 2]);
+  });
+
+  it("counts per (target, input), so distinct work all starts at ordinal 0", async () => {
+    const { client: c, calls } = recordingClient();
+    const d = new BrokerChildDispatcher({ client: c, sleep: noSleep });
+    await d.run("task", { id: 1 }, undefined);
+    await d.run("task", { id: 2 }, undefined);
+    await d.run("other", { id: 1 }, undefined);
+    expect(calls.map((x) => x.ordinal)).toEqual([0, 0, 0]);
+  });
+
+  it("groups inputs that differ only in key order (jsonb does not preserve it)", async () => {
+    const { client: c, calls } = recordingClient();
+    const d = new BrokerChildDispatcher({ client: c, sleep: noSleep });
+    await d.run("task", { a: 1, b: 2 }, undefined);
+    await d.run("task", { b: 2, a: 1 }, undefined);
+    expect(calls.map((x) => x.ordinal)).toEqual([0, 1]);
+  });
+
+  it("assigns distinct ordinals to a CONCURRENT fan-out of identical calls", async () => {
+    const { client: c, calls } = recordingClient();
+    const d = new BrokerChildDispatcher({ client: c, sleep: noSleep });
+    // Five identical calls (best-of-N sampling) must produce five children, not one shared by all.
+    await Promise.all(Array.from({ length: 5 }, () => d.start("task", { id: 1 }, undefined)));
+    expect([...calls.map((x) => x.ordinal)].sort()).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it("shares one counter across call/start/run (each of them creates a child)", async () => {
+    const ordinals: (number | undefined)[] = [];
+    const d = new BrokerChildDispatcher({
+      client: client({
+        startChild: (_slug, _input, ordinal) => {
+          ordinals.push(ordinal);
+          // Terminal, so `call` returns without polling.
+          return Promise.resolve({ childRunId: "c1", status: "completed", output: null });
+        },
+      }),
+      sleep: noSleep,
+    });
+    await d.call("task", { id: 1 }, undefined);
+    await d.start("task", { id: 1 }, undefined);
+    await d.run("task", { id: 1 }, undefined);
+    expect(ordinals).toEqual([0, 1, 2]);
   });
 });
 

@@ -657,6 +657,17 @@ export class WorkerWorkflowHost {
         { kind: "wake_mismatch", childRunId: child.childRunId },
       );
     }
+    // The coordinator routes a wake to the wait that asked for it, so this should be unreachable.
+    // Assert it anyway: with several children outstanding, accepting a wake for a DIFFERENT child
+    // would hand this `await` another child's output — a silent wrong answer, the one failure mode
+    // worth a hard stop.
+    if (woken.run_id !== child.childRunId) {
+      throw new AppError(
+        ErrorCode.INTERNAL_ERROR,
+        `Wake value carries child run ${woken.run_id}, but this call awaits ${child.childRunId}`,
+        { kind: "wake_child_mismatch", childRunId: child.childRunId, wokenRunId: woken.run_id },
+      );
+    }
     if (woken.status === "completed") {
       // The wake payload carries the finalized child's OUTPUT but not the callee's schema; one
       // post-wake poll fetches it so a typed child's return still revives. Best-effort: a poll
@@ -773,7 +784,15 @@ export class WorkerWorkflowHost {
       // in-process.
       const requestedAt = this.now();
       const seq = this.seq.next();
-      const outcome = await this.freezeWait(freeze, { reason: "sleep", seq, durationMs: holdMs });
+      // Stamp the deadline where the seam was REACHED, not where the freeze lands: this wait may
+      // compose with others (or retry after an abort), and a duration re-based at freeze time
+      // would silently extend the sleep by however long that took.
+      const outcome = await this.freezeWait(freeze, {
+        reason: "sleep",
+        seq,
+        durationMs: holdMs,
+        wakeAtMs: requestedAt + holdMs,
+      });
       if (outcome.kind === "wake") return;
       const remaining = holdMs - (this.now() - requestedAt);
       if (remaining <= 0) return;

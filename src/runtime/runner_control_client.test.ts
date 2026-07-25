@@ -400,15 +400,31 @@ describe("RunnerControlClient.resolveSecret", () => {
 });
 
 describe("RunnerControlClient.startChild", () => {
-  it("POSTs slug + input and returns the child (201 fresh)", async () => {
+  it("POSTs slug + input + ordinal and returns the child (201 fresh)", async () => {
     const { fetchImpl, calls } = fakeFetch(() =>
       json(201, { childRunId: "child_1", status: "pending", output: null }),
     );
-    const child = await client(fetchImpl).startChild("file-issue", { x: 1 });
+    const child = await client(fetchImpl).startChild("file-issue", { x: 1 }, 2);
     expect(child).toEqual({ childRunId: "child_1", status: "pending", output: null });
     const call = calls[0];
     expect(call?.url).toBe("https://api.boardwalk.sh/runner/v1/runs/run_1/children");
-    expect(JSON.parse(call?.body ?? "{}")).toEqual({ slug: "file-issue", input: { x: 1 } });
+    expect(JSON.parse(call?.body ?? "{}")).toEqual({
+      slug: "file-issue",
+      input: { x: 1 },
+      ordinal: 2,
+    });
+  });
+
+  it("defaults the ordinal to the first call of its (target, input) group", async () => {
+    const { fetchImpl, calls } = fakeFetch(() =>
+      json(201, { childRunId: "child_1", status: "pending", output: null }),
+    );
+    await client(fetchImpl).startChild("file-issue", null);
+    expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({
+      slug: "file-issue",
+      input: null,
+      ordinal: 0,
+    });
   });
 
   it("accepts a 200 idempotent re-attach", async () => {
