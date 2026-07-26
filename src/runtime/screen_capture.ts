@@ -40,7 +40,8 @@ export interface CaptureSession {
   latestFrame: () => Promise<string | null>;
   /** A small 16:10 JPEG for durable run-list thumbnails, or null before one is available. */
   latestThumbnail: () => Promise<string | null>;
-  /** Stop ffmpeg, finalize + emit the last in-flight segment, then resolve. */
+  /** Stop ffmpeg and finalize + emit the last in-flight segment. The finalized thumbnail remains
+   *  readable after this resolves so an ultrashort run can persist its first complete frame. */
   stop: () => Promise<void>;
 }
 
@@ -132,13 +133,15 @@ export class ScreenCapture {
     }
 
     const flush = (async (): Promise<void> => {
-      // Read before `stop()`: the guest backend removes its scratch JPEGs after ffmpeg exits.
-      await this.enqueueThumbnail(session, "flush");
       try {
         await session.stop(); // finalizes the last segment → enqueued via onSegment
       } catch (err) {
         log.warn("screen_capture_stop_failed", { error: errMsg(err) });
       }
+      // Read AFTER stop: an ultrashort run can finish before ffmpeg writes its first complete JPEG;
+      // stopping finalizes that first frame. The backend keeps the thumbnail scratch file readable
+      // until its delayed directory cleanup.
+      await this.enqueueThumbnail(session, "flush");
       await this.uploadTail; // drain all queued segment uploads (incl. the final one)
     })();
 

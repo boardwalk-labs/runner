@@ -186,6 +186,30 @@ describe("ScreenCapture — desktop thumbnails", () => {
     );
   });
 
+  it("stores a thumbnail that only becomes readable when an ultrashort run stops", async () => {
+    const fb = fakeBackend();
+    let stopped = false;
+    fb.latestThumbnailFn.mockImplementation(() =>
+      Promise.resolve(stopped ? "FINALIZED_THUMBNAIL_B64" : null),
+    );
+    fb.stopFn.mockImplementation(() => {
+      stopped = true;
+      return Promise.resolve();
+    });
+    const writeArtifact = vi.fn(() => Promise.resolve({ id: "thumb_short" }));
+    const cap = new ScreenCapture({ ...makeDeps(), backend: fb.backend, writeArtifact });
+
+    await cap.start();
+    await cap.stopAndFlush();
+
+    expect(writeArtifact).toHaveBeenCalledWith(
+      "desktop-thumbnail-5000.jpg",
+      "image/jpeg",
+      "FINALIZED_THUMBNAIL_B64",
+      expect.objectContaining({ kind: "desktop-thumbnail", capture_point: "flush" }),
+    );
+  });
+
   it("does not create another initial thumbnail after a suspend/resume", async () => {
     vi.useFakeTimers();
     const fb = fakeBackend();

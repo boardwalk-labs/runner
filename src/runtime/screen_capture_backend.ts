@@ -238,13 +238,13 @@ export function makeCaptureBackend(cfg: CaptureConfig): CaptureBackend {
         async stop(): Promise<void> {
           clearInterval(poll);
           await stopFfmpeg(proc);
-          // ffmpeg finalized the in-flight segment on exit — release every remaining segment, then
-          // clean up the live frame + the scratch dir (segment files are discarded post-upload).
+          // ffmpeg finalized the in-flight segment and JPEG outputs on exit — release every remaining
+          // segment. The live frame is no longer needed; keep the thumbnail readable until the
+          // orchestrator persists the terminal frame immediately after stop().
           await sweep(true);
           await rm(join(dir, LIVE_FRAME_FILE)).catch(() => undefined);
-          await rm(join(dir, THUMBNAIL_FRAME_FILE)).catch(() => undefined);
           // The dir itself is removed after uploads discard the segment files; a best-effort rm here
-          // clears anything left (empty dir / an un-uploaded torn segment) without blocking.
+          // clears the retained thumbnail and anything else left without blocking.
           setTimeout(
             () => void rm(dir, { recursive: true, force: true }).catch(() => undefined),
             30_000,
