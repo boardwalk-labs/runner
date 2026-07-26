@@ -1,11 +1,12 @@
 // Screen capture — the runtime backing for session recording + the desktop live-view feed
-// (docs/SCREEN_CAPTURE.md §4, §5). ONE ffmpeg reads the guest display `:0` and produces two sinks:
+// (docs/SCREEN_CAPTURE.md §4, §5). ONE ffmpeg reads the guest display `:0` and produces three sinks:
 //
 //   1. Rolling fragmented-MP4 SEGMENTS → uploaded as `recording-segment` artifacts (the durable,
 //      scrub-able recording / DVR). Each segment is a standalone playable MP4.
 //   2. A low-fps LIVE frame (base64 JPEG) → pushed up the broker's live-view channel WHILE a viewer is
 //      attached (lazy: the capture polls `liveViewWanted`, so a run with nobody watching pays nothing
 //      beyond the always-on recording).
+//   3. A separately scaled 320×200 JPEG → persisted as run-list thumbnail observability.
 //
 // The process spawn + segment file management live behind the injected `CaptureBackend` seam
 // (screen_capture_backend.ts, guest-coupled: ffmpeg + fs), so this orchestration — segment upload
@@ -37,6 +38,8 @@ export interface CaptureSession {
   onSegment: (cb: (segment: CaptureSegment) => void) => void;
   /** The most recent live frame (base64 JPEG), or null before the first frame is written. */
   latestFrame: () => Promise<string | null>;
+  /** A small 16:10 JPEG for durable run-list thumbnails, or null before one is available. */
+  latestThumbnail: () => Promise<string | null>;
   /** Stop ffmpeg, finalize + emit the last in-flight segment, then resolve. */
   stop: () => Promise<void>;
 }
@@ -46,6 +49,9 @@ export interface CaptureBackend {
   /** Pixel dimensions of the captured display — stamped into segment metadata. */
   readonly width: number;
   readonly height: number;
+  /** Pixel dimensions of the separately encoded, bandwidth-bounded thumbnail frame. */
+  readonly thumbnailWidth: number;
+  readonly thumbnailHeight: number;
   /** Interval (ms) between live-frame pushes while a viewer is attached. */
   readonly liveFrameIntervalMs: number;
   /** How often (ms) to poll the broker for whether a viewer is attached. */
@@ -76,6 +82,7 @@ export interface ScreenCaptureDeps {
 }
 
 const DEFAULT_FLUSH_TIMEOUT_MS = 20_000;
+const INITIAL_THUMBNAIL_DELAY_MS = 5_000;
 
 export class ScreenCapture {
   private session: CaptureSession | null = null;
@@ -83,7 +90,12 @@ export class ScreenCapture {
   private segmentIndex = 0;
   /** Serializes segment uploads so `stopAndFlush()` can await the whole in-flight tail. */
   private uploadTail: Promise<void> = Promise.resolve();
+  /** Serializes thumbnail reads so an initial timer racing a flush cannot land after the final frame. */
+  private thumbnailCaptureTail: Promise<void> = Promise.resolve();
   private liveLoop: { stop: () => void } | null = null;
+  private initialThumbnailTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The initial thumbnail is run-scoped, so a suspend/resume does not create another copy. */
+  private initialThumbnailStored = false;
 
   constructor(private readonly deps: ScreenCaptureDeps) {}
 
@@ -94,6 +106,7 @@ export class ScreenCapture {
     this.session = session;
     session.onSegment((segment) => this.enqueueSegment(segment));
     this.startLiveLoop(session);
+    this.scheduleInitialThumbnail(session);
   }
 
   /** Post-wake: start a fresh capture (new segment files), keeping the monotonic segment index. */
@@ -113,8 +126,14 @@ export class ScreenCapture {
     this.session = null;
     this.liveLoop?.stop();
     this.liveLoop = null;
+    if (this.initialThumbnailTimer !== null) {
+      clearTimeout(this.initialThumbnailTimer);
+      this.initialThumbnailTimer = null;
+    }
 
     const flush = (async (): Promise<void> => {
+      // Read before `stop()`: the guest backend removes its scratch JPEGs after ffmpeg exits.
+      await this.enqueueThumbnail(session, "flush");
       try {
         await session.stop(); // finalizes the last segment → enqueued via onSegment
       } catch (err) {
@@ -166,6 +185,66 @@ export class ScreenCapture {
     } finally {
       await segment.discard().catch(() => undefined);
     }
+  }
+
+  /** Store one small representative desktop frame. Thumbnails are observability, so every failure
+   *  is best-effort and joins the same serialized upload tail as recording segments. */
+  private enqueueThumbnail(
+    session: CaptureSession,
+    capturePoint: "initial" | "flush",
+  ): Promise<void> {
+    this.thumbnailCaptureTail = this.thumbnailCaptureTail.then(() =>
+      this.readAndEnqueueThumbnail(session, capturePoint),
+    );
+    return this.thumbnailCaptureTail;
+  }
+
+  private async readAndEnqueueThumbnail(
+    session: CaptureSession,
+    capturePoint: "initial" | "flush",
+  ): Promise<void> {
+    let base64: string | null;
+    try {
+      base64 = await session.latestThumbnail();
+    } catch (err) {
+      log.debug("desktop_thumbnail_read_failed", { error: errMsg(err) });
+      return;
+    }
+    if (base64 === null || base64.length === 0) return;
+    if (capturePoint === "initial") this.initialThumbnailStored = true;
+    const capturedAt = this.deps.now();
+    this.uploadTail = this.uploadTail.then(async () => {
+      try {
+        await this.deps.writeArtifact(
+          `desktop-thumbnail-${String(capturedAt)}.jpg`,
+          "image/jpeg",
+          base64,
+          {
+            kind: "desktop-thumbnail",
+            capture_point: capturePoint,
+            captured_at: capturedAt,
+            width: this.deps.backend.thumbnailWidth,
+            height: this.deps.backend.thumbnailHeight,
+          },
+        );
+      } catch (err) {
+        log.debug("desktop_thumbnail_upload_failed", {
+          capturePoint,
+          error: errMsg(err),
+        });
+      }
+    });
+  }
+
+  /** Give the desktop a moment to become representative, then make running rows visual without
+   *  waiting for the first recording roll or terminal flush. */
+  private scheduleInitialThumbnail(session: CaptureSession): void {
+    if (this.initialThumbnailStored || this.initialThumbnailTimer !== null) return;
+    this.initialThumbnailTimer = setTimeout(() => {
+      this.initialThumbnailTimer = null;
+      void this.enqueueThumbnail(session, "initial");
+    }, INITIAL_THUMBNAIL_DELAY_MS);
+    this.initialThumbnailTimer.unref();
   }
 
   /** Lazy live-view push: poll whether a viewer is attached; while attached, push the latest frame at

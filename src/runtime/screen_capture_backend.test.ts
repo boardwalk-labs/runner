@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { ffmpegArgs, loadCaptureConfig, type CaptureConfig } from "./screen_capture_backend.js";
+import {
+  DESKTOP_THUMBNAIL_HEIGHT,
+  DESKTOP_THUMBNAIL_WIDTH,
+  ffmpegArgs,
+  loadCaptureConfig,
+  type CaptureConfig,
+} from "./screen_capture_backend.js";
 
 const cfg: CaptureConfig = {
   display: ":0",
@@ -39,6 +45,15 @@ describe("ffmpegArgs", () => {
     expect(a).toContain("libx264");
     expect(a[a.indexOf("-segment_format") + 1]).toBe("mp4");
     expect(a).toContain("-update"); // one continuously-overwritten live frame
+  });
+
+  it("encodes a separate 320x200 JPEG so list thumbnails stay bandwidth-bounded", () => {
+    const a = ffmpegArgs(cfg, "/out");
+    const thumbnail = a.findIndex((x) => x.endsWith("thumbnail.jpg"));
+    expect(thumbnail).toBeGreaterThan(-1);
+    expect(a.join(" ")).toContain(
+      `scale=${String(DESKTOP_THUMBNAIL_WIDTH)}:${String(DESKTOP_THUMBNAIL_HEIGHT)}`,
+    );
   });
 });
 

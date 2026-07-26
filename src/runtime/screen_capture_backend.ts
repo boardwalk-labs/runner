@@ -1,6 +1,7 @@
 // The guest-coupled half of screen capture (screen_capture.ts's `CaptureBackend`): one ffmpeg reading
-// the X display `:0` with two outputs — rolling MP4 segments (recording) and a single low-fps JPEG that
-// is continuously overwritten (the live-view frame). See docs/SCREEN_CAPTURE.md §4.
+// the X display `:0` with three outputs — rolling MP4 segments (recording), a full-size low-fps JPEG
+// that is continuously overwritten (live-view), and a separately scaled JPEG (run-list thumbnail).
+// See docs/SCREEN_CAPTURE.md §4.
 //
 // The recording is CHANGE-DRIVEN (mpdecimate + VFR): it stays always-on but only encodes frames that
 // differ from the previous one, so an idle/headless desktop encodes ~nothing (a blank desktop collapses
@@ -43,6 +44,9 @@ export interface CaptureConfig {
 
 const SEGMENT_PREFIX = "rec-";
 const LIVE_FRAME_FILE = "live.jpg";
+const THUMBNAIL_FRAME_FILE = "thumbnail.jpg";
+export const DESKTOP_THUMBNAIL_WIDTH = 320;
+export const DESKTOP_THUMBNAIL_HEIGHT = 200;
 /** JPEG end-of-image marker — a complete frame ends with these bytes; used to skip a torn read. */
 const JPEG_EOI = Buffer.from([0xff, 0xd9]);
 
@@ -68,8 +72,8 @@ export function loadCaptureConfig(env: NodeJS.ProcessEnv): CaptureConfig | null 
   };
 }
 
-/** ffmpeg args: one x11grab input, two outputs (change-driven segmented MP4 + a single overwritten
- *  JPEG). Exported for unit testing. */
+/** ffmpeg args: one x11grab input, three outputs (change-driven segmented MP4 + full-size and
+ *  bandwidth-bounded overwritten JPEGs). Exported for unit testing. */
 export function ffmpegArgs(cfg: CaptureConfig, dir: string): string[] {
   const liveFps = Math.max(1, Math.round(1000 / cfg.liveFrameIntervalMs));
   return [
@@ -125,6 +129,18 @@ export function ffmpegArgs(cfg: CaptureConfig, dir: string): string[] {
     "-update",
     "1",
     join(dir, LIVE_FRAME_FILE),
+    // Run-list thumbnail: separately scaled so a 100-row page never downloads full desktop frames.
+    "-map",
+    "0:v",
+    "-vf",
+    `scale=${String(DESKTOP_THUMBNAIL_WIDTH)}:${String(DESKTOP_THUMBNAIL_HEIGHT)}`,
+    "-r",
+    "1",
+    "-q:v",
+    "8",
+    "-update",
+    "1",
+    join(dir, THUMBNAIL_FRAME_FILE),
   ];
 }
 
@@ -140,6 +156,8 @@ export function makeCaptureBackend(cfg: CaptureConfig): CaptureBackend {
   return {
     width: cfg.width,
     height: cfg.height,
+    thumbnailWidth: DESKTOP_THUMBNAIL_WIDTH,
+    thumbnailHeight: DESKTOP_THUMBNAIL_HEIGHT,
     liveFrameIntervalMs: cfg.liveFrameIntervalMs,
     wantedPollIntervalMs: cfg.wantedPollIntervalMs,
     async start(): Promise<CaptureSession> {
@@ -208,6 +226,15 @@ export function makeCaptureBackend(cfg: CaptureConfig): CaptureBackend {
             return null;
           }
         },
+        async latestThumbnail(): Promise<string | null> {
+          try {
+            const bytes = await readFile(join(dir, THUMBNAIL_FRAME_FILE));
+            if (bytes.length < 2 || !bytes.subarray(-2).equals(JPEG_EOI)) return null;
+            return bytes.toString("base64");
+          } catch {
+            return null;
+          }
+        },
         async stop(): Promise<void> {
           clearInterval(poll);
           await stopFfmpeg(proc);
@@ -215,6 +242,7 @@ export function makeCaptureBackend(cfg: CaptureConfig): CaptureBackend {
           // clean up the live frame + the scratch dir (segment files are discarded post-upload).
           await sweep(true);
           await rm(join(dir, LIVE_FRAME_FILE)).catch(() => undefined);
+          await rm(join(dir, THUMBNAIL_FRAME_FILE)).catch(() => undefined);
           // The dir itself is removed after uploads discard the segment files; a best-effort rm here
           // clears anything left (empty dir / an un-uploaded torn segment) without blocking.
           setTimeout(

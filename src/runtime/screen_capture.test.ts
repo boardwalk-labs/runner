@@ -24,18 +24,22 @@ function fakeSegment(over: Partial<CaptureSegment> = {}) {
 function fakeBackend(over: Partial<CaptureBackend> = {}) {
   let segCb: ((s: CaptureSegment) => void) | null = null;
   const latestFrameFn = vi.fn<() => Promise<string | null>>(() => Promise.resolve("FRAME_B64"));
+  const latestThumbnailFn = vi.fn<() => Promise<string | null>>(() => Promise.resolve(null));
   const stopFn = vi.fn<() => Promise<void>>(() => Promise.resolve());
   const session: CaptureSession = {
     onSegment: (cb) => {
       segCb = cb;
     },
     latestFrame: latestFrameFn,
+    latestThumbnail: latestThumbnailFn,
     stop: stopFn,
   };
   const startFn = vi.fn<() => Promise<CaptureSession>>(() => Promise.resolve(session));
   const backend: CaptureBackend = {
     width: 1280,
     height: 800,
+    thumbnailWidth: 320,
+    thumbnailHeight: 200,
     liveFrameIntervalMs: 1000,
     wantedPollIntervalMs: 3000,
     start: startFn,
@@ -45,6 +49,7 @@ function fakeBackend(over: Partial<CaptureBackend> = {}) {
     backend,
     emitSegment: (s: CaptureSegment) => segCb?.(s),
     latestFrameFn,
+    latestThumbnailFn,
     stopFn,
     startFn,
   };
@@ -134,6 +139,71 @@ describe("ScreenCapture — recording segments", () => {
     // Second flush with no active session does nothing (no throw, no extra stop).
     await cap.stopAndFlush();
     expect(fb.stopFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ScreenCapture — desktop thumbnails", () => {
+  it("stores an initial bandwidth-bounded thumbnail after the desktop settles", async () => {
+    vi.useFakeTimers();
+    const fb = fakeBackend();
+    fb.latestThumbnailFn.mockResolvedValue("THUMBNAIL_B64");
+    const writeArtifact = vi.fn(() => Promise.resolve({ id: "thumb_1" }));
+    const cap = new ScreenCapture({ ...makeDeps(), backend: fb.backend, writeArtifact });
+
+    await cap.start();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await cap.stopAndFlush();
+
+    expect(writeArtifact).toHaveBeenCalledWith(
+      "desktop-thumbnail-5000.jpg",
+      "image/jpeg",
+      "THUMBNAIL_B64",
+      {
+        kind: "desktop-thumbnail",
+        capture_point: "initial",
+        captured_at: 5000,
+        width: 320,
+        height: 200,
+      },
+    );
+  });
+
+  it("stores the latest thumbnail before a terminal or suspend flush", async () => {
+    const fb = fakeBackend();
+    fb.latestThumbnailFn.mockResolvedValue("FINAL_THUMBNAIL_B64");
+    const writeArtifact = vi.fn(() => Promise.resolve({ id: "thumb_final" }));
+    const cap = new ScreenCapture({ ...makeDeps(), backend: fb.backend, writeArtifact });
+
+    await cap.start();
+    await cap.stopAndFlush();
+
+    expect(fb.latestThumbnailFn).toHaveBeenCalledTimes(1);
+    expect(writeArtifact).toHaveBeenCalledWith(
+      "desktop-thumbnail-5000.jpg",
+      "image/jpeg",
+      "FINAL_THUMBNAIL_B64",
+      expect.objectContaining({ kind: "desktop-thumbnail", capture_point: "flush" }),
+    );
+  });
+
+  it("does not create another initial thumbnail after a suspend/resume", async () => {
+    vi.useFakeTimers();
+    const fb = fakeBackend();
+    fb.latestThumbnailFn.mockResolvedValue("THUMBNAIL_B64");
+    const writeArtifact = vi.fn<SegmentArtifactWriter>(() => Promise.resolve({ id: "thumb" }));
+    const cap = new ScreenCapture({ ...makeDeps(), backend: fb.backend, writeArtifact });
+
+    await cap.start();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await cap.stopAndFlush();
+    await cap.startFresh();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await cap.stopAndFlush();
+
+    const initialWrites = writeArtifact.mock.calls.filter(
+      (call) => call[3]?.capture_point === "initial",
+    );
+    expect(initialWrites).toHaveLength(1);
   });
 });
 

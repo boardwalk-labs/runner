@@ -147,6 +147,8 @@ describe("assembleWorkerDeps", () => {
     const captureBackend: WorkerRuntime["captureBackend"] = {
       width: 1280,
       height: 800,
+      thumbnailWidth: 320,
+      thumbnailHeight: 200,
       liveFrameIntervalMs: 1000,
       wantedPollIntervalMs: 3000,
       start: () => {
