@@ -177,6 +177,12 @@ export async function startRunner(opts: StartRunnerOptions): Promise<void> {
     workDir: opts.workDir,
     runnerId: opts.identity.runner_id,
     spawn,
+    // Announced on the first ACCEPTED poll, not here: registering says the runner exists, not that
+    // the control plane will hand it work.
+    onOnline: () =>
+      log(
+        `Runner ${opts.identity.name} online in pool '${opts.identity.pool}'. Waiting for runs...\n`,
+      ),
     ...(opts.once === true ? { once: true } : {}),
   });
   if (opts.handleSignals !== false) {
@@ -195,6 +201,6 @@ export async function startRunner(opts: StartRunnerOptions): Promise<void> {
       });
     }
   }
-  log(`Runner ${opts.identity.name} online in pool '${opts.identity.pool}'. Waiting for runs...\n`);
+  log(`Connecting to ${opts.baseUrl} as "${opts.identity.name}" (pool '${opts.identity.pool}')…\n`);
   await daemon.done;
 }

@@ -46,6 +46,9 @@ export interface DaemonDeps {
   once?: boolean;
   /** Test hook: called at the top of each loop iteration. */
   onIdle?: () => void;
+  /** Called once, after the FIRST poll the control plane actually accepts. Announcing the runner
+   *  before this is a lie: registration succeeding says nothing about whether poll is allowed. */
+  onOnline?: () => void;
 }
 
 export interface DaemonController {
@@ -57,6 +60,15 @@ export interface DaemonController {
 
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+/** True for a poll rejection this daemon can never outlive: the control plane refused the runner's
+ *  standing identity (401 revoked token / 403 below the version floor), rather than failing to
+ *  answer. Duck-typed on `operation`+`status` so a PoolClientError from any build matches. */
+function isFatalPollRejection(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const { operation, status } = err as { operation?: unknown; status?: unknown };
+  return operation === "poll" && (status === 401 || status === 403);
+}
 
 /** Env for one run process: the platform contract + the claim's resolved non-secret vars. */
 export function runProcessEnv(
@@ -170,11 +182,16 @@ export function startDaemon(deps: DaemonDeps): DaemonController {
     await rm(path.join(deps.workDir, "runs"), { recursive: true, force: true }).catch(
       () => undefined,
     );
+    let announced = false;
     while (!draining) {
       deps.onIdle?.();
       try {
         log.debug("polling", {});
         const polled = await deps.client.poll();
+        if (!announced) {
+          announced = true;
+          deps.onOnline?.();
+        }
         if (polled.action === "drain") {
           log.info("drain_requested", {});
           break;
@@ -186,6 +203,18 @@ export function startDaemon(deps: DaemonDeps): DaemonController {
         await executeClaim(offer, claim);
         if (deps.once === true) break;
       } catch (err) {
+        // A REJECTED IDENTITY is not a blip, and retrying it forever is how a dead runner spends a
+        // night looking healthy. Poll answers 401 when the token is revoked and 403 when the runner
+        // is below MIN_RUNNER_VERSION — neither can change while this process runs, because the
+        // stored version is written at registration and nothing refreshes it. Fail loudly instead.
+        // (Only poll: a claim 403 CAN be transient — an org toggled off mid-race — and the next
+        // poll simply returns no offers.)
+        if (isFatalPollRejection(err)) {
+          log.error("daemon_rejected", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+          throw err;
+        }
         log.warn("daemon_iteration_failed", {
           error: err instanceof Error ? err.message : String(err),
         });

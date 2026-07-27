@@ -246,6 +246,61 @@ describe("startDaemon", () => {
     await daemon.done;
     expect(client.poll).toHaveBeenCalledTimes(2);
   });
+
+  it.each([401, 403])(
+    "stops immediately when poll rejects the identity with %i",
+    async (status) => {
+      const workDir = await tmpWorkDir();
+      const rejection = Object.assign(new Error(`poll failed (${String(status)}): nope`), {
+        status,
+        operation: "poll",
+      });
+      const client = {
+        poll: vi.fn().mockRejectedValue(rejection),
+        claim: vi.fn(),
+        heartbeat: vi.fn(),
+      };
+      const onOnline = vi.fn();
+      const daemon = startDaemon({
+        client,
+        runtimeEntry: "/entry.js",
+        workDir,
+        runnerId: "r1",
+        sleep: instantSleep(),
+        spawn: vi.fn(),
+        onOnline,
+      });
+      // Retrying a refused identity forever is the bug: the version is fixed at registration, so
+      // no amount of waiting changes the answer. Surface it and stop.
+      await expect(daemon.done).rejects.toThrow(`poll failed (${String(status)})`);
+      expect(client.poll).toHaveBeenCalledTimes(1);
+      expect(onOnline).not.toHaveBeenCalled();
+    },
+  );
+
+  it("announces online only after a poll the control plane accepts", async () => {
+    const workDir = await tmpWorkDir();
+    const client = {
+      poll: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("ECONNRESET"))
+        .mockResolvedValue({ assignment: null, action: "drain" }),
+      claim: vi.fn(),
+      heartbeat: vi.fn(),
+    };
+    const onOnline = vi.fn();
+    const daemon = startDaemon({
+      client,
+      runtimeEntry: "/entry.js",
+      workDir,
+      runnerId: "r1",
+      sleep: instantSleep(),
+      spawn: vi.fn(),
+      onOnline,
+    });
+    await daemon.done;
+    expect(onOnline).toHaveBeenCalledTimes(1); // once, and not while the first poll was failing
+  });
 });
 
 describe("identity round-trip", () => {
