@@ -262,6 +262,78 @@ describe("FreezeCoordinator", () => {
     c.onSuspendAbort({ reason: "snapshot_failed" }); // must not throw
   });
 
+  it("announces the park AFTER the pre-freeze hook and BEFORE the freeze request", async () => {
+    const { channel, requests } = fakeChannel();
+    const order: string[] = [];
+    const c = new FreezeCoordinator({
+      channel: {
+        ...channel,
+        sendSuspendRequest: (p: unknown) => {
+          order.push("request");
+          channel.sendSuspendRequest(p);
+        },
+      },
+    });
+    c.setHooks({
+      onBeforeFreeze: () => {
+        order.push("before");
+        return Promise.resolve();
+      },
+      onSuspend: () => {
+        order.push("announce");
+        return Promise.resolve();
+      },
+    });
+    const wait = c.suspendingWait(sleepSignal());
+    await tick();
+    // The announcement has to be on the wire before the host may pause the VM.
+    expect(order).toEqual(["before", "announce", "request"]);
+    expect(requests).toHaveLength(1);
+    c.onWake(wakePayload());
+    await wait;
+  });
+
+  it("announces with the PRIMARY wait first, whatever order they registered in", async () => {
+    const { channel } = fakeChannel();
+    const c = new FreezeCoordinator({ channel });
+    const announced: SuspendSignal[][] = [];
+    c.setHooks({
+      onSuspend: (waits) => {
+        announced.push([...waits]);
+        return Promise.resolve();
+      },
+    });
+    // A sleep registers first, but a person waiting outranks a timer.
+    const sleep = c.suspendingWait(sleepSignal());
+    const gate = c.suspendingWait(gateSignal());
+    await tick();
+    expect(announced).toHaveLength(1);
+    expect(announced[0]?.map((w) => w.reason)).toEqual(["human_input", "sleep"]);
+    c.onWake(wakePayload({ wake: { kind: "sleep" } }));
+    await sleep;
+    void gate;
+  });
+
+  it("does not announce a park that the pre-freeze hook aborted", async () => {
+    const { channel } = fakeChannel();
+    const c = new FreezeCoordinator({ channel });
+    const onSuspend = vi.fn(() => Promise.resolve());
+    c.setHooks({ onBeforeFreeze: () => Promise.reject(new Error("flush failed")), onSuspend });
+    await c.suspendingWait(sleepSignal());
+    expect(onSuspend).not.toHaveBeenCalled();
+  });
+
+  it("a failing announcement never blocks the freeze (telemetry is not load-bearing)", async () => {
+    const { channel, requests } = fakeChannel();
+    const c = new FreezeCoordinator({ channel });
+    c.setHooks({ onSuspend: () => Promise.reject(new Error("broker down")) });
+    const wait = c.suspendingWait(sleepSignal());
+    await tick();
+    expect(requests).toHaveLength(1);
+    c.onWake(wakePayload());
+    expect((await wait).kind).toBe("wake");
+  });
+
   it("treats a failed before-freeze hook as an abort for a sleep seam", async () => {
     const { channel, requests } = fakeChannel();
     const c = new FreezeCoordinator({ channel });

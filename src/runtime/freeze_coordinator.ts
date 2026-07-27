@@ -100,6 +100,13 @@ export interface FreezeCoordinatorHooks {
    *  (suspended time must never appear billed) and persist the workspace. Its own failure
    *  aborts THIS freeze attempt (the seam holds/retries) — never the run. */
   onBeforeFreeze?: () => Promise<void>;
+  /** Announce the park to the run's event stream — the LAST thing before the freeze request, once
+   *  the wait set is final (a wait can withdraw during onBeforeFreeze's flush, so the set isn't
+   *  known until then). Runs here, not inside onBeforeFreeze, because the announcement has to be
+   *  ON THE WIRE before the VM can pause: the host may snapshot the instant it sees the request.
+   *  Exactly one of `onAfterWake` / `onFreezeAborted` follows every call. Best-effort — a
+   *  telemetry failure must never hold up a suspension, so its errors are swallowed here. */
+  onSuspend?: (waits: readonly SuspendSignal[]) => Promise<void>;
   /** Runs when a wake lands, before the seam resolves: swap the run/api tokens onto the
    *  broker client and rebase the runtime meter past the frozen window. */
   onAfterWake?: (wake: WakePayload) => void | Promise<void>;
@@ -148,6 +155,14 @@ function primaryWait(waits: WaitSet): RegisteredWait {
 function outranks(a: SuspendSignal, b: SuspendSignal): boolean {
   const byReason = REASON_PRECEDENCE[a.reason] - REASON_PRECEDENCE[b.reason];
   return byReason !== 0 ? byReason < 0 : a.seq < b.seq;
+}
+
+/** The freeze's waits with the PRIMARY first — so a consumer that describes the park as one thing
+ *  (the announcement frame, whose `reason` is what a reader sees) picks index 0 and inherits this
+ *  module's precedence rule instead of restating it. */
+function signalsPrimaryFirst(waits: WaitSet): SuspendSignal[] {
+  const primary = primaryWait(waits);
+  return [primary.signal, ...waits.filter((w) => w !== primary).map((w) => w.signal)];
 }
 
 export class FreezeCoordinator {
@@ -397,6 +412,15 @@ export class FreezeCoordinator {
         continue;
       }
       const frozen: WaitSet = [head, ...rest];
+      // Announce the park now that the set is final and nothing else can start (the gate is
+      // closed). A throw here is swallowed: telemetry never decides whether a run suspends.
+      try {
+        await this.hooks.onSuspend?.(signalsPrimaryFirst(frozen));
+      } catch (err) {
+        log.warn("suspend_announce_failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       const outcome = await new Promise<FrozenOutcome>((resolve) => {
         this.frozen = resolve;
         this.deps.channel.sendSuspendRequest({

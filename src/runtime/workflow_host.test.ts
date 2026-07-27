@@ -9,6 +9,7 @@ import type {
   McpServerRef,
 } from "@boardwalk-labs/workflow/runtime";
 import type { BrowserSessionManager } from "./browser_session.js";
+import type { RunEventBody } from "./agent/events.js";
 import {
   WorkerWorkflowHost,
   TimerSleepController,
@@ -66,6 +67,7 @@ function makeHost(
     shell: NonNullable<WorkerWorkflowHostDeps["shell"]>;
     usage: NonNullable<WorkerWorkflowHostDeps["usage"]>;
     budgetGate: NonNullable<WorkerWorkflowHostDeps["budgetGate"]>;
+    events: NonNullable<WorkerWorkflowHostDeps["events"]>;
   }> = {},
 ): { host: WorkerWorkflowHost; held: number[] } {
   const held: number[] = [];
@@ -101,8 +103,27 @@ function makeHost(
     ...(over.shell ? { shell: over.shell } : {}),
     ...(over.usage ? { usage: over.usage } : {}),
     ...(over.budgetGate ? { budgetGate: over.budgetGate } : {}),
+    ...(over.events ? { events: over.events } : {}),
   });
   return { host, held };
+}
+
+/** A recording event sink: the bodies the host emitted, in order. */
+function recordingSink(): {
+  sink: NonNullable<WorkerWorkflowHostDeps["events"]>;
+  emitted: RunEventBody[];
+} {
+  const emitted: RunEventBody[] = [];
+  return {
+    sink: {
+      emit: (body) => {
+        emitted.push(body);
+        return body as never;
+      },
+      beginTurn: () => undefined,
+    },
+    emitted,
+  };
 }
 
 /** A controller pre-aborted with a credit-exhaustion reason. */
@@ -590,6 +611,82 @@ describe("WorkerWorkflowHost — hold-in-process waits (no freeze substrate)", (
     const { host, held } = makeHost();
     await host.sleep(60_000); // ≥ the snapshot threshold, still a hold here
     expect(held).toEqual([60_000]);
+  });
+
+  it("humanInput(): brackets the wait with requested/resolved frames so the Q+A survives it", async () => {
+    const { port } = fakeHeldInput({ approve: { value: "yes" } });
+    const { sink, emitted } = recordingSink();
+    const { host } = makeHost({ heldInput: port, heldPollIntervalMs: 1, events: sink });
+    await host.humanInput({ prompt: "Ship it?", input: { kind: "text" }, key: "approve" });
+    expect(emitted).toEqual([
+      {
+        kind: "human_input_requested",
+        requestId: "1:approve",
+        key: "approve",
+        prompt: "Ship it?",
+      },
+      { kind: "human_input_resolved", requestId: "1:approve", key: "approve" },
+    ]);
+  });
+
+  it("humanInput(): emits nothing extra when no event sink is wired (gates still work)", async () => {
+    const { port } = fakeHeldInput({ "seam-1": { value: "ok" } });
+    const { host } = makeHost({ heldInput: port, heldPollIntervalMs: 1 });
+    await expect(
+      host.humanInput({ prompt: "Q", input: { kind: "text" } }),
+    ).resolves.toBeDefined();
+  });
+
+  it("humanInput(): leaves the gate OPEN on the wire when the wait never resolves", async () => {
+    const controller = new AbortController();
+    const port: HeldInputPort = {
+      register: () => Promise.resolve(undefined),
+      poll: () => {
+        controller.abort(new RunAbortedError("cancelled"));
+        return Promise.resolve({});
+      },
+    };
+    const { sink, emitted } = recordingSink();
+    const { host } = makeHost({
+      heldInput: port,
+      heldPollIntervalMs: 1,
+      signal: controller.signal,
+      events: sink,
+    });
+    await expect(host.humanInput({ prompt: "Q", input: { kind: "text" } })).rejects.toThrow(
+      RunAbortedError,
+    );
+    // No `resolved` — nobody answered. A cancelled run closes it out at its terminal frame.
+    expect(emitted.map((e) => e.kind)).toEqual(["human_input_requested"]);
+  });
+
+  it("agent(): each in-leaf gate gets its own requested/resolved pair, keyed by tool call", async () => {
+    const checkpoint = { messages: [], iteration: 1, totals: { inputTokens: 1, outputTokens: 1 } };
+    let call = 0;
+    const leaf: LeafExecutor = {
+      run: () => {
+        call += 1;
+        if (call > 2) return Promise.resolve("leaf-done");
+        const err = new LeafParked({
+          toolCallId: `tc_${String(call)}`,
+          prompt: `Q${String(call)}?`,
+          inputSpec: {},
+        });
+        err.checkpoint = checkpoint;
+        return Promise.reject(err);
+      },
+    };
+    const { port } = fakeHeldInput({ tc_1: "yes", tc_2: "no" });
+    const { sink, emitted } = recordingSink();
+    const { host } = makeHost({ leaf, heldInput: port, heldPollIntervalMs: 1, events: sink });
+    await host.agent("ask", { model: "m" });
+    // Both gates share the leaf's suspension seq; the tool-call id is what tells them apart.
+    expect(emitted).toEqual([
+      { kind: "human_input_requested", requestId: "1:tc_1", key: "tc_1", prompt: "Q1?" },
+      { kind: "human_input_resolved", requestId: "1:tc_1", key: "tc_1" },
+      { kind: "human_input_requested", requestId: "1:tc_2", key: "tc_2", prompt: "Q2?" },
+      { kind: "human_input_resolved", requestId: "1:tc_2", key: "tc_2" },
+    ]);
   });
 });
 

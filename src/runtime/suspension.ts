@@ -14,6 +14,7 @@
 // it carries.
 
 import type { LeafCheckpoint } from "@boardwalk-labs/engine/core";
+import type { RunEventBody } from "./agent/events.js";
 
 /**
  * Sleeps at/above this boundary SUSPEND on the snapshot substrate (freeze the VM; the wake fires
@@ -68,6 +69,39 @@ export interface SuspendSignal {
   /** The child run id for `reason: "workflow_call"` — the parent suspends `waiting_for_child` and is
    *  woken when this child finalizes (the sweep wakes a parent whose child is terminal). */
   childRunId?: string;
+}
+
+/** The wire's three suspension reasons, which are what a READER of the run needs — narrower than the
+ *  four a seam raises. A budget park maps onto `human_input` because that is literally what it waits
+ *  for (a person raising the cap), and the enum is closed: a fourth value would make a strict
+ *  consumer drop the frame entirely. */
+const WIRE_REASON: Record<SuspendReason, "sleep" | "human_input" | "child"> = {
+  sleep: "sleep",
+  human_input: "human_input",
+  budget: "human_input",
+  workflow_call: "child",
+};
+
+/**
+ * The `suspended` frame for a park, from the waits it froze on — PRIMARY FIRST (the coordinator
+ * orders them by the same precedence the control plane derives the run's status from, so the frame
+ * and the status pill agree on what the run is waiting for).
+ *
+ * `wakeAt` is the EARLIEST deadline in the whole set, not the primary's: with a gate and a sleep
+ * composed, the sleep is when the run actually wakes, and a reader counting down wants that.
+ */
+export function suspendedEventBody(waits: readonly SuspendSignal[]): RunEventBody {
+  const primary = waits[0];
+  const deadlines = waits.flatMap((w) => {
+    const at = w.reason === "sleep" ? w.wakeAtMs : w.humanInput?.expiresAt;
+    return at === undefined ? [] : [at];
+  });
+  const wakeAt = deadlines.length === 0 ? undefined : Math.min(...deadlines);
+  return {
+    kind: "suspended",
+    reason: primary === undefined ? "sleep" : WIRE_REASON[primary.reason],
+    ...(wakeAt !== undefined ? { wakeAt } : {}),
+  };
 }
 
 /** A monotonic per-run counter for suspension/gate keys (the `seq` on {@link SuspendSignal}). */

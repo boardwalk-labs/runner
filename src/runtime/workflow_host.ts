@@ -30,8 +30,14 @@ import type { BrowserSessionManager } from "./browser_session.js";
 import { LeafParked, type LeafResume } from "@boardwalk-labs/engine/core";
 import { normalizeHumanInputResult } from "./wire/human_input.js";
 import { BUDGET_GATE_KEY } from "./budget_gate.js";
-import { SuspensionCounter, SUSPEND_THRESHOLD_MS, type SuspendSignal } from "./suspension.js";
+import {
+  SuspensionCounter,
+  SUSPEND_THRESHOLD_MS,
+  type HumanInputGate,
+  type SuspendSignal,
+} from "./suspension.js";
 import type { FreezeCoordinator, FreezeOutcome, WakeValue } from "./freeze_coordinator.js";
+import type { TurnEventSink } from "./agent/events.js";
 import { throwIfAborted } from "./run_abort.js";
 
 /** Parse a `humanInput({ timeout })` string (`"48h"`, `"30m"`, `"90s"`, `"7d"`) to milliseconds, or
@@ -176,6 +182,14 @@ export class TimerSleepController implements SleepController {
   }
 }
 
+/** A gate's identity on the wire. The runner never learns the control plane's row id (register
+ *  answers `{registered}`), and it doesn't need to: `(seq, key)` is unique per gate INSTANCE within
+ *  a run — the same key raised at two different parks is two gates — and `key` alone is what a
+ *  reader joins the durable row by. */
+export function gateRequestId(seq: number, key: string): string {
+  return `${String(seq)}:${key}`;
+}
+
 /** The RunAbortedError carried on an aborted signal (or a generic abort Error as a fallback). */
 function abortError(signal: AbortSignal): Error {
   const r: unknown = signal.reason;
@@ -238,6 +252,11 @@ export interface WorkerWorkflowHostDeps {
   sleeper?: SleepController;
   /** Optional run-detail phase marker support. Absent ⇒ Phase markers are a no-op in this host. */
   phases?: PhaseController;
+  /** The run's event stream, for the human-in-the-loop gate frames (`human_input_requested` /
+   *  `human_input_resolved`). Without these a gate leaves no trace in the run's story once it is
+   *  answered — the question and the answer live only in the respond form, which disappears with
+   *  the pause. Observability only; absent ⇒ gates work, unrecorded. */
+  events?: TurnEventSink;
   /** Injected clock for `until`-relative sleeps. Defaults to Date.now. */
   now?: () => number;
   /** Override the 7-day hold ceiling (tests). */
@@ -488,20 +507,23 @@ export class WorkerWorkflowHost {
             { kind: "leaf_parked_no_checkpoint", seq },
           );
         }
+        const gate: HumanInputGate = {
+          key: err.request.toolCallId,
+          prompt: err.request.prompt,
+          inputSpec: err.request.inputSpec,
+        };
         const signal: SuspendSignal = {
           reason: "human_input",
           seq,
           leafCheckpoint: err.checkpoint,
-          humanInput: {
-            key: err.request.toolCallId,
-            prompt: err.request.prompt,
-            inputSpec: err.request.inputSpec,
-          },
+          humanInput: gate,
         };
+        this.announceGate(seq, gate);
         const freeze = this.deps.freeze;
         if (freeze === undefined) {
           // Hold path: register the gate and poll until answered; the transcript stays in memory.
           heldAnswers[err.request.toolCallId] = await this.holdForAnswer(seq, signal.humanInput);
+          this.announceGateResolved(seq, err.request.toolCallId);
           resume = { checkpoint: err.checkpoint, answers: { ...heldAnswers } };
           continue;
         }
@@ -519,6 +541,7 @@ export class WorkerWorkflowHost {
         // Validate OUR gate is answered, but hand the leaf the whole batch (spec: a wake
         // carries every answer the suspension raised, keyed by tool-call id).
         this.gateAnswer(outcome.wake, err.request.toolCallId);
+        this.announceGateResolved(seq, err.request.toolCallId);
         resume = { checkpoint: err.checkpoint, answers: { ...(outcome.wake.answers ?? {}) } };
       }
     }
@@ -555,11 +578,36 @@ export class WorkerWorkflowHost {
   private async awaitGate(
     signal: SuspendSignal & { humanInput: NonNullable<SuspendSignal["humanInput"]> },
   ): Promise<HumanInputResult> {
+    this.announceGate(signal.seq, signal.humanInput);
     const freeze = this.deps.freeze;
-    if (freeze !== undefined) {
-      return await this.freezeHumanInput(freeze, signal, signal.humanInput.key);
-    }
-    return normalizeHumanInputResult(await this.holdForAnswer(signal.seq, signal.humanInput));
+    const answer =
+      freeze !== undefined
+        ? await this.freezeHumanInput(freeze, signal, signal.humanInput.key)
+        : normalizeHumanInputResult(await this.holdForAnswer(signal.seq, signal.humanInput));
+    this.announceGateResolved(signal.seq, signal.humanInput.key);
+    return answer;
+  }
+
+  /** Mark the run as waiting on a person, on the wire. Emitted at the seam (not at registration) so
+   *  it lands once for a gate however the substrate waits it out — freeze, hold, or the
+   *  register-then-race in between. */
+  private announceGate(seq: number, gate: HumanInputGate): void {
+    this.deps.events?.emit({
+      kind: "human_input_requested",
+      requestId: gateRequestId(seq, gate.key),
+      key: gate.key,
+      prompt: gate.prompt,
+    });
+  }
+
+  /** …and that the wait is over. The ANSWER isn't on this frame (the wire doesn't carry it): the
+   *  gate's durable row holds the response, and a reader joins it by `key`. */
+  private announceGateResolved(seq: number, key: string): void {
+    this.deps.events?.emit({
+      kind: "human_input_resolved",
+      requestId: gateRequestId(seq, key),
+      key,
+    });
   }
 
   /**

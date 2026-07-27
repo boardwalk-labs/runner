@@ -100,6 +100,7 @@ import { LocalWorkspaceBackend } from "./local_workspace_backend.js";
 import { BrokerWorkspaceBackend } from "./broker_workspace_backend.js";
 import { extractTarball } from "./tar_archive.js";
 import { PhaseTracker } from "./phase_tracker.js";
+import { suspendedEventBody } from "./suspension.js";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -537,6 +538,9 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // (absent ⇒ the host throws "not available on this runner image").
       ...(browserSessions !== undefined ? { browserSessions } : {}),
       phases: phaseTracker,
+      // Human-in-the-loop gates ride the run's one ordered stream, so a question asked and answered
+      // stays in the run's story after the respond form is gone.
+      events: runEvents,
       // The protocol's `shell` capability: host-side execution in the run's workspace (the old
       // in-process execSync moved behind the wire with the redesign).
       shell: (cmd, opts) => runShell(cmd, opts, { workspaceRoot: runtime.workspaceRoot, signal }),
@@ -572,10 +576,20 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
           // the whole frozen window and bill suspended time. Resumed on wake and on suspend_abort.
           activeFlusher?.pause();
         },
+        // The run is about to release its host: announce the park on the wire so the run view can
+        // draw the dormant stretch as a break in the story instead of a silent time-jump. FLUSH it
+        // — the publisher batches, and the VM can pause the instant the request lands, which would
+        // strand the frame in a buffer that the snapshot then carries into the wake.
+        onSuspend: async (waits): Promise<void> => {
+          runEvents.emit(suspendedEventBody(waits));
+          await eventPublisher.flush();
+        },
         // The freeze died (snapshot/store failure) — the seam holds in-process, which must keep
-        // metering: undo the pre-freeze pause.
+        // metering: undo the pre-freeze pause. The announced park never happened, so close it out
+        // too, or the view shows a run parked forever while it is in fact working.
         onFreezeAborted: (): void => {
           activeFlusher?.resume();
+          runEvents.emit({ kind: "resumed" });
         },
         // On wake: reseed the userspace CSPRNG (clause 3 — a suspend snapshot restored more than
         // once, e.g. a re-dispatch retry, would otherwise repeat its post-wake `crypto.*` draws),
@@ -605,6 +619,9 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
           activeFlusher?.resume();
           // Resume capture in a fresh segment epoch (a suspend/resume boundary is a segment boundary).
           void capture?.startFresh();
+          // Close the announced park. LAST: it publishes through the broker client, which only just
+          // got the wake's fresh run token (the frozen one expired) and a clean socket pool.
+          runEvents.emit({ kind: "resumed" });
         },
       });
     }

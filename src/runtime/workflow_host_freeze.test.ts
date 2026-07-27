@@ -8,6 +8,7 @@ import { LeafParked } from "@boardwalk-labs/engine/core";
 import { WorkerWorkflowHost, type ChildDispatcher, type LeafExecutor } from "./workflow_host.js";
 import { FreezeCoordinator } from "./freeze_coordinator.js";
 import type { SuspendSignal } from "./suspension.js";
+import type { RunEventBody } from "./agent/events.js";
 
 function childStub(over: Partial<ChildDispatcher> = {}): ChildDispatcher {
   return {
@@ -38,8 +39,10 @@ function makeFrozenHost(
   freeze: FreezeCoordinator;
   requests: unknown[];
   held: number[];
+  emitted: RunEventBody[];
 } {
   const requests: unknown[] = [];
+  const emitted: RunEventBody[] = [];
   const freeze = new FreezeCoordinator({
     channel: {
       sendSuspendRequest: (p: unknown) => requests.push(p),
@@ -68,9 +71,16 @@ function makeFrozenHost(
     },
     now: () => 1_000,
     freeze,
+    events: {
+      emit: (body) => {
+        emitted.push(body);
+        return body as never;
+      },
+      beginTurn: () => undefined,
+    },
     ...(over.heldInput !== undefined ? { heldInput: over.heldInput, heldPollIntervalMs: 1 } : {}),
   });
-  return { host, freeze, requests, held };
+  return { host, freeze, requests, held, emitted };
 }
 
 /** Two macrotask hops: one for the coordinator's drain (it lets queued continuations start work
@@ -142,6 +152,27 @@ describe("WorkerWorkflowHost freeze mode", () => {
 
     wake(freeze, { kind: "human_input", answers: { approve: { value: "yes", isOther: false } } });
     await expect(gate).resolves.toEqual({ value: "yes", isOther: false });
+  });
+
+  it("a frozen gate brackets the whole park with requested/resolved frames", async () => {
+    const { host, freeze, emitted } = makeFrozenHost();
+    const gate = host.humanInput({
+      key: "approve",
+      prompt: "ok?",
+      input: { kind: "choice", options: ["yes", "no"] },
+    });
+    await tick();
+    // Asked BEFORE the freeze: the frame has to be on the wire for the pause to be explicable.
+    expect(emitted).toEqual([
+      { kind: "human_input_requested", requestId: "1:approve", key: "approve", prompt: "ok?" },
+    ]);
+    wake(freeze, { kind: "human_input", answers: { approve: { value: "yes", isOther: false } } });
+    await gate;
+    expect(emitted[1]).toEqual({
+      kind: "human_input_resolved",
+      requestId: "1:approve",
+      key: "approve",
+    });
   });
 
   it("a wake missing the parked gate fails loudly (control plane and snapshot disagree)", async () => {
