@@ -13,9 +13,11 @@ import {
   heartbeatResponseSchema,
   parseContract,
   runnerRegistrationResponseSchema,
+  RUNNER_CONTRACT_VERSION,
   type AssignmentPollResponse,
   type ClaimResponse,
   type HeartbeatResponse,
+  type RunnerDeclaration,
   type RunnerRegistrationRequest,
   type RunnerRegistrationResponse,
 } from "../contract.js";
@@ -25,6 +27,8 @@ export interface PoolClientConfig {
   baseUrl: string;
   /** The standing `bwkr_…` credential (absent only for `register`). */
   runnerToken?: string;
+  /** This daemon's package version, declared on every call for display and support. */
+  runnerVersion?: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -81,12 +85,21 @@ export class PoolClient {
     );
   }
 
+  /** What this runner declares about itself on every authenticated call — read LIVE by the
+   *  control plane, so upgrading the daemon is what fixes a compatibility refusal. */
+  private declaration(): string {
+    return JSON.stringify({
+      contract_version: RUNNER_CONTRACT_VERSION,
+      runner_version: this.cfg.runnerVersion ?? "0.0.0",
+    } satisfies RunnerDeclaration);
+  }
+
   /** Long-poll for ONE credential-free offer (the server holds ~22s). */
   async poll(): Promise<AssignmentPollResponse> {
     const res = await this.fetchImpl(this.url("/runner/v1/pool/poll"), {
       method: "POST",
       headers: this.headers(),
-      body: "{}",
+      body: this.declaration(),
     });
     if (res.status !== 200) throw new PoolClientError(res.status, "poll", await errorBody(res));
     return parseContract(assignmentPollResponseSchema, await res.json(), "poll response");
@@ -96,7 +109,7 @@ export class PoolClient {
   async claim(assignmentId: string): Promise<ClaimResponse | null> {
     const res = await this.fetchImpl(
       this.url(`/runner/v1/pool/assignments/${encodeURIComponent(assignmentId)}/claim`),
-      { method: "POST", headers: this.headers(), body: "{}" },
+      { method: "POST", headers: this.headers(), body: this.declaration() },
     );
     if (res.status === 409) return null;
     if (res.status !== 200) throw new PoolClientError(res.status, "claim", await errorBody(res));

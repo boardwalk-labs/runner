@@ -170,7 +170,11 @@ export async function startRunner(opts: StartRunnerOptions): Promise<void> {
   // Process mode imports this entry directly; container mode ignores it (the image's entrypoint runs
   // the runtime), but the daemon still passes it through the spawner interface.
   const runtimeEntry = fileURLToPath(new URL("../runtime/main.js", import.meta.url));
-  const client = new PoolClient({ baseUrl: opts.baseUrl, runnerToken: opts.identity.runner_token });
+  const client = new PoolClient({
+    baseUrl: opts.baseUrl,
+    runnerToken: opts.identity.runner_token,
+    runnerVersion: packageVersion(),
+  });
   const daemon = startDaemon({
     client,
     runtimeEntry,

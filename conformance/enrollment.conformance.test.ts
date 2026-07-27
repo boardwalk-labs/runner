@@ -18,6 +18,7 @@ import {
 } from "./harness.js";
 import { PoolClient } from "../src/daemon/pool_client.js";
 import { startDaemon } from "../src/daemon/daemon.js";
+import { RUNNER_CONTRACT_VERSION } from "../src/contract.js";
 
 afterEach(disposeConformance);
 
@@ -62,6 +63,31 @@ describe("conformance: enrollment", () => {
     const [pollCall] = cp.callsTo("/runner/v1/pool/poll");
     expect(pollCall?.auth).toBe(CONFORMANCE_RUNNER_TOKEN);
     expect(pollCall?.body).not.toHaveProperty("registration_token");
+  });
+
+  it("declares its contract revision on EVERY poll and claim, not once at registration", async () => {
+    const cp = await startFakeControlPlane({ offers: [offer("a1")] });
+    const daemon = startDaemon({
+      client: new PoolClient({
+        baseUrl: cp.baseUrl,
+        runnerToken: CONFORMANCE_RUNNER_TOKEN,
+        runnerVersion: "9.9.9",
+      }),
+      runtimeEntry: "/runtime/main.js",
+      workDir: makeWorkDir(),
+      runnerId: "01H_conformance_runner",
+      spawn: stubSpawner().spawn,
+      sleep: cappedSleep(1),
+      once: true,
+    });
+    await daemon.done;
+
+    // The gate is read LIVE off each request. Declaring once at registration is what made a
+    // refusal outlive every upgrade: the daemon reuses its saved identity, so the stored value
+    // could never change and "upgrade the daemon" was advice the machine could not act on.
+    const declaration = { contract_version: RUNNER_CONTRACT_VERSION, runner_version: "9.9.9" };
+    expect(cp.callsTo("/runner/v1/pool/poll")[0]?.body).toEqual(declaration);
+    expect(cp.callsTo("/claim")[0]?.body).toEqual(declaration);
   });
 
   it("a wrong standing token is refused, and the client surfaces the status", async () => {

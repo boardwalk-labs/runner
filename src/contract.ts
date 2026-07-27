@@ -42,6 +42,36 @@ const epochMs = z.number().int().nonnegative();
 export const runnerOsSchema = z.enum(["linux", "macos", "windows"]);
 export const runnerArchSchema = z.enum(["x64", "arm64"]);
 
+/**
+ * The wire revision this package speaks, declared on EVERY authenticated call.
+ *
+ * Deliberately not the package version. The compatibility floor exists because payloads change in
+ * ways an older daemon cannot survive — these are `z.strictObject`s, so a field added to the claim
+ * response makes an older runner reject the whole thing — and that is a property of the WIRE, not
+ * of release cadence. Gating on the package version made every future bump an implicit lockout
+ * decision, and gating on a version captured once at registration made upgrading unable to fix a
+ * refusal at all.
+ *
+ * Bump ONLY when a change would break a runner that speaks the previous revision.
+ *   1 — poll/claim declare the contract version; claim carries the full workspace scope.
+ */
+export const RUNNER_CONTRACT_VERSION = 1;
+
+/**
+ * What every authenticated pool call declares about the runner making it. Sent on poll AND claim:
+ * poll so an incompatible runner is refused before it commits to anything, claim because the claim
+ * RESPONSE is the payload an outdated runner actually chokes on.
+ *
+ * The control plane reads this LIVE. Nothing about a runner's compatibility is remembered between
+ * calls, so upgrading a daemon fixes a refusal by itself — which is the whole point.
+ */
+export const runnerDeclarationSchema = z.strictObject({
+  contract_version: z.number().int().positive(),
+  /** The daemon's own package version — recorded for display and support, never gated on. */
+  runner_version: z.string().min(1).max(64),
+});
+export type RunnerDeclaration = z.infer<typeof runnerDeclarationSchema>;
+
 // ============================================================================
 // Registration — a machine joins a pool
 // ============================================================================
