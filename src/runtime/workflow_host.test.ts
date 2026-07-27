@@ -632,9 +632,7 @@ describe("WorkerWorkflowHost — hold-in-process waits (no freeze substrate)", (
   it("humanInput(): emits nothing extra when no event sink is wired (gates still work)", async () => {
     const { port } = fakeHeldInput({ "seam-1": { value: "ok" } });
     const { host } = makeHost({ heldInput: port, heldPollIntervalMs: 1 });
-    await expect(
-      host.humanInput({ prompt: "Q", input: { kind: "text" } }),
-    ).resolves.toBeDefined();
+    await expect(host.humanInput({ prompt: "Q", input: { kind: "text" } })).resolves.toBeDefined();
   });
 
   it("humanInput(): leaves the gate OPEN on the wire when the wait never resolves", async () => {
