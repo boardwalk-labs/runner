@@ -87,6 +87,9 @@ const INITIAL_THUMBNAIL_DELAY_MS = 5_000;
 
 export class ScreenCapture {
   private session: CaptureSession | null = null;
+  /** An in-flight `start()` — post-wake capture is kicked off fire-and-forget, so `stopAndFlush()` must
+   *  be able to await a spawn that hasn't landed yet. */
+  private starting: Promise<void> | null = null;
   /** Monotonic across the whole run, so segments stay contiguous across suspend/resume epochs. */
   private segmentIndex = 0;
   /** Serializes segment uploads so `stopAndFlush()` can await the whole in-flight tail. */
@@ -100,14 +103,23 @@ export class ScreenCapture {
 
   constructor(private readonly deps: ScreenCaptureDeps) {}
 
-  /** Begin capturing. Idempotent-safe: a second call while running is a no-op. */
+  /** Begin capturing. Idempotent-safe: a second call while running — or while a first one is still
+   *  spawning — joins that start instead of racing a second recorder onto the display. */
   async start(): Promise<void> {
     if (this.session !== null) return;
-    const session = await this.deps.backend.start();
-    this.session = session;
-    session.onSegment((segment) => this.enqueueSegment(segment));
-    this.startLiveLoop(session);
-    this.scheduleInitialThumbnail(session);
+    if (this.starting !== null) return this.starting;
+    this.starting = (async () => {
+      try {
+        const session = await this.deps.backend.start();
+        this.session = session;
+        session.onSegment((segment) => this.enqueueSegment(segment));
+        this.startLiveLoop(session);
+        this.scheduleInitialThumbnail(session);
+      } finally {
+        this.starting = null;
+      }
+    })();
+    return this.starting;
   }
 
   /** Post-wake: start a fresh capture (new segment files), keeping the monotonic segment index. */
@@ -122,6 +134,11 @@ export class ScreenCapture {
    * no active session.
    */
   async stopAndFlush(): Promise<void> {
+    // Post-wake capture starts fire-and-forget (`void capture.startFresh()` in the runner's onAfterWake
+    // hook), so a program that returns a breath after its resume reaches here mid-spawn. Without this
+    // await, `session` is still null, the flush no-ops, and the epoch's recorder outlives the run: its
+    // segment never uploads and ffmpeg runs on into teardown.
+    if (this.starting !== null) await this.starting.catch(() => undefined);
     const session = this.session;
     if (session === null) return;
     this.session = null;

@@ -17,7 +17,7 @@
 // same way browser_session_backend.ts is — the unit tests cover screen_capture.ts's pure orchestration.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm, unlink } from "node:fs/promises";
+import { mkdtemp, open, readdir, readFile, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { browserTierEnabled } from "./browser_session_backend.js";
@@ -152,6 +152,60 @@ function segmentIndexOf(name: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+function segmentPath(dir: string, index: number): string {
+  return join(dir, `${SEGMENT_PREFIX}${String(index).padStart(5, "0")}.mp4`);
+}
+
+/** Bytes of an MP4 to inspect for the payload check. ffmpeg writes `ftyp`/`free`/`mdat` at the very
+ *  head (no faststart, so `moov` lands last), which puts every box header we read inside 100 bytes. */
+const MP4_HEAD_BYTES = 4096;
+
+/**
+ * True when an MP4 head positively shows an `mdat` box carrying NO payload — the shape ffmpeg leaves
+ * when it is stopped before encoding a single frame: `ftyp` + an 8-byte (header-only) `mdat` + a `moov`
+ * holding no track at all, 262 bytes in all. No player can open that file.
+ *
+ * Deliberately conservative: a missing `mdat`, a walk that runs past the head, a `size === 0` box (runs
+ * to EOF) or any malformed length answers false. Dropping a real segment is worse than uploading an odd
+ * one, so only the husk we can PROVE empty is rejected. Pure — exported for unit tests.
+ */
+export function mp4HasEmptyMdat(head: Buffer): boolean {
+  let offset = 0;
+  while (offset + 8 <= head.length) {
+    const declared = head.readUInt32BE(offset);
+    const type = head.toString("latin1", offset + 4, offset + 8);
+    let headerBytes = 8;
+    let size = declared;
+    if (declared === 1) {
+      // A 64-bit `largesize` follows the type — a box that big plainly carries payload.
+      if (offset + 16 > head.length) return false;
+      headerBytes = 16;
+      size = Number(head.readBigUInt64BE(offset + 8));
+    }
+    if (type === "mdat") return declared !== 0 && size === headerBytes;
+    if (size < headerBytes) return false;
+    offset += size;
+  }
+  return false;
+}
+
+/** Read a finalized segment's head and answer whether it is the frameless husk. Unreadable answers
+ *  false (see {@link mp4HasEmptyMdat} — only a proven-empty file is dropped). */
+export async function isFramelessSegment(path: string): Promise<boolean> {
+  try {
+    const file = await open(path, "r");
+    try {
+      const buf = Buffer.alloc(MP4_HEAD_BYTES);
+      const { bytesRead } = await file.read(buf, 0, MP4_HEAD_BYTES, 0);
+      return mp4HasEmptyMdat(buf.subarray(0, bytesRead));
+    } finally {
+      await file.close();
+    }
+  } catch {
+    return false;
+  }
+}
+
 export function makeCaptureBackend(cfg: CaptureConfig): CaptureBackend {
   return {
     width: cfg.width,
@@ -174,7 +228,7 @@ export function makeCaptureBackend(cfg: CaptureConfig): CaptureBackend {
       let lastEmitAtMs = Date.now();
 
       const makeSegment = (index: number): CaptureSegment => {
-        const path = join(dir, `${SEGMENT_PREFIX}${String(index).padStart(5, "0")}.mp4`);
+        const path = segmentPath(dir, index);
         const startedAtMs = lastEmitAtMs;
         const endedAtMs = Date.now();
         lastEmitAtMs = endedAtMs;
@@ -205,6 +259,16 @@ export function makeCaptureBackend(cfg: CaptureConfig): CaptureBackend {
           if (!includeHighest && index === highest) continue;
           if (emitted.has(index)) continue;
           emitted.add(index);
+          // An epoch that ends before ffmpeg encodes one frame — a sub-second post-wake stretch, where
+          // the program returns a breath after the resume — leaves a trackless husk. Committing it puts
+          // a page in the run's screen pager that no player can open, so it never becomes a segment:
+          // the last COMMITTED segment is always playable (SCREEN_CAPTURE §4.3).
+          const path = segmentPath(dir, index);
+          if (await isFramelessSegment(path)) {
+            log.debug("recording_segment_frameless_skipped", { index });
+            await unlink(path).catch(() => undefined);
+            continue;
+          }
           onSegmentCb?.(makeSegment(index));
         }
       };

@@ -1,9 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   DESKTOP_THUMBNAIL_HEIGHT,
   DESKTOP_THUMBNAIL_WIDTH,
   ffmpegArgs,
+  isFramelessSegment,
   loadCaptureConfig,
+  mp4HasEmptyMdat,
   type CaptureConfig,
 } from "./screen_capture_backend.js";
 
@@ -87,5 +92,87 @@ describe("loadCaptureConfig", () => {
 
     expect(loadCaptureConfig(bootSnapshot)).not.toBeNull(); // recording stays ON (trusted snapshot)
     expect(loadCaptureConfig(authorOverlaid)).toBeNull(); // the author value WOULD disable it if read live
+  });
+});
+
+/** One top-level MP4 box: a 32-bit size (header included), the 4-char type, then the payload. */
+function box(type: string, payloadBytes: number): Buffer {
+  const b = Buffer.alloc(8 + payloadBytes);
+  b.writeUInt32BE(8 + payloadBytes, 0);
+  b.write(type, 4, "latin1");
+  return b;
+}
+
+describe("mp4HasEmptyMdat", () => {
+  // The heads of the two segments of dev run 01KYGTENYW5Y3PAZW587058E2X, byte for byte: one real
+  // recording, and the 262-byte husk its ~1s post-wake epoch produced (ftyp + header-only mdat + a moov
+  // with no trak). The husk played as a black frame in the run view until it stopped being committed.
+  const REAL_HEAD_HEX = "000000206674797069736f6d0000020069736f6d69736f32617663316d703431";
+  const framelessHead = Buffer.from(`${REAL_HEAD_HEX}0000000866726565000000086d646174`, "hex");
+  const recordedHead = Buffer.from(`${REAL_HEAD_HEX}000000086672656500040c0a6d646174`, "hex");
+
+  it("catches the real frameless husk (header-only mdat)", () => {
+    expect(mp4HasEmptyMdat(framelessHead)).toBe(true);
+  });
+
+  it("passes a real segment whose mdat carries frames", () => {
+    expect(mp4HasEmptyMdat(recordedHead)).toBe(false);
+  });
+
+  it("passes a payload-bearing mdat that follows other boxes", () => {
+    expect(
+      mp4HasEmptyMdat(Buffer.concat([box("ftyp", 24), box("free", 0), box("mdat", 4096)])),
+    ).toBe(false);
+  });
+
+  // Everything below is a file we cannot PROVE empty, so it stays a segment: dropping a real recording
+  // is worse than committing an odd one (the run view explains a page it can't play).
+  it("passes a head with no mdat at all", () => {
+    expect(mp4HasEmptyMdat(Buffer.concat([box("ftyp", 24), box("moov", 64)]))).toBe(false);
+  });
+
+  it("passes an mdat sized to end-of-file (size 0), which the head cannot measure", () => {
+    const eof = box("mdat", 0);
+    eof.writeUInt32BE(0, 0);
+    expect(mp4HasEmptyMdat(Buffer.concat([box("ftyp", 24), eof]))).toBe(false);
+  });
+
+  it("passes a 64-bit largesize mdat", () => {
+    const large = Buffer.alloc(16);
+    large.writeUInt32BE(1, 0);
+    large.write("mdat", 4, "latin1");
+    large.writeBigUInt64BE(5n * 1024n * 1024n * 1024n, 8);
+    expect(mp4HasEmptyMdat(Buffer.concat([box("ftyp", 24), large]))).toBe(false);
+  });
+
+  it("passes a truncated or malformed head instead of walking off it", () => {
+    expect(mp4HasEmptyMdat(Buffer.alloc(0))).toBe(false);
+    expect(mp4HasEmptyMdat(Buffer.from("0000000466747970", "hex"))).toBe(false); // size < header
+  });
+
+  describe("isFramelessSegment (reads the file's head)", () => {
+    let dir = "";
+    beforeAll(async () => {
+      dir = await mkdtemp(join(tmpdir(), "bw-capture-test-"));
+    });
+    afterAll(async () => {
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    async function file(name: string, bytes: Buffer): Promise<string> {
+      const path = join(dir, name);
+      await writeFile(path, bytes);
+      return path;
+    }
+
+    it("rejects the husk and keeps a real recording", async () => {
+      expect(await isFramelessSegment(await file("husk.mp4", framelessHead))).toBe(true);
+      expect(await isFramelessSegment(await file("real.mp4", recordedHead))).toBe(false);
+    });
+
+    it("keeps a segment it cannot read (missing file, permissions) rather than dropping it", async () => {
+      expect(await isFramelessSegment(join(dir, "absent.mp4"))).toBe(false);
+      expect(await isFramelessSegment(await file("empty.mp4", Buffer.alloc(0)))).toBe(false);
+    });
   });
 });

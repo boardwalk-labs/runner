@@ -130,6 +130,50 @@ describe("ScreenCapture — recording segments", () => {
     expect(discardFn).toHaveBeenCalledTimes(1);
   });
 
+  // The runner's onAfterWake hook calls `void capture.startFresh()`, so a program that returns a breath
+  // after its resume flushes WHILE the recorder is still spawning. The flush must join that start, or the
+  // epoch's ffmpeg outlives the run: its segment never uploads and the process runs into teardown.
+  it("a flush that lands mid-spawn waits for the start, then stops it and uploads its segment", async () => {
+    const fb = fakeBackend();
+    let releaseStart = (): void => undefined;
+    const pending = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const session = await fb.backend.start(); // the fake's session, captured before start() goes slow
+    fb.startFn.mockClear();
+    fb.startFn.mockImplementation(async () => {
+      await pending;
+      return session;
+    });
+    // The real backend's stop() finalizes ffmpeg and sweeps the in-flight file out as a segment.
+    const { segment } = fakeSegment();
+    fb.stopFn.mockImplementation(() => {
+      fb.emitSegment(segment);
+      return Promise.resolve();
+    });
+    const writeArtifact = vi.fn<SegmentArtifactWriter>(() => Promise.resolve({ id: "art" }));
+    const cap = new ScreenCapture({ ...makeDeps(), backend: fb.backend, writeArtifact });
+
+    void cap.startFresh(); // fire-and-forget, exactly as onAfterWake does
+    const flush = cap.stopAndFlush(); // the program already returned
+    releaseStart();
+    await flush;
+
+    expect(fb.stopFn).toHaveBeenCalledTimes(1);
+    expect(writeArtifact).toHaveBeenCalledTimes(1);
+    expect(writeArtifact.mock.calls[0]?.[0]).toBe("recording-00000.mp4");
+  });
+
+  it("a second start while one is spawning joins it instead of racing a second recorder", async () => {
+    const fb = fakeBackend();
+    const cap = new ScreenCapture({ ...makeDeps(), backend: fb.backend });
+
+    await Promise.all([cap.start(), cap.start(), cap.startFresh()]);
+
+    expect(fb.startFn).toHaveBeenCalledTimes(1);
+    await cap.stopAndFlush();
+  });
+
   it("stopAndFlush stops the session and is a no-op when nothing is running", async () => {
     const fb = fakeBackend();
     const cap = new ScreenCapture({ ...makeDeps(), backend: fb.backend });
