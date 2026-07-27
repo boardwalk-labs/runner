@@ -31,11 +31,23 @@ register ──▶ poll ──▶ claim ──▶ execute (run-token broker, hea
    and stops claiming.
 3. **Claim** (`RunnerDeclaration` → `ClaimResponse`). Lease before work: POST the offer's claim
    URL; first claim wins, a loser gets a conflict and polls again. The response is the ONLY
-   payload carrying per-run credentials: the `control_plane` handle (run token + run API token
-   - base URL), the resolved non-secret `env`, and the org's `byo_providers` registry
-     (runner-direct inference; the managed lane stays brokered).
+   payload carrying per-run credentials: the `control_plane` handle (base URL, run token, run
+   API token), the resolved non-secret `env`, and the org's `byo_providers` registry
+   (runner-direct inference; the managed lane stays brokered).
+4. **Execute.** With the run token, the runner speaks the SAME Runner Control API a
+   Boardwalk-hosted worker does: claim the run lease, fetch the manifest + content-addressed
+   program (digest-verified before extraction), resolve secrets fail-closed, stream events in
+   the SDK wire format, write artifacts and child-run calls through the control plane. One
+   contract, hosted and self-hosted.
+5. **Heartbeat** (`HeartbeatRequest` → `HeartbeatResponse`). Extends the assignment lease AND
+   is the control channel: `cancel` and `drain` arrive in the response. There are **no
+   inbound connections to the runner, ever** — every control signal is a brokered poll.
+6. **Finalize.** The runner's last word on a run is the run-token'd `finalize` call on the
+   Runner Control API (exactly like a hosted worker); the control plane closes out the
+   assignment and flips the runner back to idle. Then tear down the workspace and poll again
+   (unless draining). There is no separate pool-level status report.
 
-### Compatibility is declared, never remembered
+## Compatibility is declared, never remembered
 
 Poll and claim both carry a `RunnerDeclaration`: `{ contract_version, runner_version }`.
 
@@ -50,16 +62,7 @@ Poll and claim both carry a `RunnerDeclaration`: `{ contract_version, runner_ver
 The control plane MUST read this from the request rather than remembering it. A version
 captured once at enrollment cannot be corrected by upgrading — the daemon reuses its saved
 identity, so the stored value never changes — which makes "upgrade the daemon" advice the
-machine cannot act on. Declaring live means upgrading is the entire fix. 4. **Execute.** With the run token, the runner speaks the SAME Runner Control API a
-Boardwalk-hosted worker does: claim the run lease, fetch the manifest + content-addressed
-program (digest-verified before extraction), resolve secrets fail-closed, stream events in
-the SDK wire format, write artifacts and child-run calls through the control plane. One
-contract, hosted and self-hosted. 5. **Heartbeat** (`HeartbeatRequest` → `HeartbeatResponse`). Extends the assignment lease AND
-is the control channel: `cancel` and `drain` arrive in the response. There are **no
-inbound connections to the runner, ever** — every control signal is a brokered poll. 6. **Finalize.** The runner's last word on a run is the run-token'd `finalize` call on the
-Runner Control API (exactly like a hosted worker); the control plane closes out the
-assignment and flips the runner back to idle. Then tear down the workspace and poll again
-(unless draining). There is no separate pool-level status report.
+machine cannot act on. Declaring live means upgrading is the entire fix.
 
 ## Lease state machine
 
