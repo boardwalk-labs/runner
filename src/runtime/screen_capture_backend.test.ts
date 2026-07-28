@@ -20,6 +20,7 @@ const cfg: CaptureConfig = {
   segmentSeconds: 240,
   liveFrameIntervalMs: 1000,
   wantedPollIntervalMs: 3000,
+  liveKeepaliveMs: 10_000,
 };
 
 describe("ffmpegArgs", () => {
@@ -79,6 +80,14 @@ describe("loadCaptureConfig", () => {
     expect(c?.fps).toBe(6);
     expect(c?.width).toBe(1280);
     expect(c?.height).toBe(800);
+  });
+
+  it("defaults the live-view keepalive to 10s and takes an operator override", () => {
+    expect(loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1" })?.liveKeepaliveMs).toBe(10_000);
+    expect(
+      loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1", BOARDWALK_LIVEVIEW_KEEPALIVE_MS: "4000" })
+        ?.liveKeepaliveMs,
+    ).toBe(4000);
   });
 
   // The worker resolves capture config from a snapshot of the platform BOOT env taken BEFORE the

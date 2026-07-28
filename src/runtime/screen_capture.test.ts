@@ -42,6 +42,7 @@ function fakeBackend(over: Partial<CaptureBackend> = {}) {
     thumbnailHeight: 200,
     liveFrameIntervalMs: 1000,
     wantedPollIntervalMs: 3000,
+    liveKeepaliveMs: 10_000,
     start: startFn,
     ...over,
   };
@@ -309,6 +310,115 @@ describe("ScreenCapture — live-view push loop", () => {
     await cap.start();
     await vi.advanceTimersByTimeAsync(3000);
     expect(publishLiveFrames).not.toHaveBeenCalled();
+    await cap.stopAndFlush();
+  });
+
+  it("suppresses frames identical to the last one published", async () => {
+    vi.useFakeTimers();
+    const fb = fakeBackend(); // latestFrame always resolves the same "FRAME_B64"
+    const publishLiveFrames = vi.fn(() => Promise.resolve());
+    const cap = new ScreenCapture({
+      ...makeDeps(),
+      backend: fb.backend,
+      publishLiveFrames,
+      liveViewWanted: () => Promise.resolve(true),
+    });
+    await cap.start();
+    // 5 ticks, all the same pixels, well inside the 10s keepalive: only the first goes out.
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(fb.latestFrameFn).toHaveBeenCalledTimes(5);
+    expect(publishLiveFrames).toHaveBeenCalledTimes(1);
+    await cap.stopAndFlush();
+  });
+
+  it("pushes again as soon as the screen changes", async () => {
+    vi.useFakeTimers();
+    const fb = fakeBackend();
+    fb.latestFrameFn
+      .mockResolvedValueOnce("FRAME_A")
+      .mockResolvedValueOnce("FRAME_A")
+      .mockResolvedValueOnce("FRAME_B");
+    const publishLiveFrames = vi.fn(() => Promise.resolve());
+    const cap = new ScreenCapture({
+      ...makeDeps(),
+      backend: fb.backend,
+      publishLiveFrames,
+      liveViewWanted: () => Promise.resolve(true),
+    });
+    await cap.start();
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(publishLiveFrames.mock.calls).toEqual([[["FRAME_A"]], [["FRAME_B"]]]);
+    await cap.stopAndFlush();
+  });
+
+  it("resends an unchanged frame once the keepalive falls due", async () => {
+    vi.useFakeTimers();
+    const fb = fakeBackend({ liveKeepaliveMs: 3000 });
+    const publishLiveFrames = vi.fn(() => Promise.resolve());
+    const cap = new ScreenCapture({
+      ...makeDeps(),
+      backend: fb.backend,
+      publishLiveFrames,
+      liveViewWanted: () => Promise.resolve(true),
+    });
+    await cap.start();
+    // 6 identical ticks with a 3s keepalive: the initial push plus one resend per elapsed window,
+    // so the stream never goes fully silent under a proxy idle timer.
+    await vi.advanceTimersByTimeAsync(6000);
+
+    expect(publishLiveFrames.mock.calls.length).toBeGreaterThan(1);
+    expect(publishLiveFrames.mock.calls.length).toBeLessThan(6);
+    await cap.stopAndFlush();
+  });
+
+  it("resends to a viewer that attaches after the last one left, even on a static screen", async () => {
+    vi.useFakeTimers();
+    const fb = fakeBackend();
+    const publishLiveFrames = vi.fn(() => Promise.resolve());
+    let attached = true;
+    const cap = new ScreenCapture({
+      ...makeDeps(),
+      backend: fb.backend,
+      publishLiveFrames,
+      liveViewWanted: () => Promise.resolve(attached),
+    });
+    await cap.start();
+    await vi.advanceTimersByTimeAsync(1000); // first viewer gets the frame
+    expect(publishLiveFrames).toHaveBeenCalledTimes(1);
+
+    attached = false;
+    await vi.advanceTimersByTimeAsync(4000); // detaches — polls see it, nothing pushed
+    publishLiveFrames.mockClear();
+
+    // A new viewer attaches while the screen has not changed at all. Without the rising-edge reset
+    // the dedupe would hold the frame back and leave them on "Connecting…" indefinitely.
+    attached = true;
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(publishLiveFrames).toHaveBeenCalledWith(["FRAME_B64"]);
+    await cap.stopAndFlush();
+  });
+
+  it("retries the same frame after a failed publish", async () => {
+    vi.useFakeTimers();
+    const fb = fakeBackend();
+    const publishLiveFrames = vi
+      .fn<(frames: string[]) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("broker down"))
+      .mockResolvedValue(undefined);
+    const cap = new ScreenCapture({
+      ...makeDeps(),
+      backend: fb.backend,
+      publishLiveFrames,
+      liveViewWanted: () => Promise.resolve(true),
+    });
+    await cap.start();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // The failed push must not count as "already sent" — the frame goes out on the next tick.
+    expect(publishLiveFrames).toHaveBeenCalledTimes(2);
+    expect(publishLiveFrames.mock.calls[1]).toEqual([["FRAME_B64"]]);
     await cap.stopAndFlush();
   });
 

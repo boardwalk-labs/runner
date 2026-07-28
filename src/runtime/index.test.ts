@@ -151,6 +151,7 @@ describe("assembleWorkerDeps", () => {
       thumbnailHeight: 200,
       liveFrameIntervalMs: 1000,
       wantedPollIntervalMs: 3000,
+      liveKeepaliveMs: 10_000,
       start: () => {
         throw new Error("not started in buildHost");
       },

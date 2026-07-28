@@ -57,6 +57,9 @@ export interface CaptureBackend {
   readonly liveFrameIntervalMs: number;
   /** How often (ms) to poll the broker for whether a viewer is attached. */
   readonly wantedPollIntervalMs: number;
+  /** Longest a viewer goes without a frame while the screen is unchanged — the dedupe's release
+   *  valve (see the push loop). Must stay under any proxy idle timeout on the live-view stream. */
+  readonly liveKeepaliveMs: number;
   start: () => Promise<CaptureSession>;
 }
 
@@ -273,25 +276,42 @@ export class ScreenCapture {
     let stopped = false;
     let wanted = false;
     let sincePollMs = Number.POSITIVE_INFINITY; // force a poll on the first tick
-    const { liveFrameIntervalMs, wantedPollIntervalMs } = this.deps.backend;
+    // An unchanged desktop re-encodes to BYTE-IDENTICAL JPEG bytes (deterministic libjpeg over a
+    // static framebuffer), so the previous frame is enough to tell "nothing moved" from "something
+    // did" — and a run waiting on a model call then pushes nothing at all.
+    let lastPublished: string | null = null;
+    let sinceKeepaliveMs = 0;
+    const { liveFrameIntervalMs, wantedPollIntervalMs, liveKeepaliveMs } = this.deps.backend;
 
     const tick = async (): Promise<void> => {
       if (stopped) return;
       try {
         if (sincePollMs >= wantedPollIntervalMs) {
-          wanted = await this.deps.liveViewWanted();
+          const nowWanted = await this.deps.liveViewWanted();
+          // A viewer that just attached is looking at a blank frame with no history, so the next
+          // frame must go out even if the screen hasn't moved since the last one detached.
+          if (nowWanted && !wanted) lastPublished = null;
+          wanted = nowWanted;
           sincePollMs = 0;
         }
         if (wanted) {
           const frame = await session.latestFrame();
-          if (frame !== null && frame.length > 0) {
+          // The keepalive resend covers what the dedupe alone can't: a proxy idle timer with no bytes
+          // flowing, and a SECOND viewer joining a run someone was already watching (presence is
+          // per-run, so that join raises no edge to reset on).
+          const due = sinceKeepaliveMs >= liveKeepaliveMs;
+          if (frame !== null && frame.length > 0 && (frame !== lastPublished || due)) {
             await this.deps.publishLiveFrames([frame]);
+            // Only after a settled publish — a throw leaves both unchanged so the next tick retries.
+            lastPublished = frame;
+            sinceKeepaliveMs = 0;
           }
         }
       } catch (err) {
         log.debug("live_view_tick_failed", { error: errMsg(err) });
       }
       sincePollMs += liveFrameIntervalMs;
+      sinceKeepaliveMs += liveFrameIntervalMs;
       if (!stopped) {
         timer = setTimeout(() => void tick(), liveFrameIntervalMs);
         timer.unref();

@@ -40,6 +40,8 @@ export interface CaptureConfig {
   liveFrameIntervalMs: number;
   /** How often (ms) the capture polls the broker for viewer presence. */
   wantedPollIntervalMs: number;
+  /** Longest (ms) a viewer goes without a frame while the screen is unchanged. */
+  liveKeepaliveMs: number;
 }
 
 const SEGMENT_PREFIX = "rec-";
@@ -69,6 +71,7 @@ export function loadCaptureConfig(env: NodeJS.ProcessEnv): CaptureConfig | null 
     segmentSeconds: intFromEnv(env.BOARDWALK_RECORDING_SEGMENT_SECONDS, 240),
     liveFrameIntervalMs: intFromEnv(env.BOARDWALK_LIVEVIEW_FRAME_INTERVAL_MS, 1000),
     wantedPollIntervalMs: intFromEnv(env.BOARDWALK_LIVEVIEW_WANTED_POLL_MS, 3000),
+    liveKeepaliveMs: intFromEnv(env.BOARDWALK_LIVEVIEW_KEEPALIVE_MS, 10_000),
   };
 }
 
@@ -214,6 +217,7 @@ export function makeCaptureBackend(cfg: CaptureConfig): CaptureBackend {
     thumbnailHeight: DESKTOP_THUMBNAIL_HEIGHT,
     liveFrameIntervalMs: cfg.liveFrameIntervalMs,
     wantedPollIntervalMs: cfg.wantedPollIntervalMs,
+    liveKeepaliveMs: cfg.liveKeepaliveMs,
     async start(): Promise<CaptureSession> {
       const dir = await mkdtemp(join(tmpdir(), "bw-capture-"));
       const proc = spawn("ffmpeg", ffmpegArgs(cfg, dir), {
