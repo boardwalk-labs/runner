@@ -87,7 +87,7 @@ pnpm lint && pnpm typecheck && pnpm build
 
 - [`boardwalk`](https://github.com/boardwalk-labs/boardwalk) — the open-source single-node engine: cron scheduling, webhooks, durable runs, run history
 - [`sdk-typescript`](https://github.com/boardwalk-labs/sdk-typescript) — `@boardwalk-labs/workflow`, the TypeScript API a workflow program imports
-- [`cli`](https://github.com/boardwalk-labs/cli) — `boardwalk`: scaffold, validate, deploy, operate
+- [`cli`](https://github.com/boardwalk-labs/cli) — `boardwalk`: scaffold, validate, deploy, run
 - [`examples`](https://github.com/boardwalk-labs/examples) — copyable workflow templates (`boardwalk init --template`)
 - [`plugins`](https://github.com/boardwalk-labs/plugins) — coding-agent skills (Claude Code, Codex, Cursor, OpenClaw, OpenCode) + a control-plane MCP server
 - [`runner-images`](https://github.com/boardwalk-labs/runner-images) — reproducible base images hosted runners execute in
