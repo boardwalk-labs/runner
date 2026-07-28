@@ -12,8 +12,8 @@ importers:
         specifier: 0.3.2
         version: 0.3.2
       '@boardwalk-labs/workflow':
-        specifier: 0.3.6
-        version: 0.3.6
+        specifier: 0.3.7
+        version: 0.3.7
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
@@ -96,8 +96,8 @@ packages:
     engines: {node: '>=24.0.0'}
     hasBin: true
 
-  '@boardwalk-labs/workflow@0.3.6':
-    resolution: {integrity: sha512-7Jwy51ugY0j1tPL8L6uV9PGbAT5Z40tNDKJgOZQN6NKhrpth34AmnJF4YZzD/DoiVMQ2tvPnhyN5u7SJibGVPQ==}
+  '@boardwalk-labs/workflow@0.3.7':
+    resolution: {integrity: sha512-jWG3SoCBa/KrgtlmpegRcCrJRT6mHUA/vpaBbiuoCKJdY1HwM0nJeWCmaIvkTRaCfiV1dnJPfhxRjgNE4faQvw==}
     engines: {node: '>=24'}
 
   '@esbuild/aix-ppc64@0.27.7':
@@ -1814,10 +1814,10 @@ snapshots:
 
   '@boardwalk-labs/engine@0.3.2':
     dependencies:
-      '@boardwalk-labs/workflow': 0.3.6
+      '@boardwalk-labs/workflow': 0.3.7
       zod: 4.4.3
 
-  '@boardwalk-labs/workflow@0.3.6':
+  '@boardwalk-labs/workflow@0.3.7':
     dependencies:
       zod: 4.4.3
 
