@@ -18,7 +18,7 @@ const cfg: CaptureConfig = {
   width: 1280,
   height: 800,
   segmentSeconds: 240,
-  liveFrameIntervalMs: 1000,
+  liveFrameIntervalMs: 300,
   wantedPollIntervalMs: 3000,
   liveKeepaliveMs: 10_000,
 };
@@ -80,6 +80,27 @@ describe("loadCaptureConfig", () => {
     expect(c?.fps).toBe(6);
     expect(c?.width).toBe(1280);
     expect(c?.height).toBe(800);
+  });
+
+  it("defaults the live push to ~3 fps, and the encoder's live output matches", () => {
+    const c = loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1" });
+    expect(c?.liveFrameIntervalMs).toBe(300);
+    // The loop samples slightly faster than the encoder writes (3.33/s vs 3/s) so it never lags the
+    // producer — dedupe absorbs the duplicate reads that causes.
+    const args = ffmpegArgs(cfg, "/out");
+    // The live output block is: -map 0:v -r <fps> -q:v 6 -update 1 <dir>/live.jpg
+    const liveOut = args.indexOf("/out/live.jpg");
+    expect(args[liveOut - 6]).toBe("-r");
+    expect(args[liveOut - 5]).toBe("3");
+  });
+
+  it("lets an operator dial the live cadence back", () => {
+    expect(
+      loadCaptureConfig({
+        BOARDWALK_BROWSER_TIER: "1",
+        BOARDWALK_LIVEVIEW_FRAME_INTERVAL_MS: "1000",
+      })?.liveFrameIntervalMs,
+    ).toBe(1000);
   });
 
   it("defaults the live-view keepalive to 10s and takes an operator override", () => {

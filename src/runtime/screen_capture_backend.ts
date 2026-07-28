@@ -69,7 +69,12 @@ export function loadCaptureConfig(env: NodeJS.ProcessEnv): CaptureConfig | null 
     width: intFromEnv(env.BOARDWALK_SCREEN_WIDTH, 1280),
     height: intFromEnv(env.BOARDWALK_SCREEN_HEIGHT, 800),
     segmentSeconds: intFromEnv(env.BOARDWALK_RECORDING_SEGMENT_SECONDS, 240),
-    liveFrameIntervalMs: intFromEnv(env.BOARDWALK_LIVEVIEW_FRAME_INTERVAL_MS, 1000),
+    // ~3 fps. 1 fps read as a slideshow — a cursor teleports and a page load is never seen happening
+    // — and it was only that low because every tick paid full price. Now that identical frames are
+    // suppressed, a still desktop costs nothing at any cadence and this spends only on real motion.
+    // Deliberately a touch faster than the 3 fps the encoder writes below, so the loop never lags the
+    // producer; the duplicate reads that oversampling causes are exactly what the dedupe absorbs.
+    liveFrameIntervalMs: intFromEnv(env.BOARDWALK_LIVEVIEW_FRAME_INTERVAL_MS, 300),
     wantedPollIntervalMs: intFromEnv(env.BOARDWALK_LIVEVIEW_WANTED_POLL_MS, 3000),
     liveKeepaliveMs: intFromEnv(env.BOARDWALK_LIVEVIEW_KEEPALIVE_MS, 10_000),
   };
