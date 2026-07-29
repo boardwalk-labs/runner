@@ -116,6 +116,12 @@ export function ffmpegArgs(cfg: CaptureConfig, dir: string): string[] {
     "28",
     "-pix_fmt",
     "yuv420p",
+    // No B-frames: x264's reorder delay is two FRAME DURATIONS of dts offset, and under VFR the
+    // first frame's duration is the whole leading idle stretch — `-reset_timestamps 1` re-zeroes on
+    // that dts, shifting every segment up by it, so players saw a frameless void (black/gray, and
+    // unseekable in Safari/Chrome) as long as the pre-activity idle. dts==pts keeps segments at 0.
+    "-bf",
+    "0",
     "-g",
     String(cfg.fps * 2),
     "-f",

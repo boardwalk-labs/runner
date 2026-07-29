@@ -45,6 +45,18 @@ describe("ffmpegArgs", () => {
     expect(vf).toBeLessThan(mp4); // the decimate filter belongs to the recording, not the JPEG
   });
 
+  it("disables B-frames so a leading idle stretch can't shift segment timestamps", () => {
+    const a = ffmpegArgs(cfg, "/out");
+    // Under VFR the first frame's duration = the whole pre-activity idle; with B-frames that
+    // becomes the dts offset reset_timestamps re-zeroes on, opening each segment with an
+    // unseekable frameless void of that length.
+    const bf = a.indexOf("-bf");
+    expect(a[bf + 1]).toBe("0");
+    const mp4 = a.findIndex((x) => x.endsWith("rec-%05d.mp4"));
+    expect(bf).toBeGreaterThan(-1);
+    expect(bf).toBeLessThan(mp4); // belongs to the recording output, not the JPEGs
+  });
+
   it("keeps the veryfast H.264 segments + the single overwritten live JPEG", () => {
     const a = ffmpegArgs(cfg, "/out");
     expect(a[a.indexOf("-preset") + 1]).toBe("veryfast");
