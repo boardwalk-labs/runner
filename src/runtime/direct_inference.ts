@@ -44,6 +44,9 @@ export function parseByoProviders(raw: string | undefined): ByoInferenceProvider
   }
 }
 
+/** The managed lane's reserved name — never a runner-direct provider. */
+const MANAGED_PROVIDER = "boardwalk";
+
 /** The registry entry for a per-`agent()` provider name, when the runtime may call it
  *  directly. Null ⇒ use the broker (managed lane, unknown provider, or a brokered-only
  *  source like bedrock). */
@@ -51,11 +54,54 @@ export function directProviderFor(
   registry: readonly ByoInferenceProvider[],
   provider: string | undefined,
 ): ByoInferenceProvider | null {
-  if (provider === undefined || provider === "boardwalk") return null;
+  if (provider === undefined || provider === MANAGED_PROVIDER) return null;
   const entry = registry.find((p) => p.name === provider);
   if (entry === undefined) return null;
   if (!DIRECT_SOURCES.has(entry.source) || entry.base_url === null) return null;
   return entry;
+}
+
+/**
+ * The claim-delivered registry, plus the one re-read it will do per unknown provider name.
+ *
+ * The registry is a SNAPSHOT taken when the run was dispatched, so a provider created while a long
+ * run is in flight is simply absent: the runtime would broker that call and the broker refuses it
+ * as direct-eligible, failing an hours-old run over a provider that exists. On a genuine miss we
+ * re-read the live registry — once per distinct name, so a typo'd provider inside a loop costs one
+ * fetch rather than one per turn. A name that's present but brokered (bedrock) never refetches, and
+ * a failed refresh falls through to the broker, whose error already names the problem.
+ */
+export class ByoProviderRegistry {
+  private entries: readonly ByoInferenceProvider[];
+  private readonly refetched = new Set<string>();
+
+  constructor(
+    entries: readonly ByoInferenceProvider[],
+    /** Reads the org's live registry (the broker's run-scoped providers endpoint). Absent ⇒ the
+     *  snapshot is all there is (embedded/self-hosted callers with no control plane). */
+    private readonly refresh?: () => Promise<readonly ByoInferenceProvider[]>,
+  ) {
+    this.entries = entries;
+  }
+
+  /** The entry to dial directly for a per-`agent()` provider name; null ⇒ use the broker. */
+  async direct(provider: string | undefined): Promise<ByoInferenceProvider | null> {
+    const hit = directProviderFor(this.entries, provider);
+    if (hit !== null) return hit;
+    if (provider === undefined || provider === MANAGED_PROVIDER) return null;
+    // Known to the snapshot but not direct-callable (bedrock, or no endpoint) — a re-read can't
+    // change that verdict.
+    if (this.entries.some((p) => p.name === provider)) return null;
+    if (this.refresh === undefined || this.refetched.has(provider)) return null;
+    this.refetched.add(provider);
+    try {
+      this.entries = await this.refresh();
+    } catch {
+      log.warn("byo_registry_refresh_failed", { provider });
+      return null;
+    }
+    return directProviderFor(this.entries, provider);
+  }
 }
 
 export interface DirectTurnRequest {
@@ -66,7 +112,8 @@ export interface DirectTurnRequest {
 }
 
 export interface DirectInferenceDeps {
-  registry: readonly ByoInferenceProvider[];
+  /** The org's providers + the refresh-on-miss re-read (see {@link ByoProviderRegistry}). */
+  registry: ByoProviderRegistry;
   /** Resolves the provider's auth secret by NAME (the run's RecordingSecretResolver, so the
    *  value registers with the redactor). */
   resolveSecret: (name: string) => Promise<string>;

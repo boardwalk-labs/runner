@@ -14,6 +14,7 @@
 import { createLogger } from "./support/index.js";
 import type { McpTokenResult } from "@boardwalk-labs/engine/core";
 import type { Run } from "./wire/run.js";
+import type { ByoInferenceProvider } from "../contract.js";
 import type { WebSearchOutput } from "./tools/web_search.js";
 import type { WorkspaceReservation, ManifestWriteResult } from "./workspace_sync.js";
 import type {
@@ -523,6 +524,18 @@ export class RunnerControlClient {
   async signArtifactUrl(artifactId: string, ttlSeconds: number): Promise<ArtifactSignResult> {
     const suffix = `artifacts/${encodeURIComponent(artifactId)}/signed-url`;
     return this.postJson<ArtifactSignResult>("artifacts-sign", suffix, { ttlSeconds });
+  }
+
+  /** Re-read the org's BYO inference providers. The claim hands over a snapshot; this is how the
+   *  runtime learns about a provider created AFTER the run started (see ByoProviderRegistry).
+   *  Non-secret data — names, endpoints, auth secret NAMES; the values still come from
+   *  `secrets/resolve`. */
+  async byoProviders(): Promise<readonly ByoInferenceProvider[]> {
+    const body = await this.getJson<{ providers: ByoInferenceProvider[] }>(
+      "inference-providers",
+      "inference/providers",
+    );
+    return body.providers;
   }
 
   /** Resolve an org secret the run's manifest allows (the program's `secrets.get`). The broker

@@ -46,7 +46,7 @@ import type { WorkflowManifest } from "./wire/manifest.js";
 import { RecordingSecretResolver } from "./recording_secret_resolver.js";
 import { EngineLeafExecutor } from "./leaf_executor.js";
 import { BudgetGate, ComputeBreachWatcher, type BudgetClearancePort } from "./budget_gate.js";
-import { parseByoProviders } from "./direct_inference.js";
+import { ByoProviderRegistry, parseByoProviders } from "./direct_inference.js";
 import {
   applyIdentityToEnv,
   connectIdentityRelayFd,
@@ -378,14 +378,13 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       inference: broker,
       // Direct BYO (D7): the claim's registry + the run's RECORDING resolver, so a provider key
       // registers with the redactor the moment it resolves.
-      ...(runtime.byoProviders !== undefined && runtime.byoProviders.length > 0
-        ? {
-            byo: {
-              registry: runtime.byoProviders,
-              resolveSecret: (name: string) => secretResolver.resolve({ name }),
-            },
-          }
-        : {}),
+      // Wired even when the claim carried NO providers: an org that had none when the run was
+      // dispatched is exactly the case where one gets created mid-run, and the registry's
+      // refresh-on-miss is what makes it reachable without re-running.
+      byo: {
+        registry: new ByoProviderRegistry(runtime.byoProviders ?? [], () => broker.byoProviders()),
+        resolveSecret: (name: string) => secretResolver.resolve({ name }),
+      },
       budget,
       budgetGate,
       redactor,

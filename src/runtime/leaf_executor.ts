@@ -42,11 +42,7 @@ import type { BudgetMeter, UsageDelta } from "./agent/budget.js";
 import type { SecretRedactor } from "./agent/secret_redactor.js";
 import type { AgentIdentity, RunEventBody, TokenUsage, TurnEventSink } from "./agent/events.js";
 import type { InferenceProxyTransport } from "./inference_transport.js";
-import {
-  directProviderFor,
-  streamDirectTurn,
-  type DirectInferenceDeps,
-} from "./direct_inference.js";
+import { streamDirectTurn, type DirectInferenceDeps } from "./direct_inference.js";
 import type { LeafExecutor } from "./workflow_host.js";
 import { throwIfAborted } from "./run_abort.js";
 
@@ -383,7 +379,7 @@ export class EngineLeafExecutor implements LeafExecutor {
     const direct =
       this.deps.byo === undefined || directModel === undefined
         ? null
-        : directProviderFor(this.deps.byo.registry, req.provider);
+        : await this.deps.byo.registry.direct(req.provider);
     if (direct !== null && this.deps.byo !== undefined && directModel !== undefined) {
       throwIfAborted(signal);
       const out = await streamDirectTurn(

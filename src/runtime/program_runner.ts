@@ -48,6 +48,7 @@ import {
   type HostClient,
   type JsonValue,
 } from "@boardwalk-labs/workflow/runtime";
+import { effectiveProgramInput } from "./effective_input.js";
 import { OUTPUT_MISMATCH_HINT, WorkflowHostServer, type HostCapabilities } from "./host_server.js";
 import { PYTHON_SOURCE_DIR, invokePythonProgram, isPythonEntry } from "./python_program.js";
 import { AppError, ErrorCode, createLogger, errorCodeOf } from "./support/index.js";
@@ -262,8 +263,9 @@ export async function runWorkflowProgram(
     capabilities: deps.capabilities,
     bootstrap: {
       // Boundary cast: the input arrived as JSON (the trigger payload / run row), so it is
-      // wire-safe by construction.
-      input: (args.input ?? null) as JsonValue,
+      // wire-safe by construction. A trigger that supplied nothing resolves through the
+      // empty-input rule first, so a typed program is never handed a value its own schema rejects.
+      input: effectiveProgramInput(args.input, args.inputSchema) as JsonValue,
       inputSchema: args.inputSchema,
       context: args.context,
     },

@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect, vi } from "vitest";
-import { directProviderFor, parseByoProviders, streamDirectTurn } from "./direct_inference.js";
+import {
+  ByoProviderRegistry,
+  directProviderFor,
+  parseByoProviders,
+  streamDirectTurn,
+} from "./direct_inference.js";
 import type { ByoInferenceProvider } from "../contract.js";
 
 const VLLM: ByoInferenceProvider = {
@@ -47,6 +52,71 @@ describe("directProviderFor", () => {
   });
 });
 
+describe("ByoProviderRegistry", () => {
+  const OPENAI: ByoInferenceProvider = {
+    name: "my-openai",
+    source: "openai",
+    base_url: "https://api.openai.com/v1",
+    auth_secret_name: "K",
+  };
+
+  it("serves the snapshot without re-reading it", async () => {
+    const refresh = vi.fn();
+    const reg = new ByoProviderRegistry([VLLM], refresh);
+    expect(await reg.direct("my-vllm")).toEqual(VLLM);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  // The reason this class exists: a provider created mid-run is absent from the dispatch snapshot,
+  // and brokering it fails the run.
+  it("re-reads once when a name is missing, then serves it", async () => {
+    const refresh = vi.fn().mockResolvedValue([VLLM, OPENAI]);
+    const reg = new ByoProviderRegistry([VLLM], refresh);
+    expect(await reg.direct("my-openai")).toEqual(OPENAI);
+    expect(await reg.direct("my-openai")).toEqual(OPENAI);
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-reads at most once per name, so a bad name in a loop costs one fetch", async () => {
+    const refresh = vi.fn().mockResolvedValue([VLLM]);
+    const reg = new ByoProviderRegistry([VLLM], refresh);
+    expect(await reg.direct("typo")).toBeNull();
+    expect(await reg.direct("typo")).toBeNull();
+    expect(await reg.direct("typo")).toBeNull();
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("never re-reads for the managed lane or a known-but-brokered provider", async () => {
+    const refresh = vi.fn();
+    const reg = new ByoProviderRegistry(
+      [{ name: "my-bedrock", source: "bedrock", base_url: null, auth_secret_name: null }],
+      refresh,
+    );
+    expect(await reg.direct(undefined)).toBeNull();
+    expect(await reg.direct("boardwalk")).toBeNull();
+    expect(await reg.direct("my-bedrock")).toBeNull();
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("falls through to the broker when the re-read fails", async () => {
+    const refresh = vi.fn().mockRejectedValue(new Error("broker down"));
+    const reg = new ByoProviderRegistry([], refresh);
+    expect(await reg.direct("my-openai")).toBeNull();
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("works from an EMPTY snapshot — the org that had no providers at dispatch", async () => {
+    const refresh = vi.fn().mockResolvedValue([OPENAI]);
+    const reg = new ByoProviderRegistry([], refresh);
+    expect(await reg.direct("my-openai")).toEqual(OPENAI);
+  });
+
+  it("without a refresh hook, a miss is just a miss", async () => {
+    const reg = new ByoProviderRegistry([VLLM]);
+    expect(await reg.direct("my-openai")).toBeNull();
+  });
+});
+
 describe("streamDirectTurn", () => {
   function sseResponse(lines: string[]): Response {
     return new Response(lines.map((l) => `data: ${l}\n\n`).join("") + "data: [DONE]\n\n", {
@@ -69,7 +139,7 @@ describe("streamDirectTurn", () => {
     );
     const deltas: string[] = [];
     const out = await streamDirectTurn(
-      { registry: [VLLM], resolveSecret, fetchImpl },
+      { registry: new ByoProviderRegistry([VLLM]), resolveSecret, fetchImpl },
       VLLM,
       { model: "qwen3", messages: [{ role: "user", content: "hi" }], tools: [] },
       (t) => deltas.push(t),
@@ -97,7 +167,7 @@ describe("streamDirectTurn", () => {
     const deltas: string[] = [];
     const reasoning: string[] = [];
     const out = await streamDirectTurn(
-      { registry: [VLLM], resolveSecret, fetchImpl },
+      { registry: new ByoProviderRegistry([VLLM]), resolveSecret, fetchImpl },
       VLLM,
       { model: "qwen3", messages: [{ role: "user", content: "hi" }], tools: [] },
       (t) => deltas.push(t),
@@ -120,7 +190,7 @@ describe("streamDirectTurn", () => {
     const registered: string[] = [];
     await expect(
       streamDirectTurn(
-        { registry: [VLLM], resolveSecret, fetchImpl },
+        { registry: new ByoProviderRegistry([VLLM]), resolveSecret, fetchImpl },
         VLLM,
         { model: "qwen3", messages: [{ role: "user", content: "hi" }], tools: [] },
         undefined,
@@ -143,7 +213,7 @@ describe("streamDirectTurn", () => {
     const entry: ByoInferenceProvider = { ...VLLM, auth_secret_name: null };
     const resolveSecret = vi.fn();
     await streamDirectTurn(
-      { registry: [entry], resolveSecret, fetchImpl },
+      { registry: new ByoProviderRegistry([entry]), resolveSecret, fetchImpl },
       entry,
       { model: "m", messages: [{ role: "user", content: "hi" }], tools: [] },
       undefined,

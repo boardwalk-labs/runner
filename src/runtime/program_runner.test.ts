@@ -302,6 +302,34 @@ describe("runWorkflowProgram — run(input, context) invocation (P3)", () => {
     });
   });
 
+  // The 3 a.m. failure this closes: a cron trigger declaring no static `input` fires with nothing,
+  // and a typed `run(input: ScanInput)` whose properties are all optional used to be handed `null`
+  // — a value its own derived schema rejects — so the first field read threw.
+  it("hands a typed all-optional input `{}` when the trigger supplied nothing", async () => {
+    const source = `
+      export default async function run(input) {
+        return { repos: input.repos ?? ["default"], isNull: input === null };
+      }
+    `;
+    const res = await runSource(
+      "run_empty_input",
+      source,
+      null,
+      {
+        capabilities: recordingCapabilities().capabilities,
+      },
+      {
+        inputSchema: {
+          type: "object",
+          properties: { repos: { type: "array", items: { type: "string" } } },
+          additionalProperties: false,
+        },
+      },
+    );
+    expect(res.kind).toBe("completed");
+    expect(outputOf(res)).toEqual({ repos: ["default"], isNull: false });
+  });
+
   it("passes an untyped input through as plain JSON, honestly", async () => {
     const source = `
       export default async function run(input) {
