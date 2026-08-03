@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { Run } from "./wire/run.js";
 import { RunnerControlClient } from "./runner_control_client.js";
+import { AppError, ErrorCode } from "./support/index.js";
 import {
   INFERENCE_NDJSON_CONTENT_TYPE,
   serializeDeltaFrame,
@@ -428,10 +429,35 @@ describe("RunnerControlClient.resolveSecret", () => {
     expect(JSON.parse(call?.body ?? "{}")).toEqual({ name: "LINEAR_TOKEN" });
   });
 
-  it("throws when the broker forbids / can't find the secret", async () => {
+  it("maps a 404 to an author-facing NOT_FOUND naming the secret, with a what-to-do hint", async () => {
+    const { fetchImpl } = fakeFetch(() => json(404, { error: { code: "NOT_FOUND" } }));
+    const err = await client(fetchImpl)
+      .resolveSecret("NEWS_API_KEY")
+      .then(() => null)
+      .catch((e: unknown) => e as AppError);
+    expect(err).toBeInstanceOf(AppError);
+    expect(err?.code).toBe(ErrorCode.NOT_FOUND);
+    // The author reads this — the secret's name and the fix, never the broker envelope.
+    expect(err?.message).toBe('Secret "NEWS_API_KEY" is not set in this org.');
+    expect(err?.hint).toContain("boardwalk secrets set NEWS_API_KEY");
+  });
+
+  it("maps a 403 to an author-facing FORBIDDEN with the permissions.secrets hint", async () => {
     const { fetchImpl } = fakeFetch(() => json(403, { error: { code: "FORBIDDEN" } }));
-    await expect(client(fetchImpl).resolveSecret("NOPE")).rejects.toThrow(
-      /secrets\/resolve failed: 403/,
+    const err = await client(fetchImpl)
+      .resolveSecret("NOPE")
+      .then(() => null)
+      .catch((e: unknown) => e as AppError);
+    expect(err).toBeInstanceOf(AppError);
+    expect(err?.code).toBe(ErrorCode.FORBIDDEN);
+    expect(err?.message).toBe('Secret "NOPE" is not granted to this workflow.');
+    expect(err?.hint).toContain("permissions.secrets");
+  });
+
+  it("keeps the transport framing for non-author statuses (e.g. a 500)", async () => {
+    const { fetchImpl } = fakeFetch(() => json(500, { error: { code: "INTERNAL_ERROR" } }));
+    await expect(client(fetchImpl).resolveSecret("ANY")).rejects.toThrow(
+      /secrets\/resolve failed: 500/,
     );
   });
 });

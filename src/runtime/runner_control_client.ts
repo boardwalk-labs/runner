@@ -11,7 +11,7 @@
 // failures (thrown network errors, LB 502/503/504 — a control-plane deploy rollover) are retried
 // with backoff first, so a blip heals in place instead of crashing the run.
 
-import { createLogger } from "./support/index.js";
+import { AppError, ErrorCode, createLogger } from "./support/index.js";
 import type { McpTokenResult } from "@boardwalk-labs/engine/core";
 import type { Run } from "./wire/run.js";
 import type { ByoInferenceProvider } from "../contract.js";
@@ -539,11 +539,35 @@ export class RunnerControlClient {
   }
 
   /** Resolve an org secret the run's manifest allows (the program's `secrets.get`). The broker
-   *  enforces the allowlist + returns the value; a forbidden/missing secret surfaces as a throw. */
+   *  enforces the allowlist + returns the value. A missing (404) or disallowed (403) secret fails
+   *  the AUTHOR's `secrets.get` call, so it maps to a clean named error + what-to-do hint — the
+   *  transport framing (op, status, envelope) stays in the log, never in the run's error text. */
   async resolveSecret(name: string): Promise<string> {
-    const body = await this.postJson<{ value: string }>("secrets/resolve", "secrets/resolve", {
-      name,
+    const res = await this.controlFetch(this.url("secrets/resolve"), {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify({ name }),
     });
+    if (res.status === 404) {
+      log.warn("broker_call_failed", { op: "secrets/resolve", status: res.status });
+      throw new AppError(
+        ErrorCode.NOT_FOUND,
+        `Secret "${name}" is not set in this org.`,
+        undefined,
+        `Set it with \`boardwalk secrets set ${name}\` (an org admin session), then re-run.`,
+      );
+    }
+    if (res.status === 403) {
+      log.warn("broker_call_failed", { op: "secrets/resolve", status: res.status });
+      throw new AppError(
+        ErrorCode.FORBIDDEN,
+        `Secret "${name}" is not granted to this workflow.`,
+        undefined,
+        `Add { "name": "${name}" } to permissions.secrets in workflow.jsonc and redeploy.`,
+      );
+    }
+    if (res.status !== 200) throw await brokerError(res, "secrets/resolve");
+    const body = (await res.json()) as { value: string };
     return body.value;
   }
 

@@ -55,13 +55,18 @@ export class AppError extends Error {
   readonly code: ErrorCode;
   readonly httpStatus: number;
   readonly detail?: unknown;
+  /** One-line "what to do" for the author (message says what's wrong, hint what to do — never
+   *  both in one). Duck-typed by `protocolErrorOf` onto the wire as `data.hint`, so it survives
+   *  to the run's finalized `error.hint`. */
+  readonly hint?: string;
 
-  constructor(code: ErrorCode, message: string, detail?: unknown) {
+  constructor(code: ErrorCode, message: string, detail?: unknown, hint?: string) {
     super(message);
     this.name = "AppError";
     this.code = code;
     this.httpStatus = ERROR_HTTP_STATUS[code];
     this.detail = detail;
+    if (hint !== undefined) this.hint = hint;
   }
 }
 
