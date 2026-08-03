@@ -40,12 +40,23 @@ finishes, nothing new is claimed. Useful flags: `--once` (execute one run, then 
 and `HTTPS_PROXY` set; the daemon and the run processes both honor it. Runs inherit this
 machine's network — a model or service reachable from the box is reachable from the run.
 
-### Browser tier (computer use)
+### Computer use (browser + desktop tiers)
 
-`computer.openBrowser()` and `agent({ session })` drive an in-VM browser. On the hosted
-runners the environment ships it; on a self-hosted machine you provide the pieces and point the
-runner at them with a small env contract — the same contract the hosted image sets, so the code
-path is identical:
+`computer.openBrowser()` / `computer.openDesktop()` and `agent({ session })` drive an in-VM
+browser or a whole desktop.
+
+**Container mode (the default) works out of the box** from runner image `0.3.32` on: the image
+carries the full desktop stack (Xvfb, Chromium, Playwright MCP, xdotool, ffmpeg) plus the tier
+env contract, and starts its own in-container display — never your machine's — before the run.
+A `BOARDWALK_*` tier variable set in the daemon's environment overrides the image default (e.g.
+`BOARDWALK_RECORDING_ENABLED=0` to disable session recording, `BOARDWALK_SCREEN_WIDTH=1920`).
+Note a computer-use session in a container still has the machine's network (`--network host`) —
+that reach is the point of self-hosting, and it is on you.
+
+**`--host` mode (full machine access)** drives your real environment instead — real Chrome, the
+machine's own display, and (on macOS) apps like an iOS Simulator once the macOS desktop driver
+lands. You provide the pieces and point the runner at them with the same env contract the hosted
+image sets, so the code path is identical:
 
 | Variable                        | Meaning                                                                                                                                                                  |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -54,9 +65,15 @@ path is identical:
 | `BOARDWALK_BROWSER_MCP_COMMAND` | Command to launch [Playwright MCP](https://github.com/microsoft/playwright-mcp) (e.g. a `playwright-mcp` bin, or `npx`). The runner attaches it to the browser over CDP. |
 | `DISPLAY`                       | The X display the browser renders on (e.g. a headless `Xvfb :0`).                                                                                                        |
 
-So a self-hosted machine that wants the browser tier installs Chromium + Playwright MCP, runs a
-display (e.g. `Xvfb`), and sets those variables. Nothing else changes; a machine without them
-runs every non-browser workflow exactly as before.
+So a `--host` machine that wants the browser tier installs Chromium + Playwright MCP and sets
+those variables (on Linux, also a display — a real X session or `Xvfb`; on macOS, `DISPLAY` is
+ignored and Chrome opens on the real screen). Nothing else changes; a machine without them runs
+every non-browser workflow exactly as before.
+
+Current platform limits, stated plainly: the **desktop tier** (`openDesktop`, raw-coordinate
+screenshot/click/type) is Linux-only today — macOS (CGEvent/ScreenCaptureKit) and Windows
+drivers are planned — and **session recording/live view** captures via `x11grab`, so it is also
+Linux-only for now; off Linux both decline cleanly instead of failing runs.
 
 ## Security model
 

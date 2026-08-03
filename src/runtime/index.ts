@@ -920,11 +920,14 @@ export interface PlatformConfig {
  * never depends on the author-mutable process.env. Pure (unit-tested). MUST be called on the boot-env
  * snapshot taken BEFORE the identity relay overlays the author env (see `main`).
  */
-export function capturePlatformConfig(bootEnv: NodeJS.ProcessEnv): PlatformConfig {
+export function capturePlatformConfig(
+  bootEnv: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): PlatformConfig {
   return {
     browser: loadGuestBrowserConfig(bootEnv),
-    capture: loadCaptureConfig(bootEnv),
-    desktop: loadGuestDesktopConfig(bootEnv),
+    capture: loadCaptureConfig(bootEnv, platform),
+    desktop: loadGuestDesktopConfig(bootEnv, platform),
     ...(bootEnv.WORKER_ID !== undefined ? { workerId: bootEnv.WORKER_ID } : {}),
     workspaceRoot: bootEnv.WORKSPACE_ROOT ?? "/workspace",
     // Never inside the workspace, and never `process.cwd()` (WORKSPACE_PERSISTENCE.md I2). `tmpdir()`

@@ -30,17 +30,19 @@ describe("desktopTierEnabled / loadGuestDesktopConfig", () => {
   });
 
   it("reads display + screen size with the standard defaults (linux only)", () => {
-    const cfg = loadGuestDesktopConfig({
+    const env = {
       BOARDWALK_DESKTOP_TIER: "1",
       BOARDWALK_SCREEN_WIDTH: "1920",
       BOARDWALK_SCREEN_HEIGHT: "1080",
       DISPLAY: ":7",
+    };
+    expect(loadGuestDesktopConfig(env, "linux")).toEqual({
+      display: ":7",
+      screenWidth: 1920,
+      screenHeight: 1080,
     });
-    if (process.platform !== "linux") {
-      expect(cfg).toBeNull();
-      return;
-    }
-    expect(cfg).toEqual({ display: ":7", screenWidth: 1920, screenHeight: 1080 });
+    // The macOS/Windows drivers are not built yet — the tier declines off Linux.
+    expect(loadGuestDesktopConfig(env, "darwin")).toBeNull();
   });
 });
 

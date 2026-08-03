@@ -12,7 +12,9 @@
 # Isolation is the point: a run (and its agent() tool calls) sees only /workspace + the machine's
 # network, never the host home dir, the runner identity file, or the rest of the filesystem.
 
-FROM ghcr.io/boardwalk-labs/boardwalk-runner-linux:0.1.2@sha256:01e5f4030efa8f3dfe4a23ec21e01361b7b0a04740fe32337dfb1ba053525b6e
+# 0.3.5 carries the full desktop stack (Xvfb/openbox/Chromium/Playwright MCP/xdotool/ffmpeg) plus
+# the browser/desktop tier env contract — so a containerized self-hosted run gets computer use too.
+FROM ghcr.io/boardwalk-labs/boardwalk-runner-linux:0.3.5@sha256:f6c4cf240281504cfcd72d354749ba1c02338072f1c2886444bd9f3425b33e75
 
 # The exact @boardwalk-labs/runner version to bake in — passed by CI, pinned to the release tag so
 # the container runtime matches the daemon that spawns it.
@@ -27,8 +29,22 @@ USER node
 WORKDIR /app
 RUN npm install --omit=dev --no-audit --no-fund "@boardwalk-labs/runner@${RUNNER_VERSION}"
 
+# In-container desktop boot: the hosted guest's init starts the desktop before the worker parks;
+# a container has no init, so the entry script does it — self-contained Xvfb inside the container
+# (never the host's display), mirroring the hosted isolation model. Tier off ⇒ straight exec.
+USER root
+RUN printf '%s\n' \
+  '#!/bin/sh' \
+  'if [ "$BOARDWALK_BROWSER_TIER" = "1" ] || [ "$BOARDWALK_DESKTOP_TIER" = "1" ]; then' \
+  '  boardwalk-start-desktop || echo "boardwalk-start-desktop failed; computer use unavailable" >&2' \
+  'fi' \
+  'exec "$@"' \
+  > /usr/local/bin/bw-container-entry && chmod 0755 /usr/local/bin/bw-container-entry
+USER node
+
 # The per-run workspace is bind-mounted here by the daemon (`-v <host>:/workspace`).
 WORKDIR /workspace
 # One-shot: execute the single run described by the env, then exit (the daemon runs one container per
 # claimed run). NOT a long-lived daemon.
-ENTRYPOINT ["node", "/app/node_modules/@boardwalk-labs/runner/dist/runtime/main.js"]
+ENTRYPOINT ["/usr/local/bin/bw-container-entry"]
+CMD ["node", "/app/node_modules/@boardwalk-labs/runner/dist/runtime/main.js"]

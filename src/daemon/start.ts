@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import * as path from "node:path";
 import { PoolClient } from "./pool_client.js";
 import { startDaemon, type RunProcessHandle, type RunSpawner } from "./daemon.js";
-import { createContainerSpawner, detectContainerRuntime } from "./container.js";
+import { createContainerSpawner, detectContainerRuntime, forwardedDaemonEnv } from "./container.js";
 import type { RunnerIdentity } from "./identity.js";
 
 export type IsolationMode = "container" | "host";
@@ -61,19 +61,11 @@ export function processSpawn(opts: {
   env: Record<string, string>;
   cwd: string;
 }): RunProcessHandle {
-  const base: Record<string, string> = {};
-  for (const key of [
-    "PATH",
-    "LANG",
-    "NODE_USE_ENV_PROXY",
-    "HTTPS_PROXY",
-    "https_proxy",
-    "HTTP_PROXY",
-    "http_proxy",
-    "NO_PROXY",
-    "no_proxy",
-    "BOARDWALK_RUNNER_DEBUG",
-  ]) {
+  // The shared daemon-env subset (proxy/locale + computer-use tier env), plus what only full
+  // machine access can use: the host PATH and — unlike a container, which starts its own Xvfb —
+  // the machine's real DISPLAY, so a Linux `--host` run can drive the operator's X session.
+  const base: Record<string, string> = { ...forwardedDaemonEnv() };
+  for (const key of ["PATH", "DISPLAY"]) {
     const v = process.env[key];
     if (v !== undefined) base[key] = v;
   }

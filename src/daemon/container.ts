@@ -19,7 +19,7 @@ import type { RunProcessHandle } from "./daemon.js";
 
 const exec = promisify(execFile);
 
-/** Env keys forwarded from the daemon's OWN environment into the container (proxy + locale only —
+/** Env keys forwarded from the daemon's OWN environment into the run (proxy + locale only —
  *  NOT the machine's PATH/HOME, which would leak host layout; the image provides its own). */
 const FORWARDED_ENV_KEYS = [
   "LANG",
@@ -31,6 +31,18 @@ const FORWARDED_ENV_KEYS = [
   "NO_PROXY",
   "no_proxy",
   "BOARDWALK_RUNNER_DEBUG",
+] as const;
+
+/** Computer-use tier env prefixes forwarded too: the image ships tier DEFAULTS (browser/desktop
+ *  contract baked as image ENV), and a daemon-side value is the operator's override (e.g.
+ *  BOARDWALK_RECORDING_ENABLED=0, BOARDWALK_SCREEN_WIDTH=1920). DISPLAY is deliberately NOT here —
+ *  a container starts its own in-container Xvfb; only the `--host` spawner forwards DISPLAY. */
+const FORWARDED_ENV_PREFIXES = [
+  "BOARDWALK_BROWSER_",
+  "BOARDWALK_DESKTOP_",
+  "BOARDWALK_SCREEN_",
+  "BOARDWALK_RECORDING_",
+  "BOARDWALK_LIVEVIEW_",
 ] as const;
 
 export interface ContainerSpawnConfig {
@@ -54,8 +66,8 @@ export interface ContainerSpawnConfig {
  *  filesystem coordinates overridden (the host paths are meaningless inside the container). */
 export function containerEnv(runEnv: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = {
-    // Forward the daemon's proxy/locale knobs so egress + a corporate proxy still work.
-    ...forwardedEnv(),
+    // Forward the daemon's proxy/locale knobs + computer-use tier overrides.
+    ...forwardedDaemonEnv(),
     // The claim's resolved non-secret vars + platform contract (RUN_ID, BOARDWALK_RUN_TOKEN, …).
     ...runEnv,
     // In-container coordinates — the bind mount lands the workspace at /workspace.
@@ -69,11 +81,17 @@ export function containerEnv(runEnv: Record<string, string>): Record<string, str
   return env;
 }
 
-function forwardedEnv(): Record<string, string> {
+/** The daemon-env subset every spawner forwards into a run (exported for the `--host` spawner). */
+export function forwardedDaemonEnv(): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const key of FORWARDED_ENV_KEYS) {
-    const v = process.env[key];
-    if (v !== undefined) out[key] = v;
+  for (const [key, v] of Object.entries(process.env)) {
+    if (v === undefined) continue;
+    if (
+      (FORWARDED_ENV_KEYS as readonly string[]).includes(key) ||
+      FORWARDED_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))
+    ) {
+      out[key] = v;
+    }
   }
   return out;
 }

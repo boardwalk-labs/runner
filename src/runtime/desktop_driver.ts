@@ -22,11 +22,14 @@ export interface GuestDesktopConfig {
 }
 
 /** Read the guest desktop config from env, or null when the tier is disabled or unsupported here. */
-export function loadGuestDesktopConfig(env: NodeJS.ProcessEnv): GuestDesktopConfig | null {
+export function loadGuestDesktopConfig(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): GuestDesktopConfig | null {
   if (!desktopTierEnabled(env)) return null;
-  if (process.platform !== "linux") {
+  if (platform !== "linux") {
     // The macOS (CGEvent/ScreenCaptureKit) and Windows (SendInput/DXGI) drivers are not built yet.
-    log.warn("desktop_tier_unsupported_platform", { platform: process.platform });
+    log.warn("desktop_tier_unsupported_platform", { platform });
     return null;
   }
   return {

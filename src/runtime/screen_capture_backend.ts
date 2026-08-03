@@ -59,10 +59,16 @@ function intFromEnv(raw: string | undefined, fallback: number): number {
 }
 
 /** Read the capture config from env, or null when the desktop stack is absent or recording is off. */
-export function loadCaptureConfig(env: NodeJS.ProcessEnv): CaptureConfig | null {
+export function loadCaptureConfig(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): CaptureConfig | null {
   // Desktop-present: either tier implies a display to grab (a macOS/Windows self-hosted runner may
   // one day set only the desktop tier). Neither ⇒ nothing to capture.
   if (!browserTierEnabled(env) && !desktopTierEnabled(env)) return null;
+  // The capture input is x11grab — Linux only until the avfoundation/gdigrab inputs land. A macOS
+  // `--host` runner with the browser tier on would otherwise spawn a doomed ffmpeg every run.
+  if (platform !== "linux") return null;
   // Kill switch (default on): BOARDWALK_RECORDING_ENABLED=0 disables recording + live-view capture.
   if (env.BOARDWALK_RECORDING_ENABLED === "0") return null;
   return {

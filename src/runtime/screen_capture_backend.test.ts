@@ -77,17 +77,22 @@ describe("ffmpegArgs", () => {
 
 describe("loadCaptureConfig", () => {
   it("is null without the desktop tier (BOARDWALK_BROWSER_TIER !== '1')", () => {
-    expect(loadCaptureConfig({})).toBeNull();
+    expect(loadCaptureConfig({}, "linux")).toBeNull();
+  });
+
+  it("returns null off Linux (x11grab only) even with a tier enabled", () => {
+    expect(loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1" }, "darwin")).toBeNull();
+    expect(loadCaptureConfig({ BOARDWALK_DESKTOP_TIER: "1" }, "win32")).toBeNull();
   });
 
   it("is null when the recording kill switch is set", () => {
     expect(
-      loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1", BOARDWALK_RECORDING_ENABLED: "0" }),
+      loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1", BOARDWALK_RECORDING_ENABLED: "0" }, "linux"),
     ).toBeNull();
   });
 
   it("defaults to 6fps / 1280x800 when the desktop tier is present", () => {
-    const c = loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1" });
+    const c = loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1" }, "linux");
     expect(c).not.toBeNull();
     expect(c?.fps).toBe(6);
     expect(c?.width).toBe(1280);
@@ -95,7 +100,7 @@ describe("loadCaptureConfig", () => {
   });
 
   it("defaults the live push to ~3 fps, and the encoder's live output matches", () => {
-    const c = loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1" });
+    const c = loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1" }, "linux");
     expect(c?.liveFrameIntervalMs).toBe(300);
     // The loop samples slightly faster than the encoder writes (3.33/s vs 3/s) so it never lags the
     // producer — dedupe absorbs the duplicate reads that causes.
@@ -108,18 +113,25 @@ describe("loadCaptureConfig", () => {
 
   it("lets an operator dial the live cadence back", () => {
     expect(
-      loadCaptureConfig({
-        BOARDWALK_BROWSER_TIER: "1",
-        BOARDWALK_LIVEVIEW_FRAME_INTERVAL_MS: "1000",
-      })?.liveFrameIntervalMs,
+      loadCaptureConfig(
+        {
+          BOARDWALK_BROWSER_TIER: "1",
+          BOARDWALK_LIVEVIEW_FRAME_INTERVAL_MS: "1000",
+        },
+        "linux",
+      )?.liveFrameIntervalMs,
     ).toBe(1000);
   });
 
   it("defaults the live-view keepalive to 10s and takes an operator override", () => {
-    expect(loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1" })?.liveKeepaliveMs).toBe(10_000);
+    expect(loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1" }, "linux")?.liveKeepaliveMs).toBe(
+      10_000,
+    );
     expect(
-      loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1", BOARDWALK_LIVEVIEW_KEEPALIVE_MS: "4000" })
-        ?.liveKeepaliveMs,
+      loadCaptureConfig(
+        { BOARDWALK_BROWSER_TIER: "1", BOARDWALK_LIVEVIEW_KEEPALIVE_MS: "4000" },
+        "linux",
+      )?.liveKeepaliveMs,
     ).toBe(4000);
   });
 
@@ -132,8 +144,8 @@ describe("loadCaptureConfig", () => {
     const bootSnapshot = { ...bootEnv }; // what the worker captures before the relay overlays meta.env
     const authorOverlaid = { ...bootEnv, BOARDWALK_RECORDING_ENABLED: "0" }; // author opts out
 
-    expect(loadCaptureConfig(bootSnapshot)).not.toBeNull(); // recording stays ON (trusted snapshot)
-    expect(loadCaptureConfig(authorOverlaid)).toBeNull(); // the author value WOULD disable it if read live
+    expect(loadCaptureConfig(bootSnapshot, "linux")).not.toBeNull(); // recording stays ON (trusted snapshot)
+    expect(loadCaptureConfig(authorOverlaid, "linux")).toBeNull(); // the author value WOULD disable it if read live
   });
 });
 

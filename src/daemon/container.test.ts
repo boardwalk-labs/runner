@@ -6,6 +6,7 @@ import {
   containerEnv,
   createContainerSpawner,
   detectContainerRuntime,
+  forwardedDaemonEnv,
   runIdFromCwd,
 } from "./container.js";
 
@@ -109,6 +110,33 @@ describe("containerEnv", () => {
     expect(env.HOME).toBe("/workspace");
     expect(env.RUN_ID).toBe("01KWX7VYJB");
     expect(env.BOARDWALK_RUN_TOKEN).toBe("eyJ-super-secret-run-token"); // value flows via env, not argv
+  });
+});
+
+describe("forwardedDaemonEnv — computer-use tier overrides", () => {
+  it("forwards daemon-side tier env (prefix-matched), never DISPLAY or arbitrary keys", () => {
+    vi.stubEnv("BOARDWALK_RECORDING_ENABLED", "0");
+    vi.stubEnv("BOARDWALK_SCREEN_WIDTH", "1920");
+    vi.stubEnv("BOARDWALK_BROWSER_MCP_PACKAGE", "@playwright/mcp@0.0.77");
+    vi.stubEnv("BOARDWALK_DESKTOP_TIER", "1");
+    // A container starts its OWN Xvfb — the host display must not leak in.
+    vi.stubEnv("DISPLAY", ":9");
+    vi.stubEnv("SOME_RANDOM_HOST_KEY", "nope");
+    try {
+      const env = forwardedDaemonEnv();
+      expect(env.BOARDWALK_RECORDING_ENABLED).toBe("0");
+      expect(env.BOARDWALK_SCREEN_WIDTH).toBe("1920");
+      expect(env.BOARDWALK_BROWSER_MCP_PACKAGE).toBe("@playwright/mcp@0.0.77");
+      expect(env.BOARDWALK_DESKTOP_TIER).toBe("1");
+      expect(env.DISPLAY).toBeUndefined();
+      expect(env.SOME_RANDOM_HOST_KEY).toBeUndefined();
+      // ...and the forwarded keys reach the container as name-only `-e KEY` argv entries.
+      const args = buildContainerArgs({ runtime: "docker", image: "img" }, { env: ENV, cwd: CWD });
+      expect(args).toContain("BOARDWALK_RECORDING_ENABLED");
+      expect(args.join(" ")).not.toContain("DISPLAY");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

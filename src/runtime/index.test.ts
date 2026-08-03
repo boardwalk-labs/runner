@@ -371,16 +371,19 @@ describe("capturePlatformContext (the run env/credential rules)", () => {
 
 describe("capturePlatformConfig (the worker's own trusted config)", () => {
   it("resolves the browser/capture tier + roots + run-log mirror from the desktop boot env", () => {
-    const cfg = capturePlatformConfig({
-      BOARDWALK_BROWSER_TIER: "1",
-      BOARDWALK_BROWSER_CHROME_PATH: "/usr/local/bin/boardwalk-chromium",
-      DISPLAY: ":0",
-      WORKER_ID: "w-1",
-      WORKSPACE_ROOT: "/ws",
-      PROGRAM_ROOT: "/prog",
-      PERSIST_SCOPE_DIR: "/persist",
-      BOARDWALK_RUN_LOG_FILE: "/tmp/run.log",
-    });
+    const cfg = capturePlatformConfig(
+      {
+        BOARDWALK_BROWSER_TIER: "1",
+        BOARDWALK_BROWSER_CHROME_PATH: "/usr/local/bin/boardwalk-chromium",
+        DISPLAY: ":0",
+        WORKER_ID: "w-1",
+        WORKSPACE_ROOT: "/ws",
+        PROGRAM_ROOT: "/prog",
+        PERSIST_SCOPE_DIR: "/persist",
+        BOARDWALK_RUN_LOG_FILE: "/tmp/run.log",
+      },
+      "linux",
+    );
     expect(cfg.browser).not.toBeNull();
     expect(cfg.capture).not.toBeNull();
     expect(cfg.workerId).toBe("w-1");
@@ -407,8 +410,8 @@ describe("capturePlatformConfig (the worker's own trusted config)", () => {
     // snapshot keeps a `BOARDWALK_RECORDING_ENABLED=0` in a run's meta.env inert.
     const boot = { BOARDWALK_BROWSER_TIER: "1" };
     const authorOverlaid = { BOARDWALK_BROWSER_TIER: "1", BOARDWALK_RECORDING_ENABLED: "0" };
-    expect(capturePlatformConfig(boot).capture).not.toBeNull();
-    expect(capturePlatformConfig(authorOverlaid).capture).toBeNull();
+    expect(capturePlatformConfig(boot, "linux").capture).not.toBeNull();
+    expect(capturePlatformConfig(authorOverlaid, "linux").capture).toBeNull();
   });
 });
 
