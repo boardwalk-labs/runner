@@ -91,6 +91,12 @@ configuration: the model sees true pixel dimensions and the driver converts coor
 Because it drives the real machine, an agent with a desktop session can act on anything on that
 screen — the point of self-hosting, and worth deciding deliberately.
 
+One macOS behavior to plan for on an **unattended** Mac: recent macOS versions periodically
+re-ask for screen-capture consent ("… is requesting to bypass the system private window picker
+and directly access your screen"). Captures keep working, but the prompt reappears on its own
+schedule and wants a human. For a long-lived headless Mac runner, log in as the runner user and
+acknowledge it, or expect to click Allow every so often.
+
 Current platform limits, stated plainly: the **desktop tier** is Linux and macOS; a **Windows**
 driver (SendInput/DXGI) is not built yet. **Session recording / live view** captures via
 `x11grab`, so it is Linux-only for now. Off a supported platform each declines cleanly instead
