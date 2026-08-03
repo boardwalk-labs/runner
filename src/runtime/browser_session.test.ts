@@ -138,6 +138,42 @@ describe("BrowserSession handle", () => {
     ]);
   });
 
+  // Playwright MCP does not answer with a bare value: it wraps it in a markdown envelope. Parsing
+  // the whole text always threw, so eval() silently returned that prose instead of the value its
+  // signature promises. The fixture above omitted the envelope, which is why this went unnoticed.
+  it("eval() returns the value, not Playwright MCP's result envelope", async () => {
+    const envelope = [
+      "### Result",
+      '{"title":"Example Domain","len":129}',
+      "### Ran Playwright code",
+      "```js",
+      "await page.evaluate('() => (x)');",
+      "```",
+    ].join("\n");
+    const c = caller({ browser_evaluate: text(envelope) });
+    const { manager } = makeManager({ connect: vi.fn().mockResolvedValue(c) });
+    const s = await manager.open();
+    await expect(s.eval("x")).resolves.toEqual({ title: "Example Domain", len: 129 });
+  });
+
+  it("eval() unwraps a scalar out of the envelope too", async () => {
+    const c = caller({
+      browser_evaluate: text(
+        '### Result\n"Example Domain"\n### Ran Playwright code\n```js\nx\n```',
+      ),
+    });
+    const { manager } = makeManager({ connect: vi.fn().mockResolvedValue(c) });
+    const s = await manager.open();
+    await expect(s.eval<string>("document.title")).resolves.toBe("Example Domain");
+  });
+
+  it("eval() falls back to the raw text when the result is not JSON", async () => {
+    const c = caller({ browser_evaluate: text("### Result\nundefined\n### Ran Playwright code") });
+    const { manager } = makeManager({ connect: vi.fn().mockResolvedValue(c) });
+    const s = await manager.open();
+    await expect(s.eval<string>("void 0")).resolves.toBe("undefined");
+  });
+
   it("surfaces a tool error", async () => {
     const c = caller({
       browser_navigate: { content: [{ type: "text", text: "boom" }], isError: true },

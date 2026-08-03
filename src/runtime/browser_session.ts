@@ -165,6 +165,29 @@ function fieldFromSnapshot(snapshot: string, field: string): string {
   return re.exec(snapshot)?.[1]?.trim() ?? "";
 }
 
+/**
+ * Pull the evaluated value out of a `browser_evaluate` reply. Playwright MCP answers with a markdown
+ * envelope, not a bare value:
+ *
+ *     ### Result
+ *     {"title":"Example Domain"}
+ *     ### Ran Playwright code
+ *     ```js
+ *     await page.evaluate(...)
+ *     ```
+ *
+ * so parsing the whole text always failed and `eval()` handed the caller that prose instead of the
+ * value its signature promises. Take the `### Result` section and stop at the next heading.
+ */
+export function evalResultText(text: string): string {
+  const marker = text.indexOf("### Result");
+  if (marker === -1) return text.trim();
+  let body = text.slice(marker + "### Result".length);
+  const nextSection = body.indexOf("\n###");
+  if (nextSection !== -1) body = body.slice(0, nextSection);
+  return body.trim();
+}
+
 function makeBrowserSessionHandle(
   id: string,
   caller: SessionMcpCaller,
@@ -236,7 +259,7 @@ function makeBrowserSessionHandle(
         await call("browser_evaluate", { function: `() => (${expression})` }),
         "eval",
       );
-      const text = textOf(res).trim();
+      const text = evalResultText(textOf(res));
       try {
         return JSON.parse(text) as T;
       } catch {
