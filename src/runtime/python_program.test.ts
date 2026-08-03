@@ -79,6 +79,7 @@ function stubCapabilities(): HostCapabilities {
     getSecret: notStubbed("getSecret"),
     writeArtifact: notStubbed("writeArtifact"),
     openBrowser: notStubbed("openBrowser"),
+    openDesktop: notStubbed("openDesktop"),
     shell: notStubbed("shell"),
     phase: () => undefined,
     idToken: notStubbed("idToken"),

@@ -182,6 +182,7 @@ function harness(
     getSecret: () => Promise.resolve("sek"),
     writeArtifact: () => notStubbed("artifacts.write"),
     openBrowser: () => notStubbed("computer.openBrowser"),
+    openDesktop: () => notStubbed("computer.openDesktop"),
     shell: () => notStubbed("shell"),
     idToken: () => notStubbed("auth.idToken"),
     apiToken: () => notStubbed("auth.apiToken"),

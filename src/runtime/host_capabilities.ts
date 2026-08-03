@@ -29,6 +29,7 @@ export function buildHostCapabilities(host: WorkerWorkflowHost): HostCapabilitie
     writeArtifact: (name, contentType, body, metadata) =>
       host.writeArtifact(name, contentType, body, metadata),
     openBrowser: (opts) => host.openBrowserSession(opts),
+    openDesktop: (opts) => host.openDesktopSession(opts),
     shell: (cmd, opts) => host.shell(cmd, opts),
     phase: (name, opts) => {
       host.setPhase(name, opts);

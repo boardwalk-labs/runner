@@ -70,6 +70,7 @@ function makeCaps(overrides: Partial<HostCapabilities> = {}): CapsRecorder {
         Promise.resolve({ id: "art_1", name, url: "https://cdn/a" }),
       ),
     openBrowser: overrides.openBrowser ?? (() => notStubbed("openBrowser")),
+    openDesktop: overrides.openDesktop ?? (() => notStubbed("openDesktop")),
     shell:
       overrides.shell ??
       record("shell", (cmd: string) =>

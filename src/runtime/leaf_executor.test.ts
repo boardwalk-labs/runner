@@ -9,6 +9,7 @@ import { BudgetGate } from "./budget_gate.js";
 import { SecretRedactor } from "./agent/secret_redactor.js";
 import type { HumanInputResult } from "@boardwalk-labs/workflow";
 import { BUDGET_GUARDRAIL_RATE } from "./agent/model_rates.js";
+import type { DesktopSessionManager } from "./desktop_session.js";
 import { runEventSchema } from "@boardwalk-labs/workflow";
 import type { AgentIdentity, RunEvent, RunEventBody, TurnEventSink } from "./agent/events.js";
 import type { InferenceFrame, InferenceProxyRequest } from "./wire/inference_proxy.js";
@@ -100,6 +101,7 @@ function makeExecutor(args: {
   toolHost?: ToolHost;
   lspService?: LspService;
   budgetGate?: { clear(): Promise<void> };
+  desktopSessions?: DesktopSessionManager;
 }): { exec: EngineLeafExecutor; requests: InferenceProxyRequest[] } {
   const { transport, requests } = fakeTransport(args.scripts);
   const sink = args.sink ?? new RecordingSink();
@@ -117,6 +119,7 @@ function makeExecutor(args: {
     ...(args.toolHost !== undefined ? { toolHost: args.toolHost } : {}),
     ...(args.lspService !== undefined ? { lspService: args.lspService } : {}),
     ...(args.budgetGate !== undefined ? { budgetGate: args.budgetGate } : {}),
+    ...(args.desktopSessions !== undefined ? { desktopSessions: args.desktopSessions } : {}),
   });
   return { exec, requests };
 }
@@ -652,6 +655,95 @@ describe("EngineLeafExecutor.run — host-backed tools (capabilities.host)", () 
       ],
     });
     expect(await exec.run("q", OPTS)).toBe("answered without the tool");
+  });
+});
+
+describe("EngineLeafExecutor.run — desktop session binding (agent({ session }))", () => {
+  const SESSION = { id: "desk_1" } as unknown as NonNullable<AgentOptions["session"]>;
+
+  function fakeDesktop(): { manager: DesktopSessionManager; clicks: unknown[] } {
+    const clicks: unknown[] = [];
+    const driver = {
+      screenshot: () => Promise.reject(new Error("program-side path, unused here")),
+      click: (input: unknown) => {
+        clicks.push(input);
+        return Promise.resolve();
+      },
+      type: () => Promise.resolve(),
+      key: () => Promise.resolve(),
+      scroll: () => Promise.resolve(),
+      drag: () => Promise.resolve(),
+    };
+    const manager = {
+      driverFor: (s: { id: string }) => (s.id === "desk_1" ? driver : null),
+      captureForAgent: () =>
+        Promise.resolve({
+          data: "cGl4ZWxz",
+          width: 1280,
+          height: 800,
+          artifact: { id: "art_1", name: "shot.png", url: "https://cdn/shot.png" },
+        }),
+      closeAll: () => Promise.resolve(),
+    } as unknown as DesktopSessionManager;
+    return { manager, clicks };
+  }
+
+  it("binds the desktop tools, stamps desktopSession on every model turn, strips the handle", async () => {
+    const { manager, clicks } = fakeDesktop();
+    const { exec, requests } = makeExecutor({
+      scripts: [
+        toolCallTurn("c1", "screenshot", {}),
+        toolCallTurn("c2", "click", { x: 10, y: 20 }),
+        finalTurn("clicked it"),
+      ],
+      desktopSessions: manager,
+    });
+    const out = await exec.run("click the button", { ...OPTS, session: SESSION });
+    expect(out).toBe("clicked it");
+    expect(clicks).toEqual([{ x: 10, y: 20 }]);
+    // Every model turn is stamped for the broker's grounder gate.
+    expect(requests.map((r) => r.desktopSession)).toEqual([true, true, true]);
+    // The desktop tools were advertised to the model.
+    const names = requests[0]?.tools.map((t) => t.name) ?? [];
+    for (const tool of ["screenshot", "click", "type", "key", "scroll", "drag"]) {
+      expect(names).toContain(tool);
+    }
+    // The screenshot's image content part reached the SECOND turn's conversation.
+    const toolResults = requests[1]?.messages.find((m) => m.role === "tool_results");
+    const content = toolResults?.role === "tool_results" ? toolResults.results[0]?.content : "";
+    expect(
+      typeof content !== "string" &&
+        content?.some((p) => p.type === "file" && p.file.mimeType === "image/png"),
+    ).toBe(true);
+  });
+
+  it("a session-less leaf gets neither the tools nor the flag", async () => {
+    const { manager } = fakeDesktop();
+    const { exec, requests } = makeExecutor({
+      scripts: [finalTurn("plain")],
+      desktopSessions: manager,
+    });
+    expect(await exec.run("q", OPTS)).toBe("plain");
+    expect(requests[0]?.desktopSession).toBeUndefined();
+    expect(requests[0]?.tools.map((t) => t.name)).not.toContain("click");
+  });
+
+  it("a desktop session that is not open in this run fails cleanly", async () => {
+    const { manager } = fakeDesktop();
+    const { exec } = makeExecutor({ scripts: [finalTurn("x")], desktopSessions: manager });
+    await expect(
+      exec.run("q", {
+        ...OPTS,
+        session: { id: "ghost" } as unknown as NonNullable<AgentOptions["session"]>,
+      }),
+    ).rejects.toThrow(/not open in this run/);
+  });
+
+  it("a desktop session with NO manager wired fails cleanly too", async () => {
+    const { exec } = makeExecutor({ scripts: [finalTurn("x")] });
+    await expect(exec.run("q", { ...OPTS, session: SESSION })).rejects.toThrow(
+      /not open in this run/,
+    );
   });
 });
 

@@ -27,6 +27,11 @@ import type {
 } from "@boardwalk-labs/workflow/runtime";
 import type { ShellOptions } from "@boardwalk-labs/workflow";
 import type { BrowserSessionManager } from "./browser_session.js";
+import type {
+  DesktopSessionHandle,
+  DesktopSessionManager,
+  DesktopSessionOpenOptions,
+} from "./desktop_session.js";
 import { LeafParked, type LeafResume } from "@boardwalk-labs/engine/core";
 import { normalizeHumanInputResult } from "./wire/human_input.js";
 import { BUDGET_GATE_KEY } from "./budget_gate.js";
@@ -239,6 +244,10 @@ export interface WorkerWorkflowHostDeps {
    *  is unsupported (no desktop/browser backend) and the host method rejects clearly. When present,
    *  `agent({ session })` binds the session's in-VM Playwright MCP to the leaf. */
   browserSessions?: BrowserSessionManager;
+  /** Per-run desktop-session manager (computer use, the desktop tier). Absent ⇒ `computer.openDesktop`
+   *  is unsupported. A desktop `agent({ session })` passes the handle through to the leaf executor,
+   *  which binds the raw-coordinate desktop tools (ToolHost hooks) for that leaf. */
+  desktopSessions?: DesktopSessionManager;
   /** Cooperative-cancellation signal for the run (credit exhaustion today; user cancel later). Every
    *  hook checks it at entry and unwinds (throws RunAbortedError); the spending/blocking hooks
    *  (`agent`/`sleep`/`callWorkflow`) thread it down so an in-flight op stops promptly. Absent ⇒ no
@@ -488,8 +497,9 @@ export class WorkerWorkflowHost {
     // One suspension key for the whole leaf: every gate this leaf raises registers under it, and
     // a wake joins ALL of its answered rows, so answers accumulate server-side across parks.
     const seq = this.seq.next();
-    // Bind a computer-use session's tools (browser tier ⇒ its in-VM Playwright MCP) if one was passed.
-    const effectiveOpts = this.bindBrowserSession(opts);
+    // Bind a computer-use session's tools (browser ⇒ its in-VM Playwright MCP; desktop ⇒ passes
+    // through to the leaf executor's ToolHost hooks) if one was passed.
+    const effectiveOpts = this.bindComputerSession(opts);
     // Held-path answers accumulate locally too: a turn with several human_input calls parks once
     // per unanswered gate, and each re-entry must still see every earlier answer.
     const heldAnswers: Record<string, unknown> = {};
@@ -782,23 +792,38 @@ export class WorkerWorkflowHost {
     });
   }
 
-  /** Translate `agent({ session })` into the leaf's `mcp`: append the browser session's in-VM
-   *  Playwright MCP (its http ref, which passes assertHostedMcpAllowed and reaches localhost without
-   *  the egress proxy) and strip the `session` handle (the engine doesn't understand it). No-op when
-   *  no session is bound. */
-  private bindBrowserSession(opts: AgentOptions | undefined): AgentOptions | undefined {
+  /** `computer.openDesktop()`: THE run's desktop session (at most one open; the whole screen).
+   *  Absent backend ⇒ a clear "not available" (no desktop tier on this runner). */
+  openDesktopSession(opts: DesktopSessionOpenOptions | undefined): Promise<DesktopSessionHandle> {
+    return this.guarded(async () => {
+      if (this.deps.desktopSessions === undefined) {
+        throw new AppError(
+          ErrorCode.VALIDATION_FAILED,
+          "computer.openDesktop is not available in this runtime (no desktop tier on this runner)",
+        );
+      }
+      return await Promise.resolve(this.deps.desktopSessions.open(opts));
+    });
+  }
+
+  /** Translate `agent({ session })` per tier. A BROWSER session becomes the leaf's `mcp`: append its
+   *  in-VM Playwright MCP (an http ref that passes assertHostedMcpAllowed) and strip the handle (the
+   *  engine doesn't understand it). A DESKTOP session passes THROUGH — the leaf executor resolves it
+   *  to the raw-coordinate ToolHost hooks. A session that is neither live tier fails clearly. */
+  private bindComputerSession(opts: AgentOptions | undefined): AgentOptions | undefined {
     if (opts === undefined || opts.session === undefined) return opts;
-    const ref = this.deps.browserSessions?.mcpRefFor(opts.session);
-    if (ref === null || ref === undefined) {
-      throw new AppError(
-        ErrorCode.VALIDATION_FAILED,
-        "agent({ session }) received a browser session that is not open in this run",
-        { kind: "browser_session_not_open" },
-      );
+    const ref = this.deps.browserSessions?.mcpRefFor(opts.session as BrowserSession);
+    if (ref !== null && ref !== undefined) {
+      const rest: AgentOptions = { ...opts };
+      delete rest.session;
+      return { ...rest, mcp: [...(rest.mcp ?? []), ref] };
     }
-    const rest: AgentOptions = { ...opts };
-    delete rest.session;
-    return { ...rest, mcp: [...(rest.mcp ?? []), ref] };
+    if (this.deps.desktopSessions?.driverFor(opts.session) != null) return opts;
+    throw new AppError(
+      ErrorCode.VALIDATION_FAILED,
+      "agent({ session }) received a computer-use session that is not open in this run",
+      { kind: "computer_session_not_open" },
+    );
   }
 
   sleep(arg: SleepArg): Promise<void> {

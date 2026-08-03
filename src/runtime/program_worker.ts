@@ -137,6 +137,9 @@ export type ProgramHostBuilder = (
    *  on EVERY terminal path so no Chromium / Playwright MCP process leaks past the run. `closeAll` is
    *  best-effort + never throws. Absent on images without the browser stack. */
   browserSessions?: { closeAll(): Promise<void> };
+  /** The run's desktop-session manager (desktop tier); reaped on every terminal path like the
+   *  browser tier. Absent on images without the desktop stack. */
+  desktopSessions?: { closeAll(): Promise<void> };
   /** Session recording + live-view capture (docs/SCREEN_CAPTURE.md). The orchestrator starts it before
    *  the program runs and flushes it on EVERY terminal path. Best-effort; absent without the desktop
    *  stack. */
@@ -321,6 +324,7 @@ export async function runProgramWorker(
     setProgramDir,
     lsp,
     browserSessions,
+    desktopSessions,
     capture,
     budgetWatch,
   } = built;
@@ -439,6 +443,15 @@ export async function runProgramWorker(
     if (browserSessions !== undefined) {
       await browserSessions.closeAll().catch((err: unknown) => {
         log.warn("browser_sessions_close_failed", {
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+    // Same for the desktop session (the screen itself is ambient; only the handle state closes).
+    if (desktopSessions !== undefined) {
+      await desktopSessions.closeAll().catch((err: unknown) => {
+        log.warn("desktop_sessions_close_failed", {
           runId,
           error: err instanceof Error ? err.message : String(err),
         });

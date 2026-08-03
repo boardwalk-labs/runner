@@ -62,7 +62,8 @@ import {
   type SleepArg,
   type ToolDef,
 } from "@boardwalk-labs/workflow/runtime";
-import type { ShellOptions } from "@boardwalk-labs/workflow";
+// Type-only root imports: the runtime subpath doesn't re-export these (yet).
+import type { DesktopSession, DesktopSessionOptions, ShellOptions } from "@boardwalk-labs/workflow";
 import { AppError, ErrorCode, createLogger, errorCodeOf } from "./support/index.js";
 import { RunAbortedError } from "./run_abort.js";
 
@@ -114,6 +115,7 @@ export interface HostCapabilities {
     metadata: Record<string, unknown> | undefined,
   ): Promise<ArtifactRef>;
   openBrowser(opts: BrowserSessionOptions | undefined): Promise<BrowserSession>;
+  openDesktop(opts: DesktopSessionOptions | undefined): Promise<DesktopSession>;
   shell(cmd: string, opts: ShellOptions | undefined): Promise<ShellResult>;
   phase(name: string, opts: PhaseOptions | undefined): void;
   idToken(audience: string): Promise<string>;
@@ -208,6 +210,9 @@ export class WorkflowHostServer {
   private readonly connections = new Set<HostConnection>();
   /** sessionId → live handle, backing `computer.browser.*` and `agent({ session })`. */
   private readonly browserSessions = new Map<string, BrowserSession>();
+
+  /** sessionId → live desktop handle, backing `computer.desktop.*` and `agent({ session })`. */
+  private readonly desktopSessions = new Map<string, DesktopSession>();
   private readonly validateOutput: ValidateFunction | null;
   private nextInvokeId = 1;
   private sockPath: string | null = null;
@@ -552,6 +557,21 @@ export class WorkflowHostServer {
       if (session !== undefined) await session.close();
       return {};
     },
+    "computer.openDesktop": async (p) => {
+      const session = await this.caps.openDesktop(pruneUndefined<DesktopSessionOptions>(p.opts));
+      this.desktopSessions.set(session.id, session);
+      return { sessionId: session.id };
+    },
+    "computer.desktop.screenshot": async (p) => {
+      const ref = await this.desktopSession(p.sessionId).screenshot();
+      return { ref: { id: ref.id, name: ref.name, url: ref.url } };
+    },
+    "computer.desktop.close": async (p) => {
+      const session = this.desktopSessions.get(p.sessionId);
+      this.desktopSessions.delete(p.sessionId);
+      if (session !== undefined) await session.close();
+      return {};
+    },
     shell: async (p) => await this.caps.shell(p.cmd, pruneUndefined<ShellOptions>(p.opts)),
     "auth.idToken": async (p) => ({ token: await this.caps.idToken(p.audience) }),
     "auth.apiToken": async () => ({ token: await this.caps.apiToken() }),
@@ -567,6 +587,22 @@ export class WorkflowHostServer {
       });
     }
     return session;
+  }
+
+  /** A live desktop session by id, same contract as {@link session}. */
+  private desktopSession(sessionId: string): DesktopSession {
+    const session = this.desktopSessions.get(sessionId);
+    if (session === undefined) {
+      throw Object.assign(new Error(`no open desktop session "${sessionId}" in this run`), {
+        code: "VALIDATION",
+      });
+    }
+    return session;
+  }
+
+  /** Resolve an agent-bound wire sessionId across BOTH tiers (browser first, then desktop). */
+  private computerSession(sessionId: string): BrowserSession | DesktopSession {
+    return this.browserSessions.get(sessionId) ?? this.desktopSession(sessionId);
   }
 
   /** Validate the program's return against the declared output schema (P3.4): a mismatch fails
@@ -613,7 +649,7 @@ export class WorkflowHostServer {
             ),
           }
         : {}),
-      ...(sessionId !== undefined ? { session: this.session(sessionId) } : {}),
+      ...(sessionId !== undefined ? { session: this.computerSession(sessionId) } : {}),
     };
   }
 

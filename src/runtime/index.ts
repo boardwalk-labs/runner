@@ -62,6 +62,13 @@ import { WorkerWorkflowHost, type RuntimeContext } from "./workflow_host.js";
 import { buildHostCapabilities } from "./host_capabilities.js";
 import { runShell } from "./shell_exec.js";
 import { BrowserSessionManager, type BrowserBackend } from "./browser_session.js";
+import { DesktopSessionManager } from "./desktop_session.js";
+import {
+  loadGuestDesktopConfig,
+  makeXdotoolDriver,
+  type DesktopDriver,
+  type GuestDesktopConfig,
+} from "./desktop_driver.js";
 import {
   loadGuestBrowserConfig,
   makeGuestBrowserBackend,
@@ -152,6 +159,10 @@ export interface WorkerRuntime {
   /** Screen-capture backend (session recording + live-view frames), present ONLY when the runner IMAGE
    *  ships the desktop stack (ffmpeg + an X display) and recording isn't disabled. Absent ⇒ no capture. */
   captureBackend?: CaptureBackend;
+  /** The desktop tier's OS driver (screenshot + raw-coordinate input), present ONLY when the image
+   *  declares the tier (BOARDWALK_DESKTOP_TIER=1) on a supported OS. Absent ⇒ `computer.openDesktop()`
+   *  fails with a clear "not available on this runner". */
+  desktopDriver?: DesktopDriver;
   /** Path for the on-screen run-log mirror an xterm in the ambient desktop tails (BOARDWALK_RUN_LOG_FILE,
    *  set by the desktop guest image). Resolved by `main` from the trusted platform BOOT env so a run's
    *  author `meta.env` can't repoint it; absent off the desktop tier ⇒ no local sink. */
@@ -302,22 +313,39 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
     // Only present when the runner image ships the browser stack (runtime.browserBackend set); else
     // `computer.openBrowser()` throws "not available". A captured screenshot is stored as a run artifact
     // through the SAME broker store — decoded from the MCP image block's base64 as binary bytes.
+    const screenshotWriter = (
+      name: string,
+      contentType: string,
+      base64: string,
+      metadata: Record<string, unknown> | undefined,
+    ): Promise<{ id: string; name: string; url: string }> =>
+      artifactStore
+        .write({
+          name,
+          contentType,
+          body: base64,
+          encoding: "base64",
+          ...(metadata !== undefined ? { metadata } : {}),
+        })
+        .then((res) => ({ id: res.id, name: res.name, url: res.signedUrl }));
     const browserSessions =
       runtime.browserBackend !== undefined
         ? new BrowserSessionManager({
             backend: runtime.browserBackend,
             connect: connectSessionMcp,
-            writeArtifact: (name, contentType, base64, metadata) =>
-              artifactStore
-                .write({
-                  name,
-                  contentType,
-                  body: base64,
-                  encoding: "base64",
-                  ...(metadata !== undefined ? { metadata } : {}),
-                })
-                .then((res) => ({ id: res.id, name: res.name, url: res.signedUrl })),
+            writeArtifact: screenshotWriter,
             nextId: () => newId(),
+          })
+        : undefined;
+    // Desktop tier (whole-screen computer use): present only when the image ships the desktop stack
+    // (BOARDWALK_DESKTOP_TIER=1 + a supported OS driver). Screenshots dual-sink through the SAME store.
+    const desktopSessions =
+      runtime.desktopDriver !== undefined
+        ? new DesktopSessionManager({
+            driver: runtime.desktopDriver,
+            writeArtifact: screenshotWriter,
+            nextId: () => newId(),
+            warn: (message, fields) => log.warn(message, fields),
           })
         : undefined;
     // Screen capture (session recording + live-view). Present only when the image ships the desktop
@@ -389,6 +417,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       budgetGate,
       redactor,
       toolHost,
+      ...(desktopSessions !== undefined ? { desktopSessions } : {}),
       lspService,
       workspaceRoot: runtime.workspaceRoot,
       // Register every memory dir the run uses, so the workspace store persists it with no manifest
@@ -536,6 +565,8 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // Browser tier: `computer.openBrowser()` + `agent({ session })` resolve through this manager
       // (absent ⇒ the host throws "not available on this runner image").
       ...(browserSessions !== undefined ? { browserSessions } : {}),
+      // Desktop tier: `computer.openDesktop()` + a desktop `agent({ session })` (leaf-executor bound).
+      ...(desktopSessions !== undefined ? { desktopSessions } : {}),
       phases: phaseTracker,
       // Human-in-the-loop gates ride the run's one ordered stream, so a question asked and answered
       // stays in the run's story after the respond form is gone.
@@ -655,6 +686,7 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
       // The orchestrator reaps every still-open browser session on terminal (kill Chromium + its
       // Playwright MCP) so no browser process leaks past the run.
       ...(browserSessions !== undefined ? { browserSessions } : {}),
+      ...(desktopSessions !== undefined ? { desktopSessions } : {}),
       // The orchestrator starts capture before the program runs and flushes it on terminal.
       ...(capture !== undefined ? { capture } : {}),
     });
@@ -868,6 +900,8 @@ export interface PlatformConfig {
   browser: GuestBrowserConfig | null;
   /** Screen-capture config, or null when the image ships no desktop stack / recording is off. */
   capture: CaptureConfig | null;
+  /** Desktop-tier config, or null when the image doesn't declare the tier / the OS is unsupported. */
+  desktop: GuestDesktopConfig | null;
   /** Stable worker id (WORKER_ID); absent ⇒ the caller derives one from the run id. */
   workerId?: string;
   /** Sandbox workspace root (WORKSPACE_ROOT), default `/workspace`. */
@@ -890,6 +924,7 @@ export function capturePlatformConfig(bootEnv: NodeJS.ProcessEnv): PlatformConfi
   return {
     browser: loadGuestBrowserConfig(bootEnv),
     capture: loadCaptureConfig(bootEnv),
+    desktop: loadGuestDesktopConfig(bootEnv),
     ...(bootEnv.WORKER_ID !== undefined ? { workerId: bootEnv.WORKER_ID } : {}),
     workspaceRoot: bootEnv.WORKSPACE_ROOT ?? "/workspace",
     // Never inside the workspace, and never `process.cwd()` (WORKSPACE_PERSISTENCE.md I2). `tmpdir()`
@@ -967,6 +1002,9 @@ export async function main(): Promise<void> {
     platformConfig.browser !== null ? makeGuestBrowserBackend(platformConfig.browser) : undefined;
   const captureBackend =
     platformConfig.capture !== null ? makeCaptureBackend(platformConfig.capture) : undefined;
+  // Desktop tier: xdotool/x11grab on Linux; other OS drivers land with self-hosted parity.
+  const desktopDriver =
+    platformConfig.desktop !== null ? makeXdotoolDriver(platformConfig.desktop) : undefined;
 
   const deps = assembleWorkerDeps({
     // Worker-self config from the typed platform config (trusted boot env), never process.env — so a
@@ -987,6 +1025,7 @@ export async function main(): Promise<void> {
     ...(freezeRelay !== undefined ? { freezeRelay } : {}),
     ...(browserBackend !== undefined ? { browserBackend } : {}),
     ...(captureBackend !== undefined ? { captureBackend } : {}),
+    ...(desktopDriver !== undefined ? { desktopDriver } : {}),
   });
 
   // The only thing to drain is the batched telemetry buffer — the runner opens no database, cache, or queue.

@@ -44,6 +44,7 @@ import type { AgentIdentity, RunEventBody, TokenUsage, TurnEventSink } from "./a
 import type { InferenceProxyTransport } from "./inference_transport.js";
 import { streamDirectTurn, type DirectInferenceDeps } from "./direct_inference.js";
 import type { LeafExecutor } from "./workflow_host.js";
+import type { DesktopSessionManager } from "./desktop_session.js";
 import { throwIfAborted } from "./run_abort.js";
 
 /** Builds the per-leaf event sink (`TurnEventSink`) for the leaf's `leafIndex`-numbered turn. */
@@ -121,6 +122,11 @@ export interface EngineLeafExecutorDeps {
    *  (BrokerToolHost). Omitted ⇒ those three tools are simply absent (the engine never registers a
    *  host-backed tool whose hook the host doesn't provide). */
   toolHost?: ToolHost;
+  /** Per-run desktop-session manager. A leaf bound to a desktop session (`opts.session`) gets the
+   *  desktop ToolHost hooks (screenshot/click/type/key/scroll/drag) assembled from it PER LEAF —
+   *  session-gated by construction — and its model turns are stamped `desktopSession: true` so the
+   *  broker's grounder gate applies. Omitted ⇒ a desktop-bound leaf fails clearly. */
+  desktopSessions?: DesktopSessionManager;
   /** Engine-native LSP for the `diagnostics` tool + diagnostics-after-edit. Set as the leaf's
    *  `capabilities.lspService`. Constructed ONCE per RUN (not per leaf) so the language server stays
    *  warm across the run's edits/leaves, and closed on the run's teardown. Omitted ⇒ the `diagnostics`
@@ -153,6 +159,11 @@ export class EngineLeafExecutor implements LeafExecutor {
   ): Promise<unknown> {
     // Cooperative cancellation: don't even start the leaf if the run is already aborted.
     throwIfAborted(signal);
+    // A DESKTOP session passed through the host: resolve it to per-leaf ToolHost hooks (so the
+    // desktop tools register for exactly this leaf) and strip the handle before the engine sees it.
+    // The browser tier never reaches here (the host already turned it into an MCP ref).
+    const desktop = this.bindDesktopSession(opts);
+    if (desktop !== null) opts = desktop.opts;
     // Validate any named MCP servers up-front (before the engine tries to connect) so a leaf naming
     // an unsupported transport or a non-allowlisted host fails clearly and deterministically at the
     // leaf boundary, rather than deep in the engine loop. The broker re-checks the host authoritatively
@@ -174,7 +185,14 @@ export class EngineLeafExecutor implements LeafExecutor {
       redactor.add(`secret-${String(i)}`, value);
     });
 
-    const io = this.buildLeafIo({ identity, sink, redactor, leafIndex, signal });
+    const io = this.buildLeafIo({
+      identity,
+      sink,
+      redactor,
+      leafIndex,
+      signal,
+      ...(desktop !== null ? { desktopHost: desktop.host } : {}),
+    });
     try {
       // `resume` (a tool-level human-input resume) re-enters a parked leaf from its checkpoint + the
       // answers. A leaf that PARKS throws LeafParked, which propagates to the host (the executor never
@@ -188,6 +206,38 @@ export class EngineLeafExecutor implements LeafExecutor {
     }
   }
 
+  /** Resolve a desktop `opts.session` to its per-leaf ToolHost (base hooks + the desktop hooks) and
+   *  the handle-stripped opts; null when the leaf has no desktop session. */
+  private bindDesktopSession(
+    opts: AgentOptions | undefined,
+  ): { opts: AgentOptions; host: ToolHost } | null {
+    const session = opts?.session;
+    if (opts === undefined || session === undefined) return null;
+    const manager = this.deps.desktopSessions;
+    const driver = manager?.driverFor(session) ?? null;
+    if (manager === undefined || driver === null) {
+      throw new AppError(
+        ErrorCode.VALIDATION_FAILED,
+        "agent({ session }) received a desktop session that is not open in this run",
+        { kind: "desktop_session_not_open" },
+      );
+    }
+    const stripped: AgentOptions = { ...opts };
+    delete stripped.session;
+    return {
+      opts: stripped,
+      host: {
+        ...this.deps.toolHost,
+        desktopScreenshot: () => manager.captureForAgent(session.id),
+        desktopClick: (input) => driver.click(input),
+        desktopType: (input) => driver.type(input),
+        desktopKey: (keys) => driver.key(keys),
+        desktopScroll: (input) => driver.scroll(input),
+        desktopDrag: (input) => driver.drag(input),
+      },
+    };
+  }
+
   /** Assemble the broker-backed `LeafIo` the engine loop drives for one leaf call. */
   private buildLeafIo(ctx: {
     identity: AgentIdentity;
@@ -195,8 +245,11 @@ export class EngineLeafExecutor implements LeafExecutor {
     redactor: Redactor;
     leafIndex: number;
     signal: AbortSignal | undefined;
+    /** Present iff this leaf bound a desktop session: replaces `deps.toolHost` and stamps
+     *  `desktopSession: true` on every model turn (children inherit it via forkLeaf). */
+    desktopHost?: ToolHost;
   }): LeafIo {
-    const { identity, sink, redactor, leafIndex, signal } = ctx;
+    const { identity, sink, redactor, leafIndex, signal, desktopHost } = ctx;
     const skillsDir = this.deps.skillsDir?.() ?? null;
     const programDir = this.deps.programDir?.() ?? null;
     // The broker stamps each turn's exact upstream cost on the result frame, but the engine hands
@@ -224,7 +277,10 @@ export class EngineLeafExecutor implements LeafExecutor {
         workspaceDir: this.deps.workspaceRoot,
         skillsDir,
         ...(programDir !== null ? { programDir } : {}),
-        ...(this.deps.toolHost !== undefined ? { host: this.deps.toolHost } : {}),
+        // A desktop-bound leaf gets its per-leaf host (base hooks + the desktop hooks).
+        ...((desktopHost ?? this.deps.toolHost) !== undefined
+          ? { host: (desktopHost ?? this.deps.toolHost) as ToolHost }
+          : {}),
         ...(this.deps.lspService !== undefined ? { lspService: this.deps.lspService } : {}),
       },
 
@@ -247,6 +303,7 @@ export class EngineLeafExecutor implements LeafExecutor {
           providerIo,
           signal,
           redactor,
+          desktopHost !== undefined,
           (costMicros) => {
             pendingCostMicros = (pendingCostMicros ?? 0) + costMicros;
           },
@@ -355,6 +412,9 @@ export class EngineLeafExecutor implements LeafExecutor {
           redactor,
           leafIndex: childIndex,
           signal,
+          // A desktop-bound parent's subagents inherit the desktop tools (subagent perms ≤ parent)
+          // and therefore the broker's grounder gate too.
+          ...(desktopHost !== undefined ? { desktopHost } : {}),
         });
       },
     };
@@ -368,6 +428,7 @@ export class EngineLeafExecutor implements LeafExecutor {
     providerIo: ProviderIo,
     signal: AbortSignal | undefined,
     redactor: Redactor,
+    desktopBound: boolean,
     onCost?: (costMicros: number) => void,
     onReset?: () => void,
   ): Promise<ModelTurnResult> {
@@ -407,6 +468,8 @@ export class EngineLeafExecutor implements LeafExecutor {
       messages: req.messages,
       tools: req.tools,
       ...(req.reasoning !== undefined ? { reasoning: req.reasoning } : {}),
+      // Marks a desktop-bound leaf so the broker's grounder gate applies (fail-closed server-side).
+      ...(desktopBound ? { desktopSession: true as const } : {}),
     })) {
       throwIfAborted(signal);
       if (frame.kind === "delta") {

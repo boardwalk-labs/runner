@@ -9,6 +9,7 @@ import type {
   McpServerRef,
 } from "@boardwalk-labs/workflow/runtime";
 import type { BrowserSessionManager } from "./browser_session.js";
+import type { DesktopSessionManager } from "./desktop_session.js";
 import type { RunEventBody } from "./agent/events.js";
 import {
   WorkerWorkflowHost,
@@ -64,6 +65,7 @@ function makeHost(
     heldInput: HeldInputPort;
     heldPollIntervalMs: number;
     browserSessions: BrowserSessionManager;
+    desktopSessions: DesktopSessionManager;
     shell: NonNullable<WorkerWorkflowHostDeps["shell"]>;
     usage: NonNullable<WorkerWorkflowHostDeps["usage"]>;
     budgetGate: NonNullable<WorkerWorkflowHostDeps["budgetGate"]>;
@@ -100,6 +102,7 @@ function makeHost(
       ? { heldPollIntervalMs: over.heldPollIntervalMs }
       : {}),
     ...(over.browserSessions ? { browserSessions: over.browserSessions } : {}),
+    ...(over.desktopSessions ? { desktopSessions: over.desktopSessions } : {}),
     ...(over.shell ? { shell: over.shell } : {}),
     ...(over.usage ? { usage: over.usage } : {}),
     ...(over.budgetGate ? { budgetGate: over.budgetGate } : {}),
@@ -778,6 +781,54 @@ describe("computer.openBrowser + agent({ session })", () => {
     });
     await expect(
       host.agent("drive", { session: { id: "ghost" } as BrowserSession }),
+    ).rejects.toThrow(/not open in this run/);
+  });
+});
+
+describe("computer.openDesktop + agent({ session }) desktop passthrough", () => {
+  function fakeDesktopManager(over: Record<string, unknown> = {}): DesktopSessionManager {
+    return {
+      open: vi.fn().mockReturnValue({ id: "desk_1" }),
+      driverFor: vi.fn().mockReturnValue(null),
+      closeAll: vi.fn().mockResolvedValue(undefined),
+      ...over,
+    } as unknown as DesktopSessionManager;
+  }
+
+  it("openDesktopSession rejects when no desktop tier is wired", async () => {
+    const { host } = makeHost();
+    await expect(host.openDesktopSession(undefined)).rejects.toThrow(/not available/);
+  });
+
+  it("openDesktopSession delegates to the manager", async () => {
+    const session = { id: "desk_9" };
+    const open = vi.fn().mockReturnValue(session);
+    const { host } = makeHost({ desktopSessions: fakeDesktopManager({ open }) });
+    await expect(host.openDesktopSession({ grounding: "none" })).resolves.toBe(session);
+    expect(open).toHaveBeenCalledWith({ grounding: "none" });
+  });
+
+  it("agent({ session }) passes a live desktop session THROUGH to the leaf (no MCP ref)", async () => {
+    const session = { id: "desk_1" } as unknown as BrowserSession;
+    let seenOpts: AgentOptions | undefined;
+    const { host } = makeHost({
+      leaf: {
+        run: (_p, opts) => {
+          seenOpts = opts;
+          return Promise.resolve("ok");
+        },
+      },
+      desktopSessions: fakeDesktopManager({ driverFor: vi.fn().mockReturnValue({}) }),
+    });
+    await host.agent("drive", { session });
+    expect(seenOpts?.session).toBe(session);
+    expect(seenOpts?.mcp).toBeUndefined();
+  });
+
+  it("agent({ session }) throws for a desktop session not open in this run", async () => {
+    const { host } = makeHost({ desktopSessions: fakeDesktopManager() });
+    await expect(
+      host.agent("drive", { session: { id: "ghost" } as unknown as BrowserSession }),
     ).rejects.toThrow(/not open in this run/);
   });
 });

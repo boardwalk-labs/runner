@@ -7,18 +7,17 @@
 // unit-tested without a guest.
 
 import type { ArtifactRef } from "@boardwalk-labs/workflow/runtime";
+// Type-only root import: the runtime subpath doesn't re-export the desktop types (yet).
+import type { DesktopSession, DesktopSessionOptions } from "@boardwalk-labs/workflow";
 import { AppError, ErrorCode } from "./support/index.js";
 import type { DesktopDriver } from "./desktop_driver.js";
 import type { ScreenshotArtifactWriter } from "./browser_session.js";
 
-/** Structural mirror of the SDK's `DesktopSession` (imported from the SDK once the dep carries it). */
-export interface DesktopSessionHandle {
-  readonly id: string;
-  screenshot(): Promise<ArtifactRef>;
-  close(): Promise<void>;
-}
+export type DesktopSessionHandle = DesktopSession;
 
-export interface DesktopSessionOpenOptions {
+/** Options as they arrive off the wire (already zod-validated to "auto"|"none" by the protocol;
+ *  the string widening keeps the manager's own check meaningful for embedded callers). */
+export interface DesktopSessionOpenOptions extends Omit<DesktopSessionOptions, "grounding"> {
   grounding?: string;
 }
 

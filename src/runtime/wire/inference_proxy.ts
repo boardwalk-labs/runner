@@ -56,6 +56,9 @@ export interface InferenceProxyRequest {
   /** Normalized reasoning-effort control (the agent() call's `AgentOptions.reasoning`, undefined ⇒
    *  provider default). The broker encodes it into the resolved provider's wire body per protocol. */
   reasoning?: NormalizedReasoning;
+  /** True when the leaf has desktop tools bound. The broker admits such turns only for an explicit
+   *  GUI-grounder model (its desktop-tier gate); it MUST know the field before any runner sends it. */
+  desktopSession?: true;
 }
 
 /** A broker/model error surfaced as the terminal frame so the worker's stream throws. */

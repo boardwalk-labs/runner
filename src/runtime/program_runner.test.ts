@@ -90,6 +90,7 @@ function recordingCapabilities(overrides: Partial<HostCapabilities> = {}): Recor
     },
     writeArtifact: overrides.writeArtifact ?? (() => notStubbed("writeArtifact")),
     openBrowser: overrides.openBrowser ?? (() => notStubbed("openBrowser")),
+    openDesktop: overrides.openDesktop ?? (() => notStubbed("openDesktop")),
     shell: (cmd, opts) => {
       rec.shells.push(cmd);
       return overrides.shell !== undefined
