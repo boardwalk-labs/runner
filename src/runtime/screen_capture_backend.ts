@@ -21,6 +21,7 @@ import { mkdtemp, open, readdir, readFile, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { browserTierEnabled } from "./browser_session_backend.js";
+import { desktopTierEnabled } from "./desktop_driver.js";
 import type { CaptureBackend, CaptureSegment, CaptureSession } from "./screen_capture.js";
 import { createLogger } from "./support/index.js";
 
@@ -59,8 +60,9 @@ function intFromEnv(raw: string | undefined, fallback: number): number {
 
 /** Read the capture config from env, or null when the desktop stack is absent or recording is off. */
 export function loadCaptureConfig(env: NodeJS.ProcessEnv): CaptureConfig | null {
-  // The desktop-present signal is the browser tier flag; without a display there is nothing to grab.
-  if (!browserTierEnabled(env)) return null;
+  // Desktop-present: either tier implies a display to grab (a macOS/Windows self-hosted runner may
+  // one day set only the desktop tier). Neither ⇒ nothing to capture.
+  if (!browserTierEnabled(env) && !desktopTierEnabled(env)) return null;
   // Kill switch (default on): BOARDWALK_RECORDING_ENABLED=0 disables recording + live-view capture.
   if (env.BOARDWALK_RECORDING_ENABLED === "0") return null;
   return {
