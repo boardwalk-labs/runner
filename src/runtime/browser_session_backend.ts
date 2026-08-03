@@ -54,6 +54,11 @@ export interface GuestBrowserConfig {
   mcpBaseArgs: readonly string[];
   /** Milliseconds to wait for Chromium's CDP endpoint / the MCP server to answer before failing. */
   readyTimeoutMs: number;
+  /** Ambient X screen size (BOARDWALK_SCREEN_WIDTH/HEIGHT — the same envs screen capture reads).
+   *  A session's requested viewport is clamped to this: the Xvfb screen is fixed at snapshot time,
+   *  and a window past its edge would render outside the recording. */
+  screenWidth: number;
+  screenHeight: number;
 }
 
 const DEFAULT_MCP_PACKAGE = "@playwright/mcp@0.0.77";
@@ -84,7 +89,28 @@ export function loadGuestBrowserConfig(env: NodeJS.ProcessEnv): GuestBrowserConf
     mcpCommand: command !== undefined && command.length > 0 ? command : "npx",
     mcpBaseArgs: baseArgs,
     readyTimeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : 30_000,
+    screenWidth: positiveIntFromEnv(env.BOARDWALK_SCREEN_WIDTH, 1280),
+    screenHeight: positiveIntFromEnv(env.BOARDWALK_SCREEN_HEIGHT, 800),
   };
+}
+
+function positiveIntFromEnv(value: string | undefined, fallback: number): number {
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * Chromium window flags for a session: the requested viewport clamped to the ambient screen, or the
+ * full screen when none is requested (the SDK documents "defaults to the ambient desktop
+ * resolution"). Pinned to 0,0 so the window sits inside the recorded frame.
+ */
+export function chromiumWindowArgs(
+  viewport: { width: number; height: number } | undefined,
+  screen: { width: number; height: number },
+): string[] {
+  const width = Math.min(viewport?.width ?? screen.width, screen.width);
+  const height = Math.min(viewport?.height ?? screen.height, screen.height);
+  return ["--window-position=0,0", `--window-size=${String(width)},${String(height)}`];
 }
 
 /** Bind an ephemeral port, read it, release it — then hand it to the child. A tiny TOCTOU window, but
@@ -161,6 +187,16 @@ export function makeGuestBrowserBackend(cfg: GuestBrowserConfig): BrowserBackend
       try {
         // 1) Program-owned Chromium with a CDP endpoint, headful on the guest display so the desktop
         //    tier + recording can mirror it. The isolated profile dir is this session's alone.
+        const screen = { width: cfg.screenWidth, height: cfg.screenHeight };
+        if (opts?.viewport !== undefined) {
+          const { width, height } = opts.viewport;
+          if (width > screen.width || height > screen.height) {
+            log.warn("browser_viewport_clamped", {
+              requested: `${String(width)}x${String(height)}`,
+              screen: `${String(screen.width)}x${String(screen.height)}`,
+            });
+          }
+        }
         const chrome = spawn(
           cfg.chromePath,
           [
@@ -169,6 +205,7 @@ export function makeGuestBrowserBackend(cfg: GuestBrowserConfig): BrowserBackend
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-features=Translate",
+            ...chromiumWindowArgs(opts?.viewport, screen),
             ...(opts?.startUrl !== undefined ? [opts.startUrl] : ["about:blank"]),
           ],
           { stdio: "ignore", env: { ...process.env, DISPLAY: cfg.display } },

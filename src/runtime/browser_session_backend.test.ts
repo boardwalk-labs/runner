@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   browserTierEnabled,
+  chromiumWindowArgs,
   connectSessionMcp,
   freePort,
   loadGuestBrowserConfig,
@@ -42,7 +43,20 @@ describe("loadGuestBrowserConfig", () => {
       mcpCommand: "npx",
       mcpBaseArgs: ["--yes", "--no-install", "@playwright/mcp@0.0.77"],
       readyTimeoutMs: 30_000,
+      screenWidth: 1280,
+      screenHeight: 800,
     });
+  });
+
+  it("reads the ambient screen size from the capture envs, falling back on junk", () => {
+    const cfg = loadGuestBrowserConfig({
+      BOARDWALK_BROWSER_TIER: "1",
+      BOARDWALK_BROWSER_CHROME_PATH: "/opt/chrome",
+      BOARDWALK_SCREEN_WIDTH: "1920",
+      BOARDWALK_SCREEN_HEIGHT: "not-a-number",
+    });
+    expect(cfg?.screenWidth).toBe(1920);
+    expect(cfg?.screenHeight).toBe(800);
   });
 
   it("honors a custom display, package, and timeout", () => {
@@ -76,6 +90,35 @@ describe("loadGuestBrowserConfig", () => {
       BOARDWALK_BROWSER_READY_TIMEOUT_MS: "not-a-number",
     });
     expect(cfg?.readyTimeoutMs).toBe(30_000);
+  });
+});
+
+describe("chromiumWindowArgs", () => {
+  const screen = { width: 1280, height: 800 };
+
+  it("defaults to the ambient screen when no viewport is requested", () => {
+    expect(chromiumWindowArgs(undefined, screen)).toEqual([
+      "--window-position=0,0",
+      "--window-size=1280,800",
+    ]);
+  });
+
+  it("honors a viewport that fits the screen", () => {
+    expect(chromiumWindowArgs({ width: 1024, height: 768 }, screen)).toEqual([
+      "--window-position=0,0",
+      "--window-size=1024,768",
+    ]);
+  });
+
+  it("clamps an oversized viewport to the screen, per axis", () => {
+    expect(chromiumWindowArgs({ width: 1440, height: 900 }, screen)).toEqual([
+      "--window-position=0,0",
+      "--window-size=1280,800",
+    ]);
+    expect(chromiumWindowArgs({ width: 1440, height: 600 }, screen)).toEqual([
+      "--window-position=0,0",
+      "--window-size=1280,600",
+    ]);
   });
 });
 

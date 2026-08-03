@@ -70,6 +70,26 @@ describe("BrowserSessionManager.open", () => {
     });
   });
 
+  it("rejects the unbuilt grounding modes before launching anything", async () => {
+    const launch = vi.fn();
+    const manager = new BrowserSessionManager({
+      backend: { launch },
+      connect: vi.fn(),
+      writeArtifact: vi.fn(),
+      nextId: () => "s1",
+    });
+    for (const grounding of ["vision", "none"] as const) {
+      await expect(manager.open({ grounding })).rejects.toThrow(/not available on this runner/);
+    }
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("accepts the implemented grounding modes (a11y-tree refs)", async () => {
+    const { manager } = makeManager();
+    await expect(manager.open({ grounding: "auto" })).resolves.toBeDefined();
+    await expect(manager.open({ grounding: "a11y" })).resolves.toBeDefined();
+  });
+
   it("kills the browser if the MCP client fails to connect", async () => {
     const backendProc = proc();
     const manager = new BrowserSessionManager({

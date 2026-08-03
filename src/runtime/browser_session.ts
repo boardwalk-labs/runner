@@ -98,6 +98,16 @@ export class BrowserSessionManager {
   constructor(private readonly deps: BrowserSessionManagerDeps) {}
 
   async open(opts?: BrowserSessionOptions): Promise<BrowserSession> {
+    // "vision" and "none" belong to the unbuilt desktop/vision tiers (docs/COMPUTER_USE_SESSION.md
+    // §7) — fail loudly rather than silently serving a11y grounding under the wrong name.
+    if (opts?.grounding === "vision" || opts?.grounding === "none") {
+      throw new AppError(
+        ErrorCode.VALIDATION_FAILED,
+        `browser session grounding "${opts.grounding}" is not available on this runner`,
+        { kind: "browser_grounding_unsupported", grounding: opts.grounding },
+        'Omit `grounding` (or pass "auto"/"a11y") — browser sessions ground through the accessibility tree today.',
+      );
+    }
     const id = this.deps.nextId();
     const proc = await this.deps.backend.launch(opts);
     let caller: SessionMcpCaller;
