@@ -54,9 +54,10 @@ Note a computer-use session in a container still has the machine's network (`--n
 that reach is the point of self-hosting, and it is on you.
 
 **`--host` mode (full machine access)** drives your real environment instead — real Chrome, the
-machine's own display, and (on macOS) apps like an iOS Simulator once the macOS desktop driver
-lands. You provide the pieces and point the runner at them with the same env contract the hosted
-image sets, so the code path is identical:
+machine's own display, and on macOS any app on screen (an iOS Simulator needs no special
+support: launch it with `shell`, then the agent sees and clicks it like anything else). You
+provide the pieces and point the runner at them with the same env contract the hosted image
+sets, so the code path is identical:
 
 | Variable                        | Meaning                                                                                                                                                                  |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
