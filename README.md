@@ -70,10 +70,30 @@ those variables (on Linux, also a display — a real X session or `Xvfb`; on mac
 ignored and Chrome opens on the real screen). Nothing else changes; a machine without them runs
 every non-browser workflow exactly as before.
 
-Current platform limits, stated plainly: the **desktop tier** (`openDesktop`, raw-coordinate
-screenshot/click/type) is Linux-only today — macOS (CGEvent/ScreenCaptureKit) and Windows
-drivers are planned — and **session recording/live view** captures via `x11grab`, so it is also
-Linux-only for now; off Linux both decline cleanly instead of failing runs.
+#### Desktop tier on macOS (`--host`)
+
+`computer.openDesktop()` drives your real Mac screen: input via CGEvent, screenshots via
+`screencapture`, no native addon or build toolchain required. Set `BOARDWALK_DESKTOP_TIER=1` in
+the daemon's environment and grant the runner's terminal app **two** permissions in
+**System Settings > Privacy & Security**:
+
+| Permission           | Without it                                               |
+| -------------------- | -------------------------------------------------------- |
+| **Accessibility**    | clicks and keystrokes are silently swallowed by the OS   |
+| **Screen Recording** | screenshots fail (`could not create image from display`) |
+
+Both fail _silently_ at the OS level, which is exactly why `openDesktop()` checks them up front
+and refuses with the fix rather than letting a run click into the void. Grant them to the app
+that launches the runner (Terminal, iTerm, …), then restart it. Retina displays need no
+configuration: the model sees true pixel dimensions and the driver converts coordinates.
+
+Because it drives the real machine, an agent with a desktop session can act on anything on that
+screen — the point of self-hosting, and worth deciding deliberately.
+
+Current platform limits, stated plainly: the **desktop tier** is Linux and macOS; a **Windows**
+driver (SendInput/DXGI) is not built yet. **Session recording / live view** captures via
+`x11grab`, so it is Linux-only for now. Off a supported platform each declines cleanly instead
+of failing runs.
 
 ## Security model
 
