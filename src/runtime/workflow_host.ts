@@ -892,9 +892,18 @@ export class WorkerWorkflowHost {
     return this.guarded(() => this.deps.runtime.apiToken());
   }
 
-  /** Resolve any {@link SleepArg} shape to a millisecond duration from now. */
+  /** Resolve any {@link SleepArg} shape to a millisecond duration from now. Duration STRINGS
+   *  normally never reach the host (SDK ≥0.3.9 normalizes them client-side, and the wire schema
+   *  has no string member), but the author-facing type includes them, so resolve here too. */
   private resolveSleepMs(arg: SleepArg): number {
     if (typeof arg === "number") return arg;
+    if (typeof arg === "string") {
+      const ms = parseTimeoutMs(arg);
+      if (ms === null) {
+        throw new AppError(ErrorCode.VALIDATION_FAILED, "Could not parse sleep duration string");
+      }
+      return ms;
+    }
     if ("durationMs" in arg) return arg.durationMs;
     const until = typeof arg.until === "string" ? Date.parse(arg.until) : arg.until.getTime();
     if (!Number.isFinite(until)) {

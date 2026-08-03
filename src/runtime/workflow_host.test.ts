@@ -288,6 +288,17 @@ describe("WorkerWorkflowHost — sleep argument resolution", () => {
     expect(held).toEqual([1234]);
   });
 
+  it("holds for a duration string (SDK ≥0.3.9 normally normalizes these client-side)", async () => {
+    const { host, held } = makeHost();
+    await host.sleep("2s");
+    expect(held).toEqual([2000]);
+  });
+
+  it("rejects an unparseable duration string with VALIDATION_FAILED", async () => {
+    const { host } = makeHost();
+    await expect(host.sleep("soon")).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  });
+
   it("computes the hold from { until } as an ISO string", async () => {
     const now = 1_000_000;
     const { host, held } = makeHost({ now: () => now });
