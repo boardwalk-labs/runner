@@ -20,7 +20,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -208,7 +208,7 @@ export function makeGuestBrowserBackend(cfg: GuestBrowserConfig): BrowserBackend
             ...chromiumWindowArgs(opts?.viewport, screen),
             ...(opts?.startUrl !== undefined ? [opts.startUrl] : ["about:blank"]),
           ],
-          { stdio: "ignore", env: { ...process.env, DISPLAY: cfg.display } },
+          { stdio: "ignore", env: browserChildEnv(cfg.display) },
         );
         started.push(chrome);
         chrome.once("error", (err) => {
@@ -240,7 +240,7 @@ export function makeGuestBrowserBackend(cfg: GuestBrowserConfig): BrowserBackend
             "--config",
             configPath,
           ],
-          { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, DISPLAY: cfg.display } },
+          { stdio: ["ignore", "ignore", "inherit"], env: browserChildEnv(cfg.display) },
         );
         started.push(mcp);
         mcp.once("error", (err) => {
@@ -269,6 +269,35 @@ export function makeGuestBrowserBackend(cfg: GuestBrowserConfig): BrowserBackend
       }
     },
   };
+}
+
+/**
+ * Env for the browser-tier child processes — two macOS-only repairs of the run's redirected env,
+ * both measured against a real Mac:
+ *  - HOME: the run's HOME is the WORKSPACE (the process-mode isolation default) and Chrome HANGS
+ *    mid-`createBrowserWithInfo` under a synthetic home — it needs the real `~/Library` (30s
+ *    timeout vs ~65ms). Restored from the user database, never `$HOME` (that IS the redirected one).
+ *    The browser PROFILE stays isolated via `--user-data-dir`, so only the OS home is restored — and
+ *    `npx` regains its normal cache, so Playwright MCP starts warm instead of re-downloading per run.
+ *  - TMPDIR: the run's tmp dir sits deep under `work/runs/<ulid>/tmp`, and Playwright's own control
+ *    socket path then exceeds macOS's 104-byte sockaddr limit (`listen EINVAL`, with a visibly
+ *    truncated name). `/tmp` keeps it short; these children are platform infrastructure, not author
+ *    code, so they need no workspace-scoped tmp.
+ * Linux keeps the inherited env: the hosted guest is verified on it (and its TMPDIR is already /tmp).
+ */
+export function browserChildEnv(
+  display: string,
+  platform: NodeJS.Platform = process.platform,
+  osHome: () => string = () => userInfo().homedir,
+): NodeJS.ProcessEnv {
+  const base = { ...process.env, DISPLAY: display };
+  if (platform !== "darwin") return base;
+  const short = { ...base, TMPDIR: "/tmp" };
+  try {
+    return { ...short, HOME: osHome() };
+  } catch {
+    return short; // no passwd entry (unusual) — better to try than to fail the session
+  }
 }
 
 /** Adapt one MCP tool-result content block (the SDK's loose shape) to the subset browser_session.ts reads. */

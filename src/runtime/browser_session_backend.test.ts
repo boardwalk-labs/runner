@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  browserChildEnv,
   browserTierEnabled,
   chromiumWindowArgs,
   connectSessionMcp,
@@ -183,5 +184,30 @@ describe("connectSessionMcp", () => {
   it("surfaces a clear error when the MCP server is unreachable", async () => {
     const port = await freePort(); // nothing is listening here.
     await expect(connectSessionMcp(`http://localhost:${String(port)}/mcp`)).rejects.toThrow();
+  });
+});
+
+describe("browserChildEnv — macOS HOME restoration", () => {
+  it("restores the OS home on darwin (a workspace HOME hangs Chrome's browser creation)", () => {
+    const env = browserChildEnv(":0", "darwin", () => "/Users/real");
+    expect(env.HOME).toBe("/Users/real");
+    expect(env.DISPLAY).toBe(":0");
+    // A deep run TMPDIR blows macOS's 104-byte unix-socket limit inside Playwright.
+    expect(env.TMPDIR).toBe("/tmp");
+  });
+
+  it("keeps the inherited (workspace) HOME on linux — the hosted guest is verified on it", () => {
+    const before = process.env.HOME;
+    const env = browserChildEnv(":0", "linux", () => "/Users/real");
+    expect(env.HOME).toBe(before);
+    expect(env.TMPDIR).toBe(process.env.TMPDIR);
+  });
+
+  it("falls back to the inherited env when the user database has no entry", () => {
+    const before = process.env.HOME;
+    const env = browserChildEnv(":0", "darwin", () => {
+      throw new Error("no passwd entry");
+    });
+    expect(env.HOME).toBe(before);
   });
 });
