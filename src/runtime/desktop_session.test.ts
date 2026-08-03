@@ -27,31 +27,31 @@ function makeDeps(over: Partial<DesktopSessionManagerDeps> = {}): DesktopSession
 }
 
 describe("DesktopSessionManager", () => {
-  it("opens at most one session; a second open errors; reopen after close works", () => {
+  it("opens at most one session; a second open errors; reopen after close works", async () => {
     const mgr = new DesktopSessionManager(makeDeps());
-    const first = mgr.open();
+    const first = await mgr.open();
     expect(first.id).toBe("desk_1");
-    expect(() => mgr.open()).toThrow(/already open/);
+    await expect(mgr.open()).rejects.toThrow(/already open/);
     void first.close();
-    expect(mgr.open().id).toBe("desk_2");
+    expect((await mgr.open()).id).toBe("desk_2");
   });
 
-  it('rejects grounding values other than "auto"/"none" with the hint', () => {
+  it('rejects grounding values other than "auto"/"none" with the hint', async () => {
     const mgr = new DesktopSessionManager(makeDeps());
     try {
-      mgr.open({ grounding: "a11y" });
+      await mgr.open({ grounding: "a11y" });
       throw new Error("expected throw");
     } catch (err) {
       expect(err).toBeInstanceOf(AppError);
       expect(err instanceof AppError ? err.message : "").toContain('"a11y" is invalid');
     }
-    expect(mgr.open({ grounding: "none" }).id).toBe("desk_1");
+    expect((await mgr.open({ grounding: "none" })).id).toBe("desk_1");
   });
 
   it("program-side screenshot stores the artifact and returns its ref", async () => {
     const deps = makeDeps();
     const mgr = new DesktopSessionManager(deps);
-    const session = mgr.open();
+    const session = await mgr.open();
     await expect(session.screenshot()).resolves.toEqual(REF);
     expect(deps.writeArtifact).toHaveBeenCalledWith(
       expect.stringMatching(/^screenshot-desk_1-/),
@@ -63,15 +63,15 @@ describe("DesktopSessionManager", () => {
 
   it("a closed handle refuses further screenshots", async () => {
     const mgr = new DesktopSessionManager(makeDeps());
-    const session = mgr.open();
+    const session = await mgr.open();
     await session.close();
     await expect(session.screenshot()).rejects.toThrow(/closed/);
   });
 
-  it("driverFor resolves only the live session", () => {
+  it("driverFor resolves only the live session", async () => {
     const deps = makeDeps();
     const mgr = new DesktopSessionManager(deps);
-    const session = mgr.open();
+    const session = await mgr.open();
     expect(mgr.driverFor(session)).toBe(deps.driver);
     expect(mgr.driverFor({ id: "desk_999" })).toBeNull();
     void session.close();
@@ -80,7 +80,7 @@ describe("DesktopSessionManager", () => {
 
   it("captureForAgent dual-sinks: base64 + artifact ref", async () => {
     const mgr = new DesktopSessionManager(makeDeps());
-    const session = mgr.open();
+    const session = await mgr.open();
     await expect(mgr.captureForAgent(session.id)).resolves.toEqual({
       data: Buffer.from("pixels").toString("base64"),
       width: 1280,
@@ -94,7 +94,7 @@ describe("DesktopSessionManager", () => {
     const mgr = new DesktopSessionManager(
       makeDeps({ writeArtifact: vi.fn().mockRejectedValue(new Error("store down")), warn }),
     );
-    const session = mgr.open();
+    const session = await mgr.open();
     const shot = await mgr.captureForAgent(session.id);
     expect(shot.artifact).toBeUndefined();
     expect(shot.data.length).toBeGreaterThan(0);
@@ -107,7 +107,7 @@ describe("DesktopSessionManager", () => {
   it("closeAll reaps the open session and is a no-op when none", async () => {
     const mgr = new DesktopSessionManager(makeDeps());
     await expect(mgr.closeAll()).resolves.toBeUndefined();
-    const session = mgr.open();
+    const session = await mgr.open();
     await mgr.closeAll();
     await expect(session.screenshot()).rejects.toThrow(/closed/);
   });

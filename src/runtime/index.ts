@@ -63,9 +63,10 @@ import { buildHostCapabilities } from "./host_capabilities.js";
 import { runShell } from "./shell_exec.js";
 import { BrowserSessionManager, type BrowserBackend } from "./browser_session.js";
 import { DesktopSessionManager } from "./desktop_session.js";
+import { preflightDarwinDesktop } from "./desktop_driver_darwin.js";
 import {
   loadGuestDesktopConfig,
-  makeXdotoolDriver,
+  makeDesktopDriver,
   type DesktopDriver,
   type GuestDesktopConfig,
 } from "./desktop_driver.js";
@@ -163,6 +164,8 @@ export interface WorkerRuntime {
    *  declares the tier (BOARDWALK_DESKTOP_TIER=1) on a supported OS. Absent ⇒ `computer.openDesktop()`
    *  fails with a clear "not available on this runner". */
   desktopDriver?: DesktopDriver;
+  /** Per-OS permission check run at session open (macOS only today). Absent ⇒ nothing to check. */
+  desktopPreflight?: () => Promise<void>;
   /** Path for the on-screen run-log mirror an xterm in the ambient desktop tails (BOARDWALK_RUN_LOG_FILE,
    *  set by the desktop guest image). Resolved by `main` from the trusted platform BOOT env so a run's
    *  author `meta.env` can't repoint it; absent off the desktop tier ⇒ no local sink. */
@@ -346,6 +349,11 @@ export function assembleWorkerDeps(runtime: WorkerRuntime): ProgramWorkerDeps {
             writeArtifact: screenshotWriter,
             nextId: () => newId(),
             warn: (message, fields) => log.warn(message, fields),
+            // macOS needs Accessibility + Screen Recording; both fail silently at the OS level, so
+            // the session refuses to open without them (with the System Settings fix in the hint).
+            ...(runtime.desktopPreflight !== undefined
+              ? { preflight: runtime.desktopPreflight }
+              : {}),
           })
         : undefined;
     // Screen capture (session recording + live-view). Present only when the image ships the desktop
@@ -1005,9 +1013,11 @@ export async function main(): Promise<void> {
     platformConfig.browser !== null ? makeGuestBrowserBackend(platformConfig.browser) : undefined;
   const captureBackend =
     platformConfig.capture !== null ? makeCaptureBackend(platformConfig.capture) : undefined;
-  // Desktop tier: xdotool/x11grab on Linux; other OS drivers land with self-hosted parity.
+  // Desktop tier: xdotool/x11grab on Linux, CGEvent/screencapture on macOS (self-hosted).
   const desktopDriver =
-    platformConfig.desktop !== null ? makeXdotoolDriver(platformConfig.desktop) : undefined;
+    platformConfig.desktop !== null ? makeDesktopDriver(platformConfig.desktop) : undefined;
+  const desktopPreflight =
+    platformConfig.desktop?.platform === "darwin" ? () => preflightDarwinDesktop() : undefined;
 
   const deps = assembleWorkerDeps({
     // Worker-self config from the typed platform config (trusted boot env), never process.env — so a
@@ -1029,6 +1039,7 @@ export async function main(): Promise<void> {
     ...(browserBackend !== undefined ? { browserBackend } : {}),
     ...(captureBackend !== undefined ? { captureBackend } : {}),
     ...(desktopDriver !== undefined ? { desktopDriver } : {}),
+    ...(desktopPreflight !== undefined ? { desktopPreflight } : {}),
   });
 
   // The only thing to drain is the batched telemetry buffer — the runner opens no database, cache, or queue.

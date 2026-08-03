@@ -7,6 +7,7 @@
 
 import { execFile } from "node:child_process";
 import { createLogger } from "./support/index.js";
+import { makeDarwinDriver } from "./desktop_driver_darwin.js";
 
 const log = createLogger("desktop_driver");
 
@@ -16,23 +17,28 @@ export function desktopTierEnabled(env: NodeJS.ProcessEnv): boolean {
 }
 
 export interface GuestDesktopConfig {
+  /** Which OS driver backs this session (`makeDesktopDriver` selects on it). */
+  platform: "linux" | "darwin";
+  /** X display — Linux only; meaningless on macOS (the real screen is the target). */
   display: string;
   screenWidth: number;
   screenHeight: number;
 }
 
-/** Read the guest desktop config from env, or null when the tier is disabled or unsupported here. */
+/** Read the guest desktop config from env, or null when the tier is disabled or unsupported here.
+ *  Linux drives XTEST/x11grab; macOS drives CGEvent/screencapture (desktop_driver_darwin.ts). */
 export function loadGuestDesktopConfig(
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform = process.platform,
 ): GuestDesktopConfig | null {
   if (!desktopTierEnabled(env)) return null;
-  if (platform !== "linux") {
-    // The macOS (CGEvent/ScreenCaptureKit) and Windows (SendInput/DXGI) drivers are not built yet.
+  if (platform !== "linux" && platform !== "darwin") {
+    // The Windows driver (SendInput/DXGI) is demand-gated and not built yet.
     log.warn("desktop_tier_unsupported_platform", { platform });
     return null;
   }
   return {
+    platform,
     display: env.DISPLAY?.trim() || ":0",
     screenWidth: positiveIntFromEnv(env.BOARDWALK_SCREEN_WIDTH, 1280),
     screenHeight: positiveIntFromEnv(env.BOARDWALK_SCREEN_HEIGHT, 800),
@@ -160,6 +166,11 @@ export function scrollNotches(delta: number): number {
     SCROLL_MAX_NOTCHES,
     Math.max(1, Math.round(Math.abs(delta) / SCROLL_PX_PER_NOTCH)),
   );
+}
+
+/** Build the OS driver for a resolved desktop config (the composition root's one entry point). */
+export function makeDesktopDriver(cfg: GuestDesktopConfig): DesktopDriver {
+  return cfg.platform === "darwin" ? makeDarwinDriver() : makeXdotoolDriver(cfg);
 }
 
 /**

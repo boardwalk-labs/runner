@@ -11,7 +11,12 @@ import {
   type GuestDesktopConfig,
 } from "./desktop_driver.js";
 
-const CFG: GuestDesktopConfig = { display: ":0", screenWidth: 1280, screenHeight: 800 };
+const CFG: GuestDesktopConfig = {
+  platform: "linux",
+  display: ":0",
+  screenWidth: 1280,
+  screenHeight: 800,
+};
 
 function fakeExec(): { exec: DriverExec; calls: [string, readonly string[]][] } {
   const calls: [string, readonly string[]][] = [];
@@ -37,12 +42,14 @@ describe("desktopTierEnabled / loadGuestDesktopConfig", () => {
       DISPLAY: ":7",
     };
     expect(loadGuestDesktopConfig(env, "linux")).toEqual({
+      platform: "linux",
       display: ":7",
       screenWidth: 1920,
       screenHeight: 1080,
     });
-    // The macOS/Windows drivers are not built yet — the tier declines off Linux.
-    expect(loadGuestDesktopConfig(env, "darwin")).toBeNull();
+    // macOS is supported too (CGEvent/screencapture); Windows is not built yet.
+    expect(loadGuestDesktopConfig(env, "darwin")?.platform).toBe("darwin");
+    expect(loadGuestDesktopConfig(env, "win32")).toBeNull();
   });
 });
 

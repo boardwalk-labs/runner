@@ -36,6 +36,10 @@ export interface DesktopSessionManagerDeps {
   nextId: () => string;
   /** Best-effort warn sink for non-fatal failures (artifact store hiccups). */
   warn?: (message: string, fields: Record<string, unknown>) => void;
+  /** OS-permission check run ONCE per session at open (macOS: Accessibility + Screen Recording).
+   *  Rejecting here is the whole point — an ungranted Mac otherwise clicks into the void mid-run.
+   *  Absent ⇒ nothing to check (Linux). */
+  preflight?: () => Promise<void>;
 }
 
 /**
@@ -48,7 +52,7 @@ export class DesktopSessionManager {
 
   constructor(private readonly deps: DesktopSessionManagerDeps) {}
 
-  open(opts?: DesktopSessionOpenOptions): DesktopSessionHandle {
+  async open(opts?: DesktopSessionOpenOptions): Promise<DesktopSessionHandle> {
     if (opts?.grounding !== undefined && opts.grounding !== "auto" && opts.grounding !== "none") {
       throw new AppError(
         ErrorCode.VALIDATION_FAILED,
@@ -65,6 +69,8 @@ export class DesktopSessionManager {
         "Reuse the existing handle — every desktop session shares the run's one screen.",
       );
     }
+    // Permissions BEFORE the handle exists: a session that can't see or click is not a session.
+    await this.deps.preflight?.();
     const id = this.deps.nextId();
     const handle = this.makeHandle(id);
     this.current = { id, handle };
