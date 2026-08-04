@@ -83,11 +83,12 @@ the daemon's environment and grant the runner's terminal app **two** permissions
 | **Accessibility**    | clicks and keystrokes are silently swallowed by the OS   |
 | **Screen Recording** | screenshots fail (`could not create image from display`) |
 
-`boardwalk-runner start` reports either grant that is missing before it goes online, and
-`openDesktop()` checks again at the call. Both fail _silently_ at the OS level, which is exactly why they are checked up front
-and refuses with the fix rather than letting a run click into the void. Grant them to the app
-that launches the runner (Terminal, iTerm, …), then restart it. Retina displays need no
-configuration: the model sees true pixel dimensions and the driver converts coordinates.
+Both fail _silently_ at the OS level, so they are checked twice rather than discovered mid-run:
+`boardwalk-runner start` reports either missing grant before the machine goes online, and
+`openDesktop()` refuses at the call with the fix rather than letting a run click into the void.
+Grant them to the app that launches the runner (Terminal, iTerm, …), then restart it. Retina
+displays need no configuration: the model sees true pixel dimensions and the driver converts
+coordinates.
 
 Because it drives the real machine, an agent with a desktop session can act on anything on that
 screen — the point of self-hosting, and worth deciding deliberately.
@@ -98,10 +99,10 @@ and directly access your screen"). Captures keep working, but the prompt reappea
 schedule and wants a human. For a long-lived headless Mac runner, log in as the runner user and
 acknowledge it, or expect to click Allow every so often.
 
-Current platform limits, stated plainly: the **desktop tier** is Linux and macOS; a **Windows**
-driver (SendInput/DXGI) is not built yet. **Session recording / live view** captures via
-`x11grab`, so it is Linux-only for now. Off a supported platform each declines cleanly instead
-of failing runs.
+Current platform limits, stated plainly: the **desktop tier** and **session recording / live
+view** both work on Linux and macOS (`x11grab` and `avfoundation` respectively); a **Windows**
+driver (SendInput/DXGI) is not built yet. Off a supported platform each declines cleanly instead
+of failing runs, and a run whose recording could not start says so in its own log.
 
 ## Security model
 
