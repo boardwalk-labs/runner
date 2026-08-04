@@ -176,6 +176,41 @@ export function parseDarwinChord(chord: string): { flags: number; keyCode: numbe
   return { flags, keyCode };
 }
 
+/** Which macOS permissions the runner currently holds. Each is probed the way it actually fails. */
+export interface DarwinPermissions {
+  /** CGEvent input. Without it, posts SUCCEED and the system silently swallows them. */
+  accessibility: boolean;
+  /** Screen capture. Without it, `screencapture` exits non-zero. */
+  screenRecording: boolean;
+}
+
+/** Probe both permissions without throwing — the startup report needs the full picture, not the
+ *  first gap. `preflightDarwinDesktop` is the fail-at-open wrapper over this. */
+export async function checkDarwinPermissions(
+  exec: DarwinExec = defaultExec,
+): Promise<DarwinPermissions> {
+  const trusted = await jxa(
+    exec,
+    "ObjC.import('ApplicationServices'); String($.AXIsProcessTrusted())",
+  ).catch(() => "false");
+  let screenRecording = true;
+  const dir = await mkdtemp(join(tmpdir(), "bw-desktop-permcheck-"));
+  try {
+    await exec("screencapture", ["-x", "-C", "-R", "0,0,1,1", "-t", "png", join(dir, "probe.png")]);
+    await readFile(join(dir, "probe.png"));
+  } catch {
+    screenRecording = false;
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+  return { accessibility: trusted === "true", screenRecording };
+}
+
+/** The grant instructions for a missing permission, in the words System Settings uses. */
+export function darwinPermissionHint(permission: keyof DarwinPermissions): string {
+  return permission === "accessibility" ? ACCESSIBILITY_HINT : SCREEN_RECORDING_HINT;
+}
+
 /** Both OS permissions, probed the way each actually fails. Throws with the fix on the first gap. */
 export async function preflightDarwinDesktop(exec: DarwinExec = defaultExec): Promise<void> {
   const trusted = await jxa(

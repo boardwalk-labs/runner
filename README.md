@@ -83,7 +83,8 @@ the daemon's environment and grant the runner's terminal app **two** permissions
 | **Accessibility**    | clicks and keystrokes are silently swallowed by the OS   |
 | **Screen Recording** | screenshots fail (`could not create image from display`) |
 
-Both fail _silently_ at the OS level, which is exactly why `openDesktop()` checks them up front
+`boardwalk-runner start` reports either grant that is missing before it goes online, and
+`openDesktop()` checks again at the call. Both fail _silently_ at the OS level, which is exactly why they are checked up front
 and refuses with the fix rather than letting a run click into the void. Grant them to the app
 that launches the runner (Terminal, iTerm, …), then restart it. Retina displays need no
 configuration: the model sees true pixel dimensions and the driver converts coordinates.

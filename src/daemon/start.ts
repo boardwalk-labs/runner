@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { PoolClient } from "./pool_client.js";
 import { startDaemon, type RunProcessHandle, type RunSpawner } from "./daemon.js";
 import { createContainerSpawner, detectContainerRuntime, forwardedDaemonEnv } from "./container.js";
+import { reportComputerUsePermissions } from "./computer_use_preflight.js";
 import type { RunnerIdentity } from "./identity.js";
 
 export type IsolationMode = "container" | "host";
@@ -159,6 +160,9 @@ export interface StartRunnerOptions {
 export async function startRunner(opts: StartRunnerOptions): Promise<void> {
   const log = opts.log ?? ((line: string) => void process.stdout.write(line));
   const spawn = await resolveSpawner(opts.isolation, log);
+  // Computer use on a --host Mac needs OS permissions that fail SILENTLY when absent; say so now
+  // rather than letting a run discover it mid-flight. Never blocks the start.
+  await reportComputerUsePermissions({ mode: opts.isolation.mode, env: process.env, log });
   // Process mode imports this entry directly; container mode ignores it (the image's entrypoint runs
   // the runtime), but the daemon still passes it through the spawner interface.
   const runtimeEntry = fileURLToPath(new URL("../runtime/main.js", import.meta.url));
