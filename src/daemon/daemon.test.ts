@@ -89,6 +89,7 @@ describe("startDaemon", () => {
   it("claims an offer, spawns the runtime with the claim env, cleans the run dir", async () => {
     const workDir = await tmpWorkDir();
     const spawned: { env: Record<string, string>; cwd: string }[] = [];
+    let tmpDirSeen = false;
     const poll = vi
       .fn()
       .mockResolvedValueOnce({ assignment: OFFER })
@@ -107,6 +108,8 @@ describe("startDaemon", () => {
       sleep: instantSleep(),
       spawn: (opts) => {
         spawned.push({ env: opts.env, cwd: opts.cwd });
+        // Sampled DURING the run — the per-run dir (tmp included) is removed on cleanup.
+        tmpDirSeen = existsSync(path.join(workDir, "runs", "01H_run", "tmp"));
         return fakeChild(0);
       },
     });
@@ -115,6 +118,9 @@ describe("startDaemon", () => {
     expect(spawned).toHaveLength(1);
     expect(spawned[0]?.env.RUN_ID).toBe("01H_run");
     expect(spawned[0]?.cwd).toContain("01H_run");
+    // The run's TMPDIR must EXIST when the run starts: the runtime's `os.tmpdir()` consumers
+    // (session recording among them) fail at `mkdtemp` otherwise — silently, as a warn.
+    expect(tmpDirSeen).toBe(true);
     // The per-run dir is removed after the run (contract: cleanup always).
     await expect(stat(path.join(workDir, "runs", "01H_run"))).rejects.toMatchObject({
       code: "ENOENT",

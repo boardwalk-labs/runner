@@ -16,7 +16,7 @@
 // This layer is validated by a local ffmpeg smoke + the substrate E2E (it needs a real X display), the
 // same way browser_session_backend.ts is — the unit tests cover screen_capture.ts's pure orchestration.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, open, readdir, readFile, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,7 +28,9 @@ import { createLogger } from "./support/index.js";
 const log = createLogger("screen_capture_backend");
 
 export interface CaptureConfig {
-  /** X display to grab (DISPLAY, default ":0"). */
+  /** Which capture input to use: Linux grabs the X display, macOS grabs a screen via avfoundation. */
+  platform: "linux" | "darwin";
+  /** X display to grab (DISPLAY, default ":0"). Linux only — meaningless on macOS. */
   display: string;
   /** Recording capture frame rate (fps). */
   fps: number;
@@ -66,12 +68,13 @@ export function loadCaptureConfig(
   // Desktop-present: either tier implies a display to grab (a macOS/Windows self-hosted runner may
   // one day set only the desktop tier). Neither ⇒ nothing to capture.
   if (!browserTierEnabled(env) && !desktopTierEnabled(env)) return null;
-  // The capture input is x11grab — Linux only until the avfoundation/gdigrab inputs land. A macOS
-  // `--host` runner with the browser tier on would otherwise spawn a doomed ffmpeg every run.
-  if (platform !== "linux") return null;
+  // Linux grabs X (x11grab); macOS grabs a screen (avfoundation). Windows (gdigrab) isn't built,
+  // and an unsupported platform declines rather than spawning a doomed ffmpeg every run.
+  if (platform !== "linux" && platform !== "darwin") return null;
   // Kill switch (default on): BOARDWALK_RECORDING_ENABLED=0 disables recording + live-view capture.
   if (env.BOARDWALK_RECORDING_ENABLED === "0") return null;
   return {
+    platform,
     display: env.DISPLAY?.trim() || ":0",
     fps: intFromEnv(env.BOARDWALK_RECORDING_FPS, 6),
     width: intFromEnv(env.BOARDWALK_SCREEN_WIDTH, 1280),
@@ -88,14 +91,88 @@ export function loadCaptureConfig(
   };
 }
 
-/** ffmpeg args: one x11grab input, three outputs (change-driven segmented MP4 + full-size and
- *  bandwidth-bounded overwritten JPEGs). Exported for unit testing. */
-export function ffmpegArgs(cfg: CaptureConfig, dir: string): string[] {
-  const liveFps = Math.max(1, Math.round(1000 / cfg.liveFrameIntervalMs));
+/**
+ * Which avfoundation device index is the SCREEN. Discovered, never assumed: `ffmpeg -list_devices`
+ * enumerates cameras first, so the screen's index is whatever a given Mac's hardware makes it (on a
+ * machine with four cameras it is 4). Hardcoding one would silently record a WEBCAM instead of the
+ * screen — the worst possible failure for a session recording. Returns null when no screen device is
+ * listed (ffmpeg missing, or Screen Recording not granted), so the caller degrades instead of
+ * recording garbage.
+ *
+ * The device list is written to STDERR, and ffmpeg exits non-zero after listing — both expected.
+ */
+export function parseAvfoundationScreenIndex(listOutput: string, display = 0): number | null {
+  // Lines look like: `[AVFoundation indev @ 0x...] [4] Capture screen 0`
+  const re = /\[(\d+)\]\s+Capture screen (\d+)/g;
+  let fallback: number | null = null;
+  for (const m of listOutput.matchAll(re)) {
+    const deviceIndex = Number(m[1]);
+    const screenNumber = Number(m[2]);
+    if (screenNumber === display) return deviceIndex;
+    fallback ??= deviceIndex; // some other screen — better than nothing if the wanted one is absent
+  }
+  return fallback;
+}
+
+/** Run ffmpeg's device enumeration and resolve the screen index (null ⇒ no screen capturable). */
+export async function detectAvfoundationScreenIndex(
+  exec: (cmd: string, args: readonly string[]) => Promise<string> = ffmpegListDevices,
+): Promise<number | null> {
+  try {
+    return parseAvfoundationScreenIndex(await exec("ffmpeg", LIST_DEVICES_ARGS));
+  } catch (err) {
+    log.warn("avfoundation_device_list_failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+const LIST_DEVICES_ARGS = [
+  "-hide_banner",
+  "-f",
+  "avfoundation",
+  "-list_devices",
+  "true",
+  "-i",
+  "",
+] as const;
+
+/** ffmpeg writes the device list to stderr and exits non-zero — collect stderr either way. */
+function ffmpegListDevices(cmd: string, args: readonly string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, [...args], { encoding: "utf8", timeout: 15_000 }, (err, _stdout, stderr) => {
+      if (stderr.length > 0) {
+        resolve(stderr);
+        return;
+      }
+      reject(err ?? new Error("ffmpeg produced no device list"));
+    });
+  });
+}
+
+/**
+ * The INPUT half of the ffmpeg graph, per platform. Linux pins the geometry because x11grab needs it
+ * (the Xvfb screen is snapshot-fixed); macOS captures the screen device at its NATIVE resolution —
+ * avfoundation takes no `-video_size`, and a Mac's screen is whatever the operator's panel is.
+ * `screenIndex` is DISCOVERED (see detectAvfoundationScreenIndex), never assumed: the device list is
+ * machine-specific, and a wrong index would record a WEBCAM instead of the screen.
+ */
+export function ffmpegInputArgs(cfg: CaptureConfig, screenIndex: number): string[] {
+  if (cfg.platform === "darwin") {
+    return [
+      "-f",
+      "avfoundation",
+      "-framerate",
+      String(cfg.fps),
+      // Show the pointer — an agent's clicks are only legible if you can see where it pointed.
+      "-capture_cursor",
+      "1",
+      "-i",
+      `${String(screenIndex)}:none`, // video device : no audio
+    ];
+  }
   return [
-    "-y",
-    "-loglevel",
-    "error",
     "-f",
     "x11grab",
     "-framerate",
@@ -104,6 +181,18 @@ export function ffmpegArgs(cfg: CaptureConfig, dir: string): string[] {
     `${String(cfg.width)}x${String(cfg.height)}`,
     "-i",
     cfg.display,
+  ];
+}
+
+/** ffmpeg args: one platform input, three outputs (change-driven segmented MP4 + full-size and
+ *  bandwidth-bounded overwritten JPEGs). Exported for unit testing. */
+export function ffmpegArgs(cfg: CaptureConfig, dir: string, screenIndex = 0): string[] {
+  const liveFps = Math.max(1, Math.round(1000 / cfg.liveFrameIntervalMs));
+  return [
+    "-y",
+    "-loglevel",
+    "error",
+    ...ffmpegInputArgs(cfg, screenIndex),
     // Recording: H.264 MP4 segments, each a standalone playable file (docs/SCREEN_CAPTURE.md §4.2).
     // Change-driven: `mpdecimate` drops near-duplicate frames and `-fps_mode vfr` lets the muxer honor
     // those drops, so a static/idle desktop encodes ~nothing (collapses to ~1 frame) while a changing
@@ -228,10 +317,74 @@ export async function isFramelessSegment(path: string): Promise<boolean> {
   }
 }
 
-export function makeCaptureBackend(cfg: CaptureConfig): CaptureBackend {
+/**
+ * The macOS screen's PIXEL dimensions, for segment metadata. avfoundation captures the panel's real
+ * resolution, so the configured 1280x800 (an Xvfb assumption) would mislabel every Mac recording.
+ * Read from CoreGraphics via JXA; null ⇒ the caller keeps the configured values.
+ */
+export async function detectDarwinScreenSize(
+  exec: (cmd: string, args: readonly string[]) => Promise<string> = execFileOut,
+): Promise<{ width: number; height: number } | null> {
+  try {
+    const out = await exec("osascript", [
+      "-l",
+      "JavaScript",
+      "-e",
+      "ObjC.import('CoreGraphics'); const m = $.CGDisplayCopyDisplayMode($.CGMainDisplayID()); " +
+        "`${$.CGDisplayModeGetPixelWidth(m)}x${$.CGDisplayModeGetPixelHeight(m)}`",
+    ]);
+    const [w, h] = out.trim().split("x").map(Number);
+    if (
+      w === undefined ||
+      h === undefined ||
+      !Number.isFinite(w) ||
+      !Number.isFinite(h) ||
+      w <= 0
+    ) {
+      return null;
+    }
+    return { width: w, height: h };
+  } catch {
+    return null;
+  }
+}
+
+/** execFile → stdout (rejects on a non-zero exit). */
+function execFileOut(cmd: string, args: readonly string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, [...args], { encoding: "utf8", timeout: 15_000 }, (err, stdout) => {
+      // execFile always yields an Error here; the guard keeps the typed reject lint-clean.
+      if (err !== null) reject(err instanceof Error ? err : new Error("execFile failed"));
+      else resolve(stdout);
+    });
+  });
+}
+
+/** A capture session that records nothing — used when no screen device is available, so a run
+ *  proceeds unrecorded instead of failing (or, far worse, recording a camera). */
+async function inertCaptureSession(dir: string): Promise<CaptureSession> {
+  await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   return {
-    width: cfg.width,
-    height: cfg.height,
+    onSegment: () => undefined,
+    latestFrame: () => Promise.resolve(null),
+    latestThumbnail: () => Promise.resolve(null),
+    stop: () => Promise.resolve(),
+  };
+}
+
+export function makeCaptureBackend(cfg: CaptureConfig): CaptureBackend {
+  // macOS captures the panel's NATIVE resolution, which the configured 1280x800 (an Xvfb assumption)
+  // would mislabel on every segment. Resolved at start() and exposed through getters, since the
+  // segment metadata reads these after capture begins.
+  let width = cfg.width;
+  let height = cfg.height;
+  return {
+    get width() {
+      return width;
+    },
+    get height() {
+      return height;
+    },
     thumbnailWidth: DESKTOP_THUMBNAIL_WIDTH,
     thumbnailHeight: DESKTOP_THUMBNAIL_HEIGHT,
     liveFrameIntervalMs: cfg.liveFrameIntervalMs,
@@ -239,7 +392,28 @@ export function makeCaptureBackend(cfg: CaptureConfig): CaptureBackend {
     liveKeepaliveMs: cfg.liveKeepaliveMs,
     async start(): Promise<CaptureSession> {
       const dir = await mkdtemp(join(tmpdir(), "bw-capture-"));
-      const proc = spawn("ffmpeg", ffmpegArgs(cfg, dir), {
+      // macOS: resolve WHICH device is the screen before spawning (see detectAvfoundationScreenIndex).
+      // Null ⇒ no screen device (ffmpeg missing / Screen Recording ungranted): warn and let the
+      // session run without capture rather than recording a webcam or failing the run.
+      let screenIndex = 0;
+      if (cfg.platform === "darwin") {
+        const detected = await detectAvfoundationScreenIndex();
+        if (detected === null) {
+          // NEVER fall back to an index: device 0 on a Mac is typically a CAMERA, so a guess here
+          // would record the operator's face instead of their screen. No screen device ⇒ no capture.
+          log.warn("capture_unavailable_no_screen_device", {
+            hint: "install ffmpeg and grant Screen Recording to record a macOS session",
+          });
+          return inertCaptureSession(dir);
+        }
+        screenIndex = detected;
+        const size = await detectDarwinScreenSize();
+        if (size !== null) {
+          width = size.width;
+          height = size.height;
+        }
+      }
+      const proc = spawn("ffmpeg", ffmpegArgs(cfg, dir, screenIndex), {
         stdio: ["ignore", "ignore", "inherit"],
       });
       proc.once("error", (err) => log.error("ffmpeg_spawn_error", { error: err.message }));

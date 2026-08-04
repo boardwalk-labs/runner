@@ -115,6 +115,10 @@ export function startDaemon(deps: DaemonDeps): DaemonController {
     const runDir = path.join(deps.workDir, "runs", claim.run_id);
     const workspaceRoot = path.join(runDir, "workspace");
     await mkdir(workspaceRoot, { recursive: true });
+    // The run's TMPDIR (process mode points it at `<runDir>/tmp`, so it dies with the run). CREATE it:
+    // the runtime hands it to `os.tmpdir()` consumers, and an absent dir failed them at `mkdtemp` —
+    // which is exactly how session recording silently never started on a self-hosted run.
+    await mkdir(path.join(runDir, "tmp"), { recursive: true });
     // This run's durable workspace, keyed per (workflow, environment, workspace key) and living
     // OUTSIDE the per-run dir (which is scratch, removed with the run). Created up front because the
     // container lane binds it as a mount, and docker would otherwise create it root-owned — which is

@@ -6,13 +6,16 @@ import {
   DESKTOP_THUMBNAIL_HEIGHT,
   DESKTOP_THUMBNAIL_WIDTH,
   ffmpegArgs,
+  ffmpegInputArgs,
   isFramelessSegment,
+  parseAvfoundationScreenIndex,
   loadCaptureConfig,
   mp4HasEmptyMdat,
   type CaptureConfig,
 } from "./screen_capture_backend.js";
 
 const cfg: CaptureConfig = {
+  platform: "linux",
   display: ":0",
   fps: 6,
   width: 1280,
@@ -80,8 +83,8 @@ describe("loadCaptureConfig", () => {
     expect(loadCaptureConfig({}, "linux")).toBeNull();
   });
 
-  it("returns null off Linux (x11grab only) even with a tier enabled", () => {
-    expect(loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1" }, "darwin")).toBeNull();
+  it("serves linux + darwin, and declines an unsupported platform (windows has no input yet)", () => {
+    expect(loadCaptureConfig({ BOARDWALK_BROWSER_TIER: "1" }, "darwin")?.platform).toBe("darwin");
     expect(loadCaptureConfig({ BOARDWALK_DESKTOP_TIER: "1" }, "win32")).toBeNull();
   });
 
@@ -228,5 +231,68 @@ describe("mp4HasEmptyMdat", () => {
       expect(await isFramelessSegment(join(dir, "absent.mp4"))).toBe(false);
       expect(await isFramelessSegment(await file("empty.mp4", Buffer.alloc(0)))).toBe(false);
     });
+  });
+});
+
+describe("macOS capture input (avfoundation)", () => {
+  const mac: CaptureConfig = { ...cfg, platform: "darwin" };
+
+  it("grabs the SCREEN device by its discovered index, with the cursor, at native resolution", () => {
+    const a = ffmpegInputArgs(mac, 4);
+    expect(a).toContain("avfoundation");
+    expect(a[a.indexOf("-i") + 1]).toBe("4:none"); // video device : no audio
+    expect(a[a.indexOf("-capture_cursor") + 1]).toBe("1");
+    // avfoundation has no -video_size: a Mac's screen is whatever the operator's panel is.
+    expect(a).not.toContain("-video_size");
+  });
+
+  it("keeps the x11grab input (with pinned geometry) on linux", () => {
+    const a = ffmpegInputArgs(cfg, 4);
+    expect(a).toContain("x11grab");
+    expect(a[a.indexOf("-video_size") + 1]).toBe("1280x800");
+    expect(a).not.toContain("avfoundation");
+  });
+
+  it("keeps the three-output graph unchanged on macOS", () => {
+    const a = ffmpegArgs(mac, "/out", 4);
+    expect(a.join(" ")).toContain("-vf mpdecimate -fps_mode vfr");
+    expect(a.some((x) => x.endsWith("rec-%05d.mp4"))).toBe(true);
+    expect(a.some((x) => x.endsWith("live.jpg"))).toBe(true);
+    expect(a.some((x) => x.endsWith("thumbnail.jpg"))).toBe(true);
+  });
+
+  it("loadCaptureConfig now serves darwin (and still declines windows)", () => {
+    expect(loadCaptureConfig({ BOARDWALK_DESKTOP_TIER: "1" }, "darwin")?.platform).toBe("darwin");
+    expect(loadCaptureConfig({ BOARDWALK_DESKTOP_TIER: "1" }, "win32")).toBeNull();
+  });
+});
+
+describe("parseAvfoundationScreenIndex — never guess the device", () => {
+  // Verbatim shape of `ffmpeg -f avfoundation -list_devices true -i ""` on a real Mac.
+  const LIST = [
+    "[AVFoundation indev @ 0x1] AVFoundation video devices:",
+    "[AVFoundation indev @ 0x1] [0] Logitech Webcam C925e",
+    "[AVFoundation indev @ 0x1] [1] FaceTime HD Camera",
+    "[AVFoundation indev @ 0x1] [2] Nick's iPhone Camera",
+    "[AVFoundation indev @ 0x1] [3] Nick's iPhone Desk View Camera",
+    "[AVFoundation indev @ 0x1] [4] Capture screen 0",
+    "[AVFoundation indev @ 0x1] [5] Capture screen 1",
+  ].join("\n");
+
+  it("finds the screen behind a list of cameras (hardcoding 0 would record a webcam)", () => {
+    expect(parseAvfoundationScreenIndex(LIST)).toBe(4);
+  });
+
+  it("selects the requested display when several screens are attached", () => {
+    expect(parseAvfoundationScreenIndex(LIST, 1)).toBe(5);
+  });
+
+  it("falls back to another screen rather than a camera when the wanted one is absent", () => {
+    expect(parseAvfoundationScreenIndex(LIST, 7)).toBe(4);
+  });
+
+  it("returns null when no screen device is listed (degrade, never record a camera)", () => {
+    expect(parseAvfoundationScreenIndex("[x] [0] FaceTime HD Camera")).toBeNull();
+    expect(parseAvfoundationScreenIndex("")).toBeNull();
   });
 });
