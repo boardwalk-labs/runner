@@ -54,6 +54,32 @@ function triggerSource(actor: RunActor): string | undefined {
   }
 }
 
+/** A string→string map, or null when the value isn't one. */
+function stringMap(value: unknown): Record<string, string> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v !== "string") return null;
+    out[k] = v;
+  }
+  return out;
+}
+
+/** The webhook delivery's HTTP request, when the claim carries a well-formed one. Null otherwise —
+ *  including for every non-webhook run, which never has one. */
+function triggerRequest(run: Run): ContextData["trigger"]["request"] | null {
+  const raw = run.triggerRequest;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const { method, path, query, headers } = raw as Record<string, unknown>;
+  const q = stringMap(query);
+  const h = stringMap(headers);
+  if (typeof method !== "string" || typeof path !== "string" || q === null || h === null) {
+    log.warn("context_trigger_request_malformed", { runId: run.id });
+    return null;
+  }
+  return { method, path, query: q, headers: h };
+}
+
 /** The claim-payload siblings of the run row that feed `context` (P3.7). Fields are optional so
  *  an older backend's claim (predating them) degrades to the logged fallbacks. */
 export interface ClaimContextExtras {
@@ -93,6 +119,7 @@ export function buildContextData(
     log.warn("context_attempt_unavailable", { runId: run.id });
   }
   const source = triggerSource(run.actor);
+  const request = triggerRequest(run);
   return {
     runId: run.id,
     workflowId: run.workflowId,
@@ -105,12 +132,10 @@ export function buildContextData(
       kind: triggerKind(run),
       firedAt: run.createdAt,
       ...(source !== undefined ? { source } : {}),
-      // The sender's own event name, when the endpoint's verifier preset defines where it lives.
-      // Absent for every other trigger kind — and for an older backend that doesn't send it, which
-      // is why it is read defensively rather than assumed present on webhook runs.
-      ...(typeof run.triggerEvent === "string" && run.triggerEvent !== ""
-        ? { event: run.triggerEvent }
-        : {}),
+      // The delivery as the HTTP request it was, on webhook runs. Validated rather than trusted:
+      // the SDK's context schema rejects a partial `request`, so a malformed one from an older or
+      // misbehaving backend must be dropped here instead of failing the program's bootstrap.
+      ...(request !== null ? { request } : {}),
     },
     workspaceDir: workspaceRoot,
   };

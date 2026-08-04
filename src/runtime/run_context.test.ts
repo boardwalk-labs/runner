@@ -71,20 +71,37 @@ describe("buildContextData", () => {
     expect(buildContextData(run({ triggerKind: "mystery" }), "/w").trigger.kind).toBe("manual");
   });
 
-  it("carries the sender's event name when the claim has one, and omits it otherwise", () => {
+  it("carries the delivery's HTTP request when the claim has one", () => {
     const gh = buildContextData(
       run({
         triggerKind: "webhook",
         actor: { type: "webhook", source: "wh_1" },
-        triggerEvent: "pull_request",
+        triggerRequest: {
+          method: "POST",
+          path: "/v1/webhooks/wh_1",
+          query: { replay: "1" },
+          headers: { "x-github-event": "pull_request" },
+        },
       }),
       "/w",
     );
-    expect(gh.trigger.event).toBe("pull_request");
-    // Absent on every other kind — and on an older backend that sends null / nothing at all, where
-    // the field must not appear (the SDK's trigger schema is strict about its type).
-    expect(buildContextData(run({ triggerEvent: null }), "/w").trigger.event).toBeUndefined();
-    expect("event" in buildContextData(run({}), "/w").trigger).toBe(false);
+    expect(gh.trigger.request?.headers["x-github-event"]).toBe("pull_request");
+    expect(gh.trigger.request?.query.replay).toBe("1");
+  });
+
+  it("drops a malformed or absent request rather than failing the program's bootstrap", () => {
+    // The SDK's trigger schema rejects a partial `request`, so anything we can't vouch for must not
+    // reach it — a bad claim should cost the event name, not the run.
+    for (const bad of [
+      undefined,
+      null,
+      "POST /x",
+      { method: "POST" },
+      { method: "POST", path: "/x", query: {}, headers: { n: 7 } },
+    ]) {
+      const ctx = buildContextData(run({ triggerRequest: bad }), "/w");
+      expect("request" in ctx.trigger).toBe(false);
+    }
   });
 
   it("stamps a trigger source from the actor (webhook / cron / event)", () => {

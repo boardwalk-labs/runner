@@ -31,10 +31,11 @@ export interface Run {
   parentRunId: string | null;
   actor: RunActor;
   triggerKind: string;
-  /** The SENDER's own name for a webhook delivery (GitHub `X-GitHub-Event` and the equivalents of
-   *  the other verifier presets), when the endpoint's preset defines where to find it. Optional:
-   *  absent on every other trigger kind, and on an older backend whose claim predates the column. */
-  triggerEvent?: string | null;
+  /** The HTTP request a webhook delivery arrived as — `{ method, path, query, headers }`, with the
+   *  credential headers already stripped by the broker. Optional: absent on every other trigger
+   *  kind, and on a backend whose claim predates the column. Shape-checked before it reaches the
+   *  program, because the SDK's context schema is strict about it. */
+  triggerRequest?: unknown;
   triggerPayload: unknown;
   status: string;
   concurrencyKey: string | null;
