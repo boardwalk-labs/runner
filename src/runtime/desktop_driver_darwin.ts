@@ -245,6 +245,37 @@ export async function preflightDarwinDesktop(exec: DarwinExec = defaultExec): Pr
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
+  // A second monitor is invisible to the agent: the driver captures and clicks the MAIN display
+  // only. Say so once at open, so an operator watching the wrong screen isn't left guessing.
+  if (await hasSecondDisplay(exec)) {
+    log.warn("desktop_multiple_displays", {
+      note: "the agent sees and clicks the MAIN display only; other monitors are not captured",
+    });
+  }
+}
+
+/** Whether a second display is attached — probed with the same `screencapture` we already depend on
+ *  (`-D 2` addresses the second display and fails when there isn't one). */
+async function hasSecondDisplay(exec: DarwinExec): Promise<boolean> {
+  const dir = await mkdtemp(join(tmpdir(), "bw-desktop-displays-"));
+  try {
+    await exec("screencapture", [
+      "-x",
+      "-D",
+      "2",
+      "-R",
+      "0,0,1,1",
+      "-t",
+      "png",
+      join(dir, "d2.png"),
+    ]);
+    await readFile(join(dir, "d2.png"));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 /** The main display's size in CG POINTS (what CGEvent coordinates are in). */

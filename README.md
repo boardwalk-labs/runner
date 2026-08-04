@@ -90,8 +90,10 @@ Grant them to the app that launches the runner (Terminal, iTerm, …), then rest
 displays need no configuration: the model sees true pixel dimensions and the driver converts
 coordinates.
 
-Because it drives the real machine, an agent with a desktop session can act on anything on that
-screen — the point of self-hosting, and worth deciding deliberately.
+The agent sees and clicks the **main display only**; a second monitor is not captured, and the
+runner logs a note when it spots one. Because it drives the real machine, an agent with a desktop
+session can act on anything on that screen — the point of self-hosting, and worth deciding
+deliberately.
 
 One macOS behavior to plan for on an **unattended** Mac: recent macOS versions periodically
 re-ask for screen-capture consent ("… is requesting to bypass the system private window picker
