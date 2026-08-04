@@ -105,6 +105,12 @@ export function buildContextData(
       kind: triggerKind(run),
       firedAt: run.createdAt,
       ...(source !== undefined ? { source } : {}),
+      // The sender's own event name, when the endpoint's verifier preset defines where it lives.
+      // Absent for every other trigger kind — and for an older backend that doesn't send it, which
+      // is why it is read defensively rather than assumed present on webhook runs.
+      ...(typeof run.triggerEvent === "string" && run.triggerEvent !== ""
+        ? { event: run.triggerEvent }
+        : {}),
     },
     workspaceDir: workspaceRoot,
   };

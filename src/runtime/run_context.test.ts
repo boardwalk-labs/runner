@@ -71,6 +71,22 @@ describe("buildContextData", () => {
     expect(buildContextData(run({ triggerKind: "mystery" }), "/w").trigger.kind).toBe("manual");
   });
 
+  it("carries the sender's event name when the claim has one, and omits it otherwise", () => {
+    const gh = buildContextData(
+      run({
+        triggerKind: "webhook",
+        actor: { type: "webhook", source: "wh_1" },
+        triggerEvent: "pull_request",
+      }),
+      "/w",
+    );
+    expect(gh.trigger.event).toBe("pull_request");
+    // Absent on every other kind — and on an older backend that sends null / nothing at all, where
+    // the field must not appear (the SDK's trigger schema is strict about its type).
+    expect(buildContextData(run({ triggerEvent: null }), "/w").trigger.event).toBeUndefined();
+    expect("event" in buildContextData(run({}), "/w").trigger).toBe(false);
+  });
+
   it("stamps a trigger source from the actor (webhook / cron / event)", () => {
     const webhook = buildContextData(
       run({ triggerKind: "webhook", actor: { type: "webhook", source: "wh_1" } }),
