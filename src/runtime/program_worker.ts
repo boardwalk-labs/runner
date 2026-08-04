@@ -348,10 +348,16 @@ export async function runProgramWorker(
   // program runs. Best-effort — a capture failure must never fail the run.
   if (capture !== undefined) {
     await capture.start().catch((err: unknown) => {
-      log.warn("screen_capture_start_failed", {
-        runId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      const reason = err instanceof Error ? err.message : String(err);
+      log.warn("screen_capture_start_failed", { runId, error: reason });
+      // Tell the AUTHOR too, not just the operator's log. A run whose recording silently never
+      // started looks identical to one that recorded fine until you go looking for the video, which
+      // is how a dead capture path survived unnoticed. The run continues either way: recording is
+      // observability, not correctness.
+      deps.onProgramLog?.(
+        "stderr",
+        `Session recording is unavailable for this run, which continues without it. Reason: ${reason}`,
+      );
     });
   }
   // Token metering is PER-LEAF: each agent() leaf reports its own tokens + model to the broker, which

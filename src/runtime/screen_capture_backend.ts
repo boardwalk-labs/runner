@@ -360,18 +360,6 @@ function execFileOut(cmd: string, args: readonly string[]): Promise<string> {
   });
 }
 
-/** A capture session that records nothing — used when no screen device is available, so a run
- *  proceeds unrecorded instead of failing (or, far worse, recording a camera). */
-async function inertCaptureSession(dir: string): Promise<CaptureSession> {
-  await rm(dir, { recursive: true, force: true }).catch(() => undefined);
-  return {
-    onSegment: () => undefined,
-    latestFrame: () => Promise.resolve(null),
-    latestThumbnail: () => Promise.resolve(null),
-    stop: () => Promise.resolve(),
-  };
-}
-
 export function makeCaptureBackend(cfg: CaptureConfig): CaptureBackend {
   // macOS captures the panel's NATIVE resolution, which the configured 1280x800 (an Xvfb assumption)
   // would mislabel on every segment. Resolved at start() and exposed through getters, since the
@@ -401,10 +389,10 @@ export function makeCaptureBackend(cfg: CaptureConfig): CaptureBackend {
         if (detected === null) {
           // NEVER fall back to an index: device 0 on a Mac is typically a CAMERA, so a guess here
           // would record the operator's face instead of their screen. No screen device ⇒ no capture.
-          log.warn("capture_unavailable_no_screen_device", {
-            hint: "install ffmpeg and grant Screen Recording to record a macOS session",
-          });
-          return inertCaptureSession(dir);
+          await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+          throw new Error(
+            "no screen capture device found (install ffmpeg, and grant Screen Recording to the app running the runner)",
+          );
         }
         screenIndex = detected;
         const size = await detectDarwinScreenSize();

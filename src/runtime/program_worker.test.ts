@@ -63,6 +63,8 @@ const DEFAULT_PROGRAM: ProgramRef = {
 
 interface Harness {
   deps: ProgramWorkerDeps;
+  /** User-visible run-log lines the worker emitted (the `log` run-event channel). */
+  programLogs: string[];
   /** Runtime-flusher lifecycle capture (start, timer-stop, and terminal-tail flush counts). */
   runtimeFlush: { started: number; stopped: number; flushedFinal: number };
   finalized: { status: string; output: unknown }[];
@@ -109,6 +111,7 @@ function harness(
     loseLease?: boolean;
     /** When true, buildHost returns a workspace handle (the manifest opted into persistence). */
     persistWorkspace?: boolean;
+    captureStartError?: string;
     /** When true, buildHost returns a per-run LSP handle (the worker always wires one on hosted runs). */
     withLsp?: boolean;
     /** When true, buildHost returns a browser-session manager (image ships the browser stack). */
@@ -159,6 +162,7 @@ function harness(
       return Promise.resolve();
     },
   };
+  const programLogs: string[] = [];
   const notStubbed = (what: string): never => {
     throw new Error(`${what} is not stubbed in this test`);
   };
@@ -209,9 +213,13 @@ function harness(
     ensured,
     order,
     terminalOrder,
+    programLogs,
     deps: {
       runs,
       versions,
+      onProgramLog: (_stream: "stdout" | "stderr", text: string) => {
+        programLogs.push(text);
+      },
       workspaceRoot: tmpRoot("bw-ws-"),
       programRoot: tmpRoot("bw-prog-"),
       fetchProgram: () =>
@@ -242,6 +250,14 @@ function harness(
               phaseActive = false;
             },
           },
+          ...(over.captureStartError !== undefined
+            ? {
+                capture: {
+                  start: () => Promise.reject(new Error(over.captureStartError ?? "")),
+                  stopAndFlush: () => Promise.resolve(),
+                },
+              }
+            : {}),
           ...(over.persistWorkspace === true
             ? {
                 workspace: {
@@ -619,5 +635,20 @@ describe("runProgramWorker — program failure (charges, then fails)", () => {
     const serialized = JSON.stringify(h.finalized[0]?.output);
     expect(serialized).not.toContain(secret);
     expect(serialized).toContain("[REDACTED]");
+  });
+});
+
+describe("runProgramWorker — recording unavailability is visible, never fatal", () => {
+  it("tells the author (run log) and still completes the run when capture can't start", async () => {
+    const h = harness({ captureStartError: "no screen capture device found (install ffmpeg)" });
+    const outcome = await runProgramWorker("run_1", h.deps);
+
+    // The run SUCCEEDS: recording is observability, not correctness.
+    expect(outcome.kind).toBe("completed");
+    // ...and the author is told why there is no video, rather than finding an absence later.
+    const notice = h.programLogs.find((l) => l.includes("Session recording is unavailable"));
+    expect(notice).toBeDefined();
+    expect(notice).toContain("no screen capture device found");
+    expect(notice).toContain("continues without it");
   });
 });
